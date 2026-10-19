@@ -18,7 +18,10 @@ import re
 import shutil
 from pathlib import Path
 
-from . import __version__
+import tomli_w
+
+from . import __version__, permissions
+from .config import load_repo_config
 
 HIVE_TOML = """\
 # Hive configuration (committed). See SPEC.md §16.
@@ -31,12 +34,23 @@ main = "{main}"
 
 [integration]
 review = "off"            # off | orchestrator | reviewer
-checks = []               # e.g. ["python -m pytest -q"]; run before integrating into main
+checks = []               # e.g. ["python -m pytest -q"]; run before integrating into main.
+                          # Keep them portable: the same hive.toml runs on Windows and POSIX.
+shell = "native"          # shell for checks: native (cmd.exe on Windows, sh elsewhere),
+                          # bash (Git Bash on Windows), powershell or cmd
 
 [orchestrator]
 standby = []              # agents that take over if the orchestrator is unavailable
 debounce_seconds = 90     # routine events are batched this long before waking the orchestrator
 heartbeat_hours = 4
+
+[permissions]             # shell commands agents may run without asking (re-run `hive init` after edits)
+preset = "standard"       # standard: read-only + tests + git history + build/run tools
+                          # strict:   read-only + tests + git history;  none: only your lists
+                          # Dangerous git and recursive deletes always need approval (README §17.4)
+allow = []                # extra command prefixes, e.g. ["docker compose ps", "npm run e2e"]
+approval = []             # extra prefixes that need the orchestrator's approval, e.g. ["npm publish"]
+deny = []                 # extra prefixes agents may never run
 
 # Override built-in roles or add custom ones:
 # [roles.docs-writer]
@@ -95,6 +109,30 @@ access), call `decision_request(kind="stuck", task_id=..., question=..., context
 **freezes every agent** until the user answers, so make the question self-contained and
 include concrete options.
 
+## Approving commands
+Workers can't run dangerous commands on their own: pushes, history rewrites (`reset --hard`,
+`clean`, `branch -D`, …), recursive or forced deletes. When one needs such a command, you get
+an `approval.requested` event, and the worker is usually blocked waiting for you. Decide
+quickly with `approval_decide(approval_id, approve, note)`.
+
+**Approve** when all of these hold:
+- the command is needed for the agent's current task;
+- it only affects the agent's own worktree and its own `hive/<agent>` branch, or files its
+  leases cover;
+- it is the narrowest command that does the job.
+
+**Deny, and say what to do instead in the note,** when:
+- it would touch other agents' work, shared branches or remote state they rely on;
+- it deletes more than the task needs;
+- a safer alternative exists, for example reverting one file instead of `reset --hard`.
+
+**Escalate** with `decision_request(kind="question", ...)` when the consequences are unclear,
+irreversible and outside the repository, or involve credentials or external services.
+
+Hive always refuses some commands, whatever you decide: pushing to `main` (integration goes
+through `lease_release`) and Hive's own user commands. Your own dangerous commands prompt the
+user in your session.
+
 ## Reports, not streams
 You do not see the agents' live output; only the user does. Information reaches you through
 reports:
@@ -138,16 +176,46 @@ You are one agent in a Hive fleet. Your roles and permissions: `whoami`.
    will touch, all in one call. Writes outside your leases are blocked. On a conflict, work on
    something else or ask the holder via `dm`.
 4. Make the change and run the relevant tests.
-5. `lease_release(commit_message=..., task_id=...)`. This commits your leased files, rebases on
-   main, runs the project checks, and integrates (or submits for review). Read the result:
+5. `lease_release(commit_message=..., task_id=...)`. This commits your leased files (only
+   those, even if you staged others), rebases on main, runs the project checks, and
+   integrates or submits for review. Always pass your `task_id`: it's required when review
+   is on. Read the result:
    - `integrated`: done.
+   - `integrated_unconfirmed`: your work is on main; Hive tells the server as soon as it's
+     reachable. Carry on.
    - `review_pending`: end your turn; you'll be woken after review.
    - `conflict` / `checks_failed`: fix it and release again.
+   - `uncovered_changes` / `uncovered_commits`: your changes or commits touch files your
+     leases don't cover. Lease those too (or revert them), then release again. Your leases
+     are still held.
+
    Never push to `main` yourself.
 6. `task_complete(task_id, result)`.
 7. `report_submit(summary, body, task_id)` covering what changed (files, commit), how you
    verified it, and anything left open. Be factual; the orchestrator verifies reports against
    the repository.
+
+## Commands that need approval
+Reading, tests, builds and ordinary git work (commit, merge, rebase, stash, checkout, …) run
+directly. Some commands need the orchestrator's approval:
+- pushes;
+- history rewrites (`reset --hard`, `clean`, `branch -D`, …);
+- recursive or forced deletes.
+
+If a command is blocked for that reason:
+1. Call `request_approval(command, reason, shell)` with the **exact** command and why it is
+   needed. Prefer the narrowest command that works. Set `shell` to the shell the command is
+   written for: `bash` (Git Bash on Windows), `powershell` or `cmd`. The default `auto` means
+   PowerShell on Windows and bash elsewhere.
+2. It waits for the decision. If approved, Hive runs the command once in your worktree and
+   returns the output.
+3. If it returns `pending`, end your turn; you'll be woken, then call
+   `run_approved(approval_id)`.
+4. If denied, follow the note.
+
+Never try to get around a block, for example by wrapping the command in `sh -c`,
+`cmd /c` or `powershell -Command`. Hive's own user commands and pushing to `main` are never
+allowed.
 
 ## Report requests
 When woken with a report request, answer it with `report_submit(request_id=..., ...)`. Cover
@@ -199,12 +267,19 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, "utf-8")
 
 
-def write_bundles(root: Path, hive_cmd: str = "hive") -> list[str]:
+def write_bundles(root: Path, hive_cmd: str = "hive", cfg: dict | None = None) -> list[str]:
     agent = root / ".hive" / "agent"
     claude, gemini = agent / "claude", agent / "gemini"
+    rules = permissions.build_rules(cfg if cfg is not None else load_repo_config(root))
     for d in (claude, gemini):
         if d.exists():
             shutil.rmtree(d)
+    for cls, r in rules.items():
+        _write(claude / "settings" / f"{cls}.json",
+               json.dumps(permissions.claude_settings(r, cls), indent=2) + "\n")
+        _write(gemini / "policies" / f"{cls}.toml",
+               "# Generated by `hive init` from hive.toml [permissions]; do not edit.\n"
+               + tomli_w.dumps(permissions.gemini_policy(r, cls)))
     mcp = {"command": hive_cmd, "args": ["mcp"]}
     skills = {"hive-orchestrator": ORCHESTRATOR_SKILL, "hive-worker": WORKER_SKILL}
 
@@ -343,20 +418,35 @@ def init_repo(root: Path, server: str, main: str = "main",
     return written, remove_legacy(root)
 
 
-def install_git_hook(repo: Path, hive_cmd: str = "hive") -> Path | None:
-    """Install the lease-checking pre-commit hook; never overwrites a foreign hook.
+GIT_HOOK = """\
+#!/bin/sh
+# Hive: lease check for commits made inside Hive agent sessions only. Your own commits
+# (no HIVE_SLOT) pass straight through and never need `hive` on PATH.
+[ -n "$HIVE_SLOT" ] || exit 0
+exec {hive_cmd} hook git-pre-commit
+"""
 
-    The hook is a no-op outside Hive agent sessions (it checks HIVE_SLOT)."""
+
+def install_git_hook(repo: Path, hive_cmd: str | None = None,
+                     quiet: bool = False) -> Path | None:
+    """Install (or refresh) the lease-checking pre-commit hook; never overwrites a foreign
+    hook. With no hive_cmd, the command of an existing Hive hook is kept."""
     import subprocess
     common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=repo,
                             capture_output=True, text=True, check=True).stdout.strip()
     hooks = (repo / common).resolve() / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
     hook = hooks / "pre-commit"
-    if hook.exists() and "hive hook git-pre-commit" not in hook.read_text("utf-8", "replace"):
-        print(f"Existing {hook} left untouched; add `{hive_cmd} hook git-pre-commit` to it.")
+    existing = hook.read_text("utf-8", "replace") if hook.exists() else ""
+    if existing and "hook git-pre-commit" not in existing:
+        if not quiet:
+            print(f"Existing {hook} left untouched; add `{hive_cmd or 'hive'} hook "
+                  "git-pre-commit` to it (only when HIVE_SLOT is set).")
         return None
-    hook.write_text(f"#!/bin/sh\nexec {hive_cmd} hook git-pre-commit\n", "utf-8")
+    if hive_cmd is None:
+        m = re.search(r"exec (.+) hook git-pre-commit", existing)
+        hive_cmd = m.group(1) if m else "hive"
+    hook.write_text(GIT_HOOK.format(hive_cmd=hive_cmd), "utf-8")
     try:
         hook.chmod(0o755)
     except OSError:

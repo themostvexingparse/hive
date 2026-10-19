@@ -160,6 +160,37 @@ reports = Table(
 )
 
 
+approvals = Table(
+    "approvals", metadata,  # dangerous commands a worker may run once the orchestrator agrees
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("agent", String(32), nullable=False, index=True),
+    Column("command", Text, nullable=False),
+    Column("shell", String(16), nullable=False),  # bash | powershell
+    Column("reason", Text, nullable=False),
+    Column("task_id", Integer, nullable=True),
+    # requested | approved | denied | executed | expired
+    Column("state", String(16), nullable=False, index=True),
+    Column("decided_by", String(32), nullable=True),
+    Column("note", Text, nullable=True),
+    Column("created", Float, nullable=False),
+    Column("decided_at", Float, nullable=True),
+    Column("executed_at", Float, nullable=True),
+    Column("exit_code", Integer, nullable=True),
+    Column("output", Text, nullable=True),
+)
+
+integrations = Table(
+    "integrations", metadata,  # grants: main may advance to `sha` only via this one-time token
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("token", String(64), nullable=False, unique=True),
+    Column("agent", String(32), nullable=False),
+    Column("sha", String(64), nullable=False),
+    Column("leases", JSON, nullable=False),  # {lease_id: fencing}
+    Column("task_id", Integer, nullable=True),
+    Column("state", String(16), nullable=False),  # granted | confirmed
+    Column("created", Float, nullable=False),
+)
+
 SQLITE_JOURNALS = ("wal", "delete", "truncate")
 
 

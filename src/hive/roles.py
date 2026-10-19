@@ -9,12 +9,13 @@ BASE_TOOLS = frozenset({
     "whoami", "roster", "post", "dm", "inbox", "ack", "task_list", "task_get", "task_claim",
     "task_update", "task_handoff", "task_complete", "report_stuck", "fleet_state", "repo_state",
     "lease_status", "status_read", "report_submit", "report_list", "report_get",
+    "request_approval", "run_approved", "approval_list",
 })
 LEASE_TOOLS = frozenset({"lease_acquire", "lease_extend", "lease_release"})
 ORCHESTRATOR_TOOLS = frozenset({
     "task_create", "task_assign", "task_cancel", "lease_force_release", "role_reassign",
     "status_publish", "decision_request", "review_verdict", "fleet_control", "report_request",
-    "await_events",
+    "await_events", "approval_decide",
 })
 ALL_TOOLS = BASE_TOOLS | LEASE_TOOLS | ORCHESTRATOR_TOOLS
 
@@ -24,6 +25,7 @@ IMMEDIATE_WAKE_EVENTS = (
     "user.message", "decision.answered", "task.completed", "task.failed", "task.blocked",
     "agent.stuck", "review.verdict", "agent.quota_exhausted", "agent.offline", "lease.expired",
     "merge.conflict", "fleet.started", "orchestrator.failover", "report.submitted",
+    "approval.requested",
 )
 
 
@@ -40,7 +42,7 @@ class Role:
     fallback_to: str | None = None
     wake_on: tuple[str, ...] = ("task.assigned", "review.requested", "review.verdict",
                                 "message.interrupt", "message.direct", "fleet.unfrozen",
-                                "report.requested")
+                                "report.requested", "approval.decided")
     prompt: str = ""
     # Fleet states in which holders of this role may work (SPEC §7 table).
     active_in: tuple[str, ...] = ("running",)

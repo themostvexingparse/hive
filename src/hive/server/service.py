@@ -21,10 +21,11 @@ import requests
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from .. import globs as G
+from .. import permissions as P
 from ..roles import RoleSet, load_roles, resolve_kind, role_set, validate_assignment, validate_fleet
 from . import db
-from .db import (agents, decisions, events, fleet, leases, messages, receipts, reports,
-                 status_feed, streams, tasks)
+from .db import (agents, approvals, decisions, events, fleet, integrations, leases, messages,
+                 receipts, reports, status_feed, streams, tasks)
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 RESERVED = {"user", "system", "admin"}
@@ -37,6 +38,7 @@ RATE_PER_MIN = 20
 LEASE_TTL_DEFAULT, LEASE_TTL_MAX = 600, 3600
 STREAM_LINE_MAX, STREAM_BATCH_MAX, STREAM_KEEP = 4000, 500, 20000
 SCHEDULE_FALLBACK_SECONDS = 15
+APPROVAL_TTL = 3600  # an approved command must be run within an hour
 
 
 class ApiError(Exception):
@@ -178,9 +180,23 @@ class Hive:
     def set_config(self, actor: Actor, config: dict) -> dict:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
-        load_roles(config.get("roles"))  # validate
+        try:
+            catalog = load_roles(config.get("roles"))
+            P.build_rules(config)
+        except (ValueError, TypeError) as e:
+            raise ApiError(400, "bad_config", str(e))
         with self._write() as c:
             self._fleet(c)
+            problems = []
+            for a in c.execute(select(agents.c.name, agents.c.roles)):
+                try:
+                    validate_assignment(list(a.roles), catalog)
+                except ValueError as e:
+                    problems.append(f"{a.name}: {e}")
+            if problems:
+                raise ApiError(409, "roles_in_use", "the new config doesn't fit current agents' "
+                               "roles; change their roles first: " + "; ".join(problems),
+                               problems=problems)
             self._set_fleet(c, config=config)
             self._emit(c, "config.updated", actor.name)
         return {"ok": True}
@@ -277,11 +293,14 @@ class Hive:
         with self._write() as c:
             a = self._agent(c, actor.name)
             was_offline = now() - a["last_seen"] >= self.offline_after
+            if was_offline:
+                # Lock the fleet row before touching agents, like every other writer does;
+                # the opposite order can deadlock on MySQL/Postgres.
+                f = self._fleet(c)
             c.execute(update(agents).where(agents.c.name == actor.name).values(
                 last_seen=now(), status="busy" if busy else "online", attached=attached))
             if was_offline:
                 self._emit(c, "agent.online", actor.name, name=actor.name)
-                f = self._fleet(c)
                 self._schedule(c, f)  # a returning agent may unblock waiting tasks
             f = self._fleet(c, lock=False)
         return {"fleet": self._public_fleet(f)}
@@ -382,7 +401,10 @@ class Hive:
             self._require_tool(f, actor, "task_create")
             for d in deps or []:
                 self._task(c, d)
-            hints = [G.normalize(p) for p in path_hints or []]
+            try:
+                hints = [G.normalize(p) for p in path_hints or []]
+            except ValueError as e:
+                raise ApiError(400, "bad_path_hints", str(e))
             state = "open" if f["state"] in ("running", "frozen", "paused") or kind == "plan" \
                 else "draft"
             tid = c.execute(insert(tasks).values(
@@ -468,9 +490,25 @@ class Hive:
                                                                           "task.progress")
             self._emit(c, ev, actor.name, "role:orchestrator", id=task_id, title=t["title"],
                        state=state or t["state"], note=note[:2000])
+            if state in ("failed", "cancelled"):
+                self._block_dependents(c, task_id, state)
             if state in ("failed", "cancelled", "done"):
                 self._schedule(c, f)
             return self._task(c, task_id)
+
+    def _block_dependents(self, c, task_id: int, why: str) -> None:
+        """Tasks waiting on a task that will never be done can't start: block them and tell
+        the orchestrator instead of leaving them open forever."""
+        for t in c.execute(select(tasks).where(tasks.c.state.in_(("open", "draft")))).fetchall():
+            if task_id not in (t.deps or []):
+                continue
+            note = f"[system] dependency #{task_id} was {why}"
+            c.execute(update(tasks).where(tasks.c.id == t.id).values(
+                state="blocked", updated=now(), notes=(t.notes + "\n" + note).strip()))
+            self._emit(c, "task.blocked", "system", "role:orchestrator", id=t.id,
+                       title=t.title, state="blocked",
+                       note=f"dependency #{task_id} was {why}; re-plan, or remove the "
+                            "dependency and reopen it")
 
     def handoff_task(self, actor: Actor, task_id: int, to: str, notes: str) -> dict:
         with self._write() as c:
@@ -522,6 +560,8 @@ class Hive:
             t = self._task(c, task_id)
             if t["state"] != "review":
                 raise ApiError(409, "bad_state", f"task #{task_id} is not in review")
+            if t["assignee"] == actor.name:
+                raise ApiError(403, "self_review", "you cannot review your own task")
             vals = {"approved": approve, "updated": now(),
                     "notes": (t["notes"] + f"\n[review {actor.name}: "
                               f"{'approved' if approve else 'changes requested'}] {notes}").strip()}
@@ -674,26 +714,44 @@ class Hive:
                   task_id: int | None = None, paths: list[str] | None = None) -> dict:
         if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise ApiError(400, "bad_sha", "sha must be a full 40-hex commit id")
+        try:
+            fences = {int(k): int(v) for k, v in (lease_fences or {}).items()}
+        except (TypeError, ValueError):
+            raise ApiError(400, "bad_leases", "leases must map lease ids to fencing numbers")
+        if not fences:
+            raise ApiError(400, "bad_leases", "integration requires the leases being released")
         with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "lease_release")
             if f["state"] in ("frozen", "paused"):
                 raise ApiError(423, "fleet_" + f["state"], f"fleet is {f['state']}")
             self._expire_leases(c, f)
-            for lid, fence in lease_fences.items():
-                l = self._own_lease(c, actor, int(lid))
-                if l["fencing"] != int(fence):
-                    raise ApiError(409, "stale_fence", f"lease #{lid} fencing token is stale")
-            if task_id and self._review_mode(f) != "off":
+            self._check_fences(c, actor, fences)
+            if self._review_mode(f) != "off":
+                if not task_id:
+                    raise ApiError(400, "task_required",
+                                   "review is required: pass the task_id of your task")
                 t = self._task(c, task_id)
-                if not t["approved"]:
+                if t["assignee"] != actor.name:
+                    raise ApiError(403, "not_assignee",
+                                   f"task #{task_id} is not assigned to you")
+                if t["state"] not in ("claimed", "in_progress", "review", "blocked"):
+                    raise ApiError(409, "bad_state", f"task #{task_id} is {t['state']}")
+                # An approval only counts for the review it was given in.
+                if not (t["state"] == "review" and t["approved"]):
                     reviewer = self._pick_reviewer(c, f, t)
                     c.execute(update(tasks).where(tasks.c.id == task_id).values(
-                        state="review", pending_sha=sha, reviewer=reviewer, updated=now()))
+                        state="review", pending_sha=sha, reviewer=reviewer, approved=False,
+                        updated=now()))
                     self._emit(c, "review.requested", actor.name, "*", id=task_id,
                                title=t["title"], reviewer=reviewer, sha=sha,
                                branch=t["branch"], assignee=actor.name)
                     return {"status": "review_pending", "reviewer": reviewer}
+            token = secrets.token_urlsafe(24)
+            c.execute(insert(integrations).values(
+                token=token, agent=actor.name, sha=sha,
+                leases={str(k): v for k, v in fences.items()}, task_id=task_id,
+                state="granted", created=now()))
             repo = self._cfg(f, "repo")
         github, main = repo.get("github"), repo.get("main", "main")
         if github and self.github_token:
@@ -707,25 +765,47 @@ class Hive:
             if r.status_code >= 300:
                 raise ApiError(502, "github_error", f"GitHub returned {r.status_code}: "
                                                     f"{r.text[:300]}")
-            return self.confirm_integration(actor, sha, lease_fences, task_id, paths)
-        return {"status": "push_main", "main": main}
+            return self.confirm_integration(actor, token, sha, paths)
+        return {"status": "push_main", "main": main, "grant": token}
 
-    def confirm_integration(self, actor: Actor, sha: str, lease_fences: dict[str, int],
-                            task_id: int | None = None, paths: list[str] | None = None) -> dict:
+    def _check_fences(self, c, actor: Actor, fences: dict[int, int]) -> None:
+        for lid, fence in fences.items():
+            l = self._own_lease(c, actor, lid)
+            if l["fencing"] != fence:
+                raise ApiError(409, "stale_fence", f"lease #{lid} fencing token is stale")
+
+    def confirm_integration(self, actor: Actor, grant: str, sha: str,
+                            paths: list[str] | None = None) -> dict:
+        """Record that main advanced to `sha`. Only valid with the one-time grant integrate()
+        issued to this agent for this sha, while its leases are still held."""
+        if not grant:
+            raise ApiError(400, "grant_required", "confirm requires the grant from integrate")
         with self._write() as c:
-            self._fleet(c)
-            for lid in lease_fences:
-                c.execute(update(leases).where(and_(leases.c.id == int(lid),
-                                                    leases.c.state == "active"))
-                          .values(state="released"))
+            f = self._fleet(c)
+            g = row(c.execute(select(integrations).where(integrations.c.token == grant))
+                    .first())
+            if g is None or g["agent"] != actor.name:
+                raise ApiError(403, "bad_grant", "unknown integration grant")
+            if g["state"] != "granted":
+                raise ApiError(409, "grant_used", "this integration was already confirmed")
+            if g["sha"] != sha:
+                raise ApiError(409, "grant_mismatch", "grant was issued for a different commit")
+            fences = {int(k): int(v) for k, v in g["leases"].items()}
+            self._check_fences(c, actor, fences)
+            c.execute(update(integrations).where(integrations.c.id == g["id"])
+                      .values(state="confirmed"))
+            c.execute(update(leases).where(and_(leases.c.id.in_(list(fences)),
+                                                leases.c.state == "active"))
+                      .values(state="released"))
             self._set_fleet(c, main_sha=sha)
+            task_id = g["task_id"]
             self._emit(c, "main.advanced", actor.name, "*", sha=sha, by=actor.name,
                        paths=(paths or [])[:500], task_id=task_id)
             if task_id:
                 t = self._task(c, task_id)
                 if t["state"] == "review" and t["approved"]:
                     c.execute(update(tasks).where(tasks.c.id == task_id).values(
-                        state="done", pending_sha=None, updated=now()))
+                        state="done", pending_sha=None, approved=False, updated=now()))
                     self._emit(c, "task.completed", actor.name, "*", id=task_id,
                                title=t["title"], assignee=t["assignee"], result="integrated")
                     self._schedule(c, self._fleet(c))
@@ -744,6 +824,9 @@ class Hive:
         role = "orchestrator" if mode == "orchestrator" else resolve_kind(
             "review", {r for a in pool for r in a["roles"]}, cat)
         cands = [a for a in pool if role in a["roles"] and a["name"] != t["assignee"]]
+        if not cands:  # e.g. the only reviewer is the author: the orchestrator reviews instead
+            cands = [a for a in pool if "orchestrator" in a["roles"]
+                     and a["name"] != t["assignee"]]
         cands.sort(key=lambda a: (a["quota_until"] > now(), -a["last_seen"]))
         return cands[0]["name"] if cands else None
 
@@ -789,23 +872,35 @@ class Hive:
             if action == "pause":
                 if f["state"] == "paused":
                     return self._public_fleet(f)
-                self._set_fleet(c, state="paused", prev_state=f["state"],
+                # While paused, an open blocking decision records that the fleet was frozen or
+                # awaiting approval underneath; prev_state keeps the state to return to after
+                # that decision is answered.
+                blocked = f["state"] in ("frozen", "awaiting_approval")
+                self._set_fleet(c, state="paused",
+                                prev_state=f["prev_state"] if blocked else f["state"],
                                 frozen_at=f["frozen_at"] or now())
             elif action == "resume":
                 if f["state"] != "paused":
                     raise ApiError(409, "bad_state", "fleet is not paused")
-                target = f["prev_state"] or "running"
-                vals = {"state": target, "prev_state": None}
-                if target != "frozen":
+                if f["blocking_decision"]:
+                    d = row(c.execute(select(decisions).where(
+                        decisions.c.id == f["blocking_decision"])).first())
+                    if d and d["kind"] == "start_approval":
+                        self._thaw_leases(c, f)
+                        self._set_fleet(c, state="awaiting_approval", frozen_at=None)
+                    else:  # still frozen: lease clocks stay stopped until it is answered
+                        self._set_fleet(c, state="frozen")
+                else:
+                    target = f["prev_state"] or "running"
                     self._thaw_leases(c, f)
-                    vals["frozen_at"] = None
-                self._set_fleet(c, **vals)
-                if target == "running":
-                    self._emit(c, "fleet.unfrozen", actor.name, "*", reason="resumed")
+                    self._set_fleet(c, state=target, prev_state=None, frozen_at=None)
+                    if target == "running":
+                        self._emit(c, "fleet.unfrozen", actor.name, "*", reason="resumed")
             else:
                 raise ApiError(400, "bad_action", "action must be pause or resume")
             nf = self._fleet(c)
             self._emit(c, "fleet.state", actor.name, "*", state=nf["state"])
+            self._schedule(c, nf)
             return self._public_fleet(nf)
 
     def reset_fleet(self, actor: Actor) -> dict:
@@ -859,6 +954,13 @@ class Hive:
         return did
 
     def _activate_blocking(self, c, f: dict, did: int, kind: str) -> None:
+        if f["state"] == "paused":
+            # Record it; resume enters frozen/awaiting_approval. prev_state stays the state to
+            # return to once this decision is answered.
+            self._set_fleet(c, blocking_decision=did)
+            if f["frozen_at"] is None:
+                self._set_fleet(c, frozen_at=now())
+            return
         if kind == "start_approval":
             self._set_fleet(c, state="awaiting_approval", blocking_decision=did)
             self._emit(c, "fleet.state", "system", "*", state="awaiting_approval")
@@ -889,27 +991,31 @@ class Hive:
             c.execute(update(decisions).where(decisions.c.id == did).values(
                 state="answered", answer=answer, note=note, answered_at=now()))
             approved = answer.strip().lower() in ("approve", "approved", "yes", "y", "ok")
+            paused = f["state"] == "paused"
             if d["kind"] == "start_approval":
                 if approved:
-                    c.execute(update(tasks).where(tasks.c.state == "draft")
-                              .values(state="open", updated=now()))
-                    self._set_fleet(c, state="running", blocking_decision=None)
-                    self._emit(c, "fleet.state", actor.name, "*", state="running")
+                    self._open_drafts(c, actor.name)
+                target = "running" if approved else "planning"
+                if paused:  # stay paused; resume returns to the new state
+                    self._set_fleet(c, prev_state=target, blocking_decision=None)
                 else:
-                    self._set_fleet(c, state="planning", blocking_decision=None)
-                    self._emit(c, "fleet.state", actor.name, "*", state="planning")
+                    self._set_fleet(c, state=target, blocking_decision=None)
+                    self._emit(c, "fleet.state", actor.name, "*", state=target)
             elif d["blocking"]:
                 target = f["prev_state"] or "running"
-                self._thaw_leases(c, f)
-                self._set_fleet(c, state=target, prev_state=None, frozen_at=None,
-                                blocking_decision=None)
                 if d["task_id"]:
                     c.execute(update(tasks).where(and_(tasks.c.id == d["task_id"],
                                                        tasks.c.state == "blocked"))
                               .values(state="in_progress", updated=now()))
-                self._emit(c, "fleet.unfrozen", actor.name, "*", decision_id=did,
-                           answer=answer, note=note)
-                self._emit(c, "fleet.state", actor.name, "*", state=target)
+                if paused:  # stay paused; resume thaws and returns to `target`
+                    self._set_fleet(c, prev_state=target, blocking_decision=None)
+                else:
+                    self._thaw_leases(c, f)
+                    self._set_fleet(c, state=target, prev_state=None, frozen_at=None,
+                                    blocking_decision=None)
+                    self._emit(c, "fleet.unfrozen", actor.name, "*", decision_id=did,
+                               answer=answer, note=note)
+                    self._emit(c, "fleet.state", actor.name, "*", state=target)
             elif d["kind"] == "role_change" and approved:
                 spec = json.loads(d["context"])
                 a = self._agent(c, spec["agent"])
@@ -927,6 +1033,18 @@ class Hive:
                     self._activate_blocking(c, f, nxt.id, nxt.kind)
             self._schedule(c, self._fleet(c))
             return row(c.execute(select(decisions).where(decisions.c.id == did)).first())
+
+    def _open_drafts(self, c, by: str) -> None:
+        """Plan approved: drafts become open; pre-assigned drafts are handed to their agent."""
+        for t in c.execute(select(tasks).where(tasks.c.state == "draft")).fetchall():
+            if t.assignee:
+                c.execute(update(tasks).where(tasks.c.id == t.id)
+                          .values(state="claimed", updated=now()))
+                self._emit(c, "task.assigned", by, "*", id=t.id, title=t.title,
+                           assignee=t.assignee, kind=t.kind, previous=None)
+            else:
+                c.execute(update(tasks).where(tasks.c.id == t.id)
+                          .values(state="open", updated=now()))
 
     def _thaw_leases(self, c, f: dict) -> None:
         """Extend active leases by the time the fleet spent frozen (SPEC §7)."""
@@ -1021,6 +1139,9 @@ class Hive:
                 r = row(c.execute(select(reports).where(reports.c.id == request_id)).first())
                 if r is None or r["kind"] != "request":
                     raise ApiError(404, "no_such_request", f"no report request #{request_id}")
+                if r["target"] != actor.name and not actor.is_admin:
+                    raise ApiError(403, "not_target",
+                                   f"report request #{request_id} is addressed to {r['target']}")
                 c.execute(update(reports).where(reports.c.id == request_id)
                           .values(state="answered"))
             rid = c.execute(insert(reports).values(
@@ -1049,6 +1170,124 @@ class Hive:
         if r is None:
             raise ApiError(404, "no_such_report", f"no report #{rid}")
         return r
+
+    # ------------------------------------------------------------------ command approvals
+
+    def _check_command(self, f: dict, command: str) -> None:
+        """Hard limits that no approval can lift (also enforced by the daemon)."""
+        rules = P.build_rules(f.get("config") or {})["worker"]
+        hit = P.matches(command, rules["forbidden"])
+        if hit:
+            raise ApiError(403, "forbidden_command",
+                           f"`{hit}` is never allowed for agents, even with approval")
+        main = self._cfg(f, "repo").get("main", "main")
+        if P.pushes_to(command, main):
+            raise ApiError(403, "forbidden_command",
+                           f"pushing to {main} is not allowed; integration goes through "
+                           "lease_release")
+
+    def request_approval(self, actor: Actor, command: str, reason: str, shell: str = "bash",
+                         task_id: int | None = None) -> dict:
+        command = (command or "").strip()
+        if not command or len(command) > 4000:
+            raise ApiError(400, "bad_command", "command must be 1..4000 characters")
+        if not reason.strip():
+            raise ApiError(400, "bad_reason", "explain why the command is needed")
+        if shell not in ("bash", "powershell", "cmd", "sh"):
+            raise ApiError(400, "bad_shell", "shell must be bash, powershell, cmd or sh")
+        with self._write() as c:
+            f = self._fleet(c)
+            self._require_tool(f, actor, "request_approval")
+            self._require_active(f, actor)
+            self._check_command(f, command)
+            aid = c.execute(insert(approvals).values(
+                agent=actor.name, command=command, shell=shell, reason=reason[:4000],
+                task_id=task_id, state="requested", created=now())).inserted_primary_key[0]
+            self._emit(c, "approval.requested", actor.name, "role:orchestrator", id=aid,
+                       agent=actor.name, command=command, shell=shell, reason=reason[:2000],
+                       task_id=task_id)
+            return row(c.execute(select(approvals).where(approvals.c.id == aid)).first())
+
+    def _approval(self, c, aid: int, write: bool = True) -> dict:
+        a = row(c.execute(select(approvals).where(approvals.c.id == aid)).first())
+        if a is None:
+            raise ApiError(404, "no_such_approval", f"no approval #{aid}")
+        if a["state"] == "approved" and now() - (a["decided_at"] or 0) > APPROVAL_TTL:
+            if write:
+                c.execute(update(approvals).where(approvals.c.id == aid)
+                          .values(state="expired"))
+            a["state"] = "expired"
+        return a
+
+    @staticmethod
+    def _approval_view(actor: Actor, a: dict) -> dict:
+        """Command output may contain secrets: only the user and the requester see it."""
+        if not actor.is_admin and actor.name != a["agent"]:
+            a = {**a, "output": None}
+        return a
+
+    def decide_approval(self, actor: Actor, aid: int, approve: bool, note: str = "") -> dict:
+        with self._write() as c:
+            f = self._fleet(c)
+            self._require_tool(f, actor, "approval_decide")
+            a = self._approval(c, aid)
+            if a["agent"] == actor.name:
+                raise ApiError(403, "self_approval", "an agent cannot approve its own request")
+            if a["state"] != "requested":
+                raise ApiError(409, "bad_state", f"approval #{aid} is {a['state']}")
+            if approve:
+                self._check_command(f, a["command"])
+            c.execute(update(approvals).where(approvals.c.id == aid).values(
+                state="approved" if approve else "denied", decided_by=actor.name,
+                note=note[:4000], decided_at=now()))
+            self._emit(c, "approval.decided", actor.name, f"agent:{a['agent']}", id=aid,
+                       approve=approve, note=note[:2000], command=a["command"],
+                       by=actor.name)
+            return self._approval_view(actor, self._approval(c, aid))
+
+    def claim_approval(self, actor: Actor, aid: int) -> dict:
+        """One-time use: marks an approved command as executing and returns it."""
+        with self._write() as c:
+            f = self._fleet(c)
+            self._require_active(f, actor)
+            a = self._approval(c, aid)
+            if a["agent"] != actor.name:
+                raise ApiError(403, "not_requester", f"approval #{aid} belongs to {a['agent']}")
+            if a["state"] != "approved":
+                raise ApiError(409 if a["state"] != "expired" else 410,
+                               "approval_" + a["state"], f"approval #{aid} is {a['state']}")
+            self._check_command(f, a["command"])
+            c.execute(update(approvals).where(approvals.c.id == aid).values(
+                state="executed", executed_at=now()))
+            a["state"] = "executed"
+            return a
+
+    def approval_result(self, actor: Actor, aid: int, exit_code: int, output: str) -> dict:
+        with self._write() as c:
+            self._fleet(c)
+            a = self._approval(c, aid)
+            if a["agent"] != actor.name or a["state"] != "executed":
+                raise ApiError(409, "bad_state", f"approval #{aid} was not claimed by you")
+            c.execute(update(approvals).where(approvals.c.id == aid).values(
+                exit_code=int(exit_code), output=(output or "")[-8000:]))
+            self._emit(c, "approval.executed", actor.name, "role:orchestrator", id=aid,
+                       agent=actor.name, command=a["command"], exit_code=int(exit_code))
+        return {"ok": True}
+
+    def get_approval(self, actor: Actor, aid: int) -> dict:
+        with self._read() as c:  # expiry is shown here, recorded when someone tries to use it
+            return self._approval_view(actor, self._approval(c, aid, write=False))
+
+    def list_approvals(self, actor: Actor, state: str | None = None,
+                       agent: str | None = None, limit: int = 50) -> list[dict]:
+        q = select(approvals).order_by(approvals.c.id.desc()).limit(max(1, min(limit, 200)))
+        if state:
+            q = q.where(approvals.c.state.in_(state.split(",")))
+        if agent:
+            q = q.where(approvals.c.agent == agent)
+        with self._read() as c:
+            return [self._approval_view(actor, row(r))
+                    for r in reversed(c.execute(q).fetchall())]
 
     # ------------------------------------------------------------------ maintenance
 
@@ -1145,8 +1384,11 @@ class Hive:
             new_roles = ["orchestrator"] + [r for r in s["roles"] if r in cat
                                             and not cat[r].can_code and r != "orchestrator"]
             self._apply_roles(c, "system", name, new_roles, s["roles"])
-            self._apply_roles(c, "system", orch, [r for r in s["roles"] if r != "orchestrator"],
-                              a["roles"])
+            # The old orchestrator takes over the standby's roles and keeps its own other ones.
+            old_roles = list(dict.fromkeys(
+                [r for r in s["roles"] if r != "orchestrator"]
+                + [r for r in a["roles"] if r != "orchestrator"]))
+            self._apply_roles(c, "system", orch, old_roles, a["roles"])
             c.execute(update(tasks).where(and_(tasks.c.assignee == name,
                                                tasks.c.state.in_(ACTIVE_TASK_STATES)))
                       .values(assignee=None, state="open", updated=t))

@@ -32,7 +32,9 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @app.errorhandler(OperationalError)
     def _db_busy(e: OperationalError):
         # SQLite under contention (or a slow network filesystem): ask the client to retry.
-        if "locked" in str(e.orig).lower() or "busy" in str(e.orig).lower():
+        msg = str(e.orig).lower()
+        if any(k in msg for k in ("locked", "busy", "deadlock", "lock wait timeout",
+                                  "could not serialize")):
             resp = jsonify({"error": "db_busy", "message": "database busy; retry shortly"})
             resp.headers["Retry-After"] = "1"
             return resp, 503
@@ -50,7 +52,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
                 token = header[7:] if header.startswith("Bearer ") else ""
                 if not token:
                     raise ApiError(401, "no_token", "Authorization: Bearer <token> required")
-                if hmac.compare_digest(token, admin_token):
+                if hmac.compare_digest(token.encode("utf-8"), admin_token.encode("utf-8")):
                     g.actor = ADMIN
                 elif admin:
                     raise ApiError(403, "forbidden", "admin token required")
@@ -73,6 +75,20 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
             return int(request.args.get(name, default))
         except ValueError:
             raise ApiError(400, "bad_arg", f"{name} must be an integer")
+
+    def num(value, name: str, kind=int, optional: bool = False):
+        """Convert a JSON value to int/float, or answer 400 instead of crashing."""
+        if optional and value in (None, ""):
+            return None
+        try:
+            return kind(value)
+        except (TypeError, ValueError):
+            raise ApiError(400, "bad_arg", f"{name} must be a number")
+
+    def nums(values, name: str) -> list[int]:
+        if not isinstance(values, list):
+            raise ApiError(400, "bad_arg", f"{name} must be a list of numbers")
+        return [num(v, name) for v in values]
 
     def me() -> Actor:
         return g.actor
@@ -122,7 +138,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @auth()
     def quota():
         b = body()
-        return jsonify(hive.report_quota(me(), float(b.get("until", 0)), b.get("detail", "")))
+        return jsonify(hive.report_quota(me(), num(b.get("until", 0), "until", float),
+                                         b.get("detail", "")))
 
     # ---------------------------------------------------------------- events & messages
     @app.get(f"{api}/events")
@@ -134,10 +151,10 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @auth()
     def post_message():
         b = body()
-        thread = b.get("thread_id")
         return jsonify(hive.post_message(
             me(), b.get("body", ""), b.get("channel", "#general"), b.get("recipient"),
-            b.get("priority", "normal"), int(thread) if thread else None)), 201
+            b.get("priority", "normal"),
+            num(b.get("thread_id"), "thread_id", optional=True))), 201
 
     @app.get(f"{api}/messages")
     @auth()
@@ -149,7 +166,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @app.post(f"{api}/messages/ack")
     @auth()
     def ack():
-        return jsonify(hive.ack(me(), [int(i) for i in body().get("ids", [])]))
+        return jsonify(hive.ack(me(), nums(body().get("ids", []), "ids")))
 
     # ---------------------------------------------------------------- tasks
     @app.post(f"{api}/tasks")
@@ -158,8 +175,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
         b = body()
         return jsonify(hive.create_task(
             me(), b.get("title", ""), b.get("spec", ""), b.get("kind", "code"),
-            [int(d) for d in b.get("deps", [])], list(b.get("path_hints", [])),
-            int(b.get("priority", 0)), b.get("assignee"))), 201
+            nums(b.get("deps", []), "deps"), list(b.get("path_hints", [])),
+            num(b.get("priority", 0), "priority"), b.get("assignee"))), 201
 
     @app.get(f"{api}/tasks")
     @auth()
@@ -213,17 +230,17 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @auth()
     def stuck():
         b = body()
-        tid = b.get("task_id")
-        return jsonify(hive.report_stuck(me(), int(tid) if tid else None, b.get("details", "")))
+        return jsonify(hive.report_stuck(me(), num(b.get("task_id"), "task_id", optional=True),
+                                         b.get("details", "")))
 
     # ---------------------------------------------------------------- leases & integration
     @app.post(f"{api}/leases")
     @auth()
     def acquire():
         b = body()
-        tid = b.get("task_id")
-        return jsonify(hive.acquire_lease(me(), list(b.get("globs", [])), int(b.get("ttl", 600)),
-                                          b.get("reason", ""), int(tid) if tid else None)), 201
+        return jsonify(hive.acquire_lease(me(), list(b.get("globs", [])),
+                                          num(b.get("ttl", 600), "ttl"), b.get("reason", ""),
+                                          num(b.get("task_id"), "task_id", optional=True))), 201
 
     @app.get(f"{api}/leases")
     @auth()
@@ -234,7 +251,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @app.post(f"{api}/leases/<int:lid>/extend")
     @auth()
     def extend(lid):
-        return jsonify(hive.extend_lease(me(), lid, int(body().get("ttl", 600))))
+        return jsonify(hive.extend_lease(me(), lid, num(body().get("ttl", 600), "ttl")))
 
     @app.post(f"{api}/leases/<int:lid>/release")
     @auth()
@@ -250,26 +267,27 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @auth()
     def integrate():
         b = body()
-        tid = b.get("task_id")
+        if not isinstance(b.get("leases", {}), dict):
+            raise ApiError(400, "bad_leases", "leases must be an object")
         return jsonify(hive.integrate(me(), b.get("sha", ""), b.get("base_sha", ""),
-                                      dict(b.get("leases", {})), int(tid) if tid else None,
+                                      dict(b.get("leases", {})),
+                                      num(b.get("task_id"), "task_id", optional=True),
                                       list(b.get("paths", []))))
 
     @app.post(f"{api}/integrate/confirm")
     @auth()
     def integrate_confirm():
         b = body()
-        tid = b.get("task_id")
-        return jsonify(hive.confirm_integration(me(), b.get("sha", ""), dict(b.get("leases", {})),
-                                                int(tid) if tid else None,
+        return jsonify(hive.confirm_integration(me(), str(b.get("grant") or ""),
+                                                str(b.get("sha") or ""),
                                                 list(b.get("paths", []))))
 
     @app.post(f"{api}/integrate/conflict")
     @auth()
     def integrate_conflict():
         b = body()
-        tid = b.get("task_id")
-        return jsonify(hive.report_conflict(me(), int(tid) if tid else None, b.get("detail", "")))
+        return jsonify(hive.report_conflict(me(), num(b.get("task_id"), "task_id", optional=True),
+                                            b.get("detail", "")))
 
     # ---------------------------------------------------------------- fleet & decisions
     @app.get(f"{api}/fleet")
@@ -293,10 +311,10 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @auth()
     def request_decision():
         b = body()
-        tid = b.get("task_id")
         return jsonify(hive.request_decision(
             me(), b.get("kind", "question"), b.get("question", ""), list(b.get("options", [])),
-            b.get("context", ""), int(tid) if tid else None, b.get("freeze"))), 201
+            b.get("context", ""), num(b.get("task_id"), "task_id", optional=True),
+            b.get("freeze"))), 201
 
     @app.get(f"{api}/decisions")
     @auth()
@@ -335,23 +353,61 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
         return jsonify(hive.read_stream(me(), request.args.get("agent"), arg_int("since_id"),
                                         arg_int("limit", 500)))
 
+    # ---------------------------------------------------------------- command approvals
+    @app.post(f"{api}/approvals")
+    @auth()
+    def request_approval():
+        b = body()
+        return jsonify(hive.request_approval(me(), b.get("command", ""), b.get("reason", ""),
+                                             b.get("shell", "bash"),
+                                             num(b.get("task_id"), "task_id", optional=True))), 201
+
+    @app.get(f"{api}/approvals")
+    @auth()
+    def list_approvals():
+        return jsonify(hive.list_approvals(me(), request.args.get("state"),
+                                           request.args.get("agent"), arg_int("limit", 50)))
+
+    @app.get(f"{api}/approvals/<int:aid>")
+    @auth()
+    def get_approval(aid):
+        return jsonify(hive.get_approval(me(), aid))
+
+    @app.post(f"{api}/approvals/<int:aid>/decide")
+    @auth()
+    def decide_approval(aid):
+        b = body()
+        return jsonify(hive.decide_approval(me(), aid, bool(b.get("approve")),
+                                            b.get("note", "")))
+
+    @app.post(f"{api}/approvals/<int:aid>/claim")
+    @auth()
+    def claim_approval(aid):
+        return jsonify(hive.claim_approval(me(), aid))
+
+    @app.post(f"{api}/approvals/<int:aid>/result")
+    @auth()
+    def approval_result(aid):
+        b = body()
+        return jsonify(hive.approval_result(me(), aid, num(b.get("exit_code", -1), "exit_code"),
+                                            b.get("output", "")))
+
     # ---------------------------------------------------------------- reports
     @app.post(f"{api}/reports/requests")
     @auth()
     def request_report():
         b = body()
-        tid = b.get("task_id")
         return jsonify(hive.request_report(me(), b.get("target", ""), b.get("about", ""),
-                                           int(tid) if tid else None)), 201
+                                           num(b.get("task_id"), "task_id", optional=True))), 201
 
     @app.post(f"{api}/reports")
     @auth()
     def submit_report():
         b = body()
-        tid, rid = b.get("task_id"), b.get("request_id")
         return jsonify(hive.submit_report(me(), b.get("summary", ""), b.get("body", ""),
-                                          int(tid) if tid else None,
-                                          int(rid) if rid else None)), 201
+                                          num(b.get("task_id"), "task_id", optional=True),
+                                          num(b.get("request_id"), "request_id",
+                                              optional=True))), 201
 
     @app.get(f"{api}/reports")
     @auth()

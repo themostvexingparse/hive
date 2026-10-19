@@ -534,6 +534,11 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
 2. **Update the machines too.** Agent machines and the server should run the same Hive
    version: `uv tool install --force /path/to/hive` on each, then re-run `hive init` in the
    repository and commit the refreshed bundles.
+   - **This release requires it.** Integration confirmations now carry a one-time grant from
+     the server. A daemon from before this change gets its work into `main`, but its leases
+     stay held until it's upgraded.
+   - **Git hooks refresh themselves.** `hive up` refreshes the pre-commit hook in each slot's
+     repository, so your own commits no longer need `hive` on PATH.
 3. **Database changes:** on start-up the server creates any **missing tables**, but it does
    **not** alter existing ones.
    - Every version so far only adds tables, so upgrades need no manual steps.

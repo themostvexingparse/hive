@@ -35,8 +35,9 @@ def build_server(slot: str | None = None) -> MCPServer:
 
     def call(name: str, **args) -> str:
         try:
-            r = d.tool(name, args, timeout=float(args.get("timeout_seconds") or 0) + 120
-                       if name == "await_events" else 600)
+            # Blocking tools wait up to their own limit, plus time to run an approved command.
+            wait = float(args.get("timeout_seconds") or args.get("wait_seconds") or 0)
+            r = d.tool(name, args, timeout=wait + 900)
         except Exception as e:
             raise ToolError(f"Hive daemon unreachable: {e}. Is `hive up` running?")
         if "error" in r:
@@ -224,6 +225,40 @@ def build_server(slot: str | None = None) -> MCPServer:
         digest of events and messages. Urgent events return within seconds; routine progress is
         batched. Call this whenever you have nothing else to do. The user can interrupt it."""
         return call("await_events", timeout_seconds=timeout_seconds)
+
+    @tool
+    def request_approval(command: str, reason: str,
+                         shell: Literal["auto", "bash", "powershell", "cmd"] = "auto",
+                         task_id: int | None = None, wait_seconds: int = 600) -> str:
+        """Ask the orchestrator to approve a command that needs approval (pushes, history
+        rewrites, recursive or forced deletes). Give the exact command and why it is needed and
+        what it affects. shell is the shell the command is written for (auto: PowerShell on
+        Windows, bash elsewhere). Waits up to wait_seconds (using no tokens) for the decision; if
+        approved, Hive runs the command once in your worktree and returns its output. If no
+        decision arrives in time, end your turn; you will be woken, then call run_approved."""
+        return call("request_approval", command=command, reason=reason, shell=shell,
+                    task_id=task_id, wait_seconds=wait_seconds)
+
+    @tool
+    def run_approved(approval_id: int) -> str:
+        """Run a command the orchestrator approved (once, in your worktree) and get its
+        output."""
+        return call("run_approved", approval_id=approval_id)
+
+    @tool
+    def approval_list(state: str | None = None, agent: str | None = None,
+                      limit: int = 20) -> str:
+        """List command approval requests (state: requested, approved, denied, executed,
+        expired; comma-separated)."""
+        return call("approval_list", state=state, agent=agent, limit=limit)
+
+    @tool
+    def approval_decide(approval_id: int, approve: bool, note: str = "") -> str:
+        """Approve or deny an agent's request to run a dangerous command (orchestrator). Approve
+        only if it is needed for the agent's task and limited to its own work; prefer telling
+        the agent a safer alternative in the note. Escalate to the user with decision_request
+        when unsure."""
+        return call("approval_decide", approval_id=approval_id, approve=approve, note=note)
 
     @tool
     def report_request(agent: str, about: str, task_id: int | None = None) -> str:

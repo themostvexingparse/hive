@@ -9,7 +9,8 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-_WILDCARD = re.compile(r"[*?\[]")
+# Supported wildcards: `**`, `*` and `?`. `[` is an ordinary character (no character classes).
+_WILDCARD = re.compile(r"[*?]")
 
 
 def normalize(path: str) -> str:
@@ -72,8 +73,10 @@ def literal_prefix(glob: str) -> list[str]:
 
 
 def overlaps(a: str, b: str) -> bool:
-    """Conservative: may report overlap for disjoint globs, never misses a real overlap."""
-    a, b = normalize(a), normalize(b)
+    """Conservative: may report overlap for disjoint globs, never misses a real overlap.
+    Case-insensitive, because on Windows and macOS `src/App.py` and `src/app.py` are the same
+    file (on Linux this only makes leases slightly more conservative)."""
+    a, b = normalize(a).casefold(), normalize(b).casefold()
     if is_literal(a) and is_literal(b):
         pa, pb = a.split("/"), b.split("/")
         n = min(len(pa), len(pb))

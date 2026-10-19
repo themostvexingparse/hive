@@ -45,7 +45,7 @@ operating manual.
 14. [Leases and git integration](#14-leases-and-git-integration)
 15. [Reviews](#15-reviews)
 16. [Reports](#16-reports)
-17. [What the agents see: MCP tools, hooks, skills](#17-what-the-agents-see-mcp-tools-hooks-skills)
+17. [What the agents see: MCP tools, hooks, skills, permissions](#17-what-the-agents-see-mcp-tools-hooks-skills)
 18. [Web dashboard](#18-web-dashboard)
 19. [Command reference](#19-command-reference)
 20. [Configuration reference](#20-configuration-reference)
@@ -119,6 +119,15 @@ operating manual.
 Claude or Gemini accounts can run side by side on one computer. You don't need one computer
 per account.
 
+**Platforms.** Agent machines can run **Windows, macOS or Linux**, mixed freely in one fleet.
+- **Paths:** `~/.hive` means `%USERPROFILE%\.hive` on Windows.
+- **Commands in this guide:** they work in bash and in PowerShell unless both variants are
+  shown.
+- **Agents' shells:** agents use bash (Git Bash on Windows, which comes with Git for
+  Windows), PowerShell or cmd.exe. Hive's permission rules and approval checks cover all
+  three (§17.4).
+- **The server:** any WSGI host, usually Linux.
+
 ---
 
 ## 3. Installation
@@ -129,6 +138,20 @@ On **every** agent machine (and wherever you run admin commands):
 uv tool install /path/to/hive          # puts the `hive` command on PATH
 hive --version
 ```
+
+**On Windows, run `install.bat` from the project folder instead** (double-clicking it works
+too). It installs or re-installs Hive cleanly:
+- checks for uv (offering to install it) and git;
+- stops running `hive.exe` processes after asking, since Windows can't replace a running
+  executable;
+- rebuilds even when the version number hasn't changed, so stale builds never survive;
+- verifies the installed command and that it's the one on your PATH.
+
+| Option | Effect |
+|---|---|
+| `/test` | Run the test suite first; install only if it passes. |
+| `/yes` | Answer every question with yes (unattended). |
+| `/nopath` | Leave your PATH alone. |
 
 `hive` **must be on PATH**: the agent CLIs launch `hive mcp` and `hive hook …` by name. If it
 can't be, run `hive init --hive-cmd /full/path/to/hive` (see §5) so the bundles use an
@@ -154,7 +177,8 @@ The server needs three things:
 ### 4.1 Locally (trials, single machine)
 
 ```sh
-hive server --admin-token "$(openssl rand -hex 24)" --db sqlite:///hive.db --port 8765
+python -c "import secrets; print(secrets.token_urlsafe(32))"     # generate an admin token
+hive server --admin-token <that token> --db sqlite:///hive.db --port 8765
 ```
 
 | Option | Default |
@@ -206,9 +230,9 @@ It creates or updates:
 
 | Path | Purpose | Commit it? |
 |---|---|---|
-| `hive.toml` | Fleet configuration: review policy, checks, standby orchestrator, roles (§20.1). Created only if missing. | yes |
-| `.hive/agent/claude/` | **Claude Code plugin**: `.claude-plugin/plugin.json`, `.mcp.json` (hive MCP server), `hooks/hooks.json`, `skills/hive-orchestrator/SKILL.md`, `skills/hive-worker/SKILL.md`. | yes |
-| `.hive/agent/gemini/` | **Gemini CLI extension**: `gemini-extension.json` (MCP server, `HIVE.md` context), `hooks/hooks.json`, the same skills. | yes |
+| `hive.toml` | Fleet configuration: review policy, checks, standby orchestrator, shell-command permissions, roles (§20.1). Created only if missing. | yes |
+| `.hive/agent/claude/` | **Claude Code plugin**: `.claude-plugin/plugin.json`, `.mcp.json` (hive MCP server), `hooks/hooks.json`, `skills/hive-orchestrator/SKILL.md`, `skills/hive-worker/SKILL.md`, plus per-role permission files `settings/{orchestrator,worker}.json` (§17.4). | yes |
+| `.hive/agent/gemini/` | **Gemini CLI extension**: `gemini-extension.json` (MCP server, `HIVE.md` context), `hooks/hooks.json`, the same skills, plus per-role policy files `policies/{orchestrator,worker}.toml` (§17.4). | yes |
 | `.hive/plans/` | Place for written plans. | yes |
 | `.hive/README.md` | Explains the folder. | yes |
 | `.gitignore` | Adds `.hive/orchestrator/` (the orchestrator's private memory). | yes |
@@ -228,7 +252,9 @@ Re-run `hive init` after upgrading Hive to refresh the bundles. Then commit and 
 upload the configuration:
 
 ```sh
-git add -A && git commit -m "Add Hive" && git push
+git add -A
+git commit -m "Add Hive"
+git push
 hive admin push-config        # uploads hive.toml to the server (run inside the repo)
 ```
 
@@ -265,9 +291,15 @@ What `hive join` does:
 2. **Creates a git worktree** for the slot next to your clone:
    `/path/to/<clone-name>-claude-2`, on branch `hive/claude-2`, starting from `origin/main`.
    Use `--worktree PATH` to choose the location.
-3. **Installs a git `pre-commit` hook** in the clone; worktrees share it. The hook does nothing
-   outside agent sessions. Inside one, it refuses commits of files the agent hasn't leased. An
-   existing foreign `pre-commit` hook is never overwritten: Hive tells you which line to add.
+   - **Re-joining:** if a branch `hive/claude-2` already exists with commits that aren't in
+     `main`, `hive join` refuses rather than resetting it. Integrate those commits or delete
+     the branch first.
+3. **Installs a git `pre-commit` hook** in the clone; worktrees share it.
+   - **Your own commits:** the hook exits immediately outside agent sessions, so they never
+     need `hive` on PATH.
+   - **Agent sessions:** it refuses commits of files the agent hasn't leased.
+   - **Existing hooks:** a foreign `pre-commit` hook is never overwritten; Hive tells you
+     which line to add.
 4. **Creates the slot's private CLI config folder**, by default `~/.hive/accounts/claude-2`
    (`--config-dir` to change it).
 5. **Saves the slot** to `~/.hive/machine.toml`.
@@ -285,18 +317,26 @@ What `hive join` does:
 
 Each slot uses its own config folder, so log the matching account into it once, interactively:
 
+**bash / zsh (macOS, Linux, Git Bash):**
 ```sh
-# Claude slot
 cd /path/to/clone-claude-2
 CLAUDE_CONFIG_DIR=~/.hive/accounts/claude-2 claude      # log in, then exit
-
-# Gemini slot
 cd /path/to/clone-gemini-1
 GEMINI_CLI_HOME=~/.hive/accounts/gemini-1 gemini        # log in, then exit
 ```
 
-PowerShell equivalent:
-`$env:CLAUDE_CONFIG_DIR="$HOME\.hive\accounts\claude-2"; claude`.
+**PowerShell (Windows):**
+```powershell
+cd C:\path\to\clone-claude-2
+$env:CLAUDE_CONFIG_DIR = "$HOME\.hive\accounts\claude-2"; claude; Remove-Item Env:CLAUDE_CONFIG_DIR
+cd C:\path\to\clone-gemini-1
+$env:GEMINI_CLI_HOME = "$HOME\.hive\accounts\gemini-1"; gemini; Remove-Item Env:GEMINI_CLI_HOME
+```
+
+**cmd.exe (Windows):** `set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.hive\accounts\claude-2" && claude`.
+Close the window afterwards, so the variable doesn't leak into other commands.
+
+`hive join` prints these commands for your platform with the real paths filled in.
 
 Use a different account per slot. That is the point of separate folders.
 
@@ -313,8 +353,12 @@ there.
 hive up
 ```
 
-1. **Daemon:** starts in the background. Its log goes to `~/.hive/logs/daemon.log`, not the
-   terminal.
+1. **Daemon:**
+   - It first fetches every slot's identity and roles from the server, retrying for up to
+     30 s. If the server can't be reached, `hive up` stops with a clear message instead of
+     guessing.
+   - It then starts in the background. Its log goes to `~/.hive/logs/daemon.log`, not the
+     terminal.
 2. **CLI launch:** opens the orchestrator's **native CLI in your terminal** with Hive attached
    for this session:
    - Claude: `claude --plugin-dir <worktree>/.hive/agent/claude --settings <allow hive tools>
@@ -726,10 +770,14 @@ role.
   `lease_acquire(globs=[…])`.
 - **All or nothing:** it gets every requested path or none, which rules out deadlocks. On a
   conflict, the response lists who holds what and until when.
-- **Glob syntax:** repo-relative POSIX. `src/app.py`, `src/api/**`, `docs/*.md`. A path
-  without wildcards also covers everything beneath it.
+- **Glob syntax:** repo-relative POSIX. `src/app.py`, `src/api/**`, `docs/*.md`.
+  - Wildcards: `**`, `*` and `?`. `[` is an ordinary character.
+  - A path without wildcards also covers everything beneath it.
 - **Overlap checks are conservative:** two leases are refused if their fixed prefixes
-  overlap, even when their files are actually disjoint.
+  overlap, even when their files are actually disjoint. The checks ignore case, because
+  `src/App.py` and `src/app.py` are the same file on Windows and macOS.
+- **Other checkouts are off-limits:** agents can't edit files in another slot's worktree or
+  in your own clone of the repository.
 - **Lifetime:** default 600 s (min 30, max 3600). The daemon extends leases automatically
   while it runs, so they expire only if a machine dies or loses contact. Expired and revoked
   leases are announced to the holder and the orchestrator.
@@ -744,9 +792,16 @@ role.
 
 ### 14.3 What `lease_release(commit_message, task_id)` does
 
-1. **Commit:** commits only the changed files covered by the agent's leases or `write_globs`.
-   The commit message gets trailers: `Hive-Agent`, `Hive-Task`, `Hive-Fence`. Other changed
-   files are set aside (stashed) and restored afterwards; the result lists them.
+1. **Commit:** commits only the changed files covered by the agent's leases or `write_globs`,
+   even if the agent staged other files. The commit message gets trailers: `Hive-Agent`,
+   `Hive-Task`, `Hive-Fence`.
+   - **Other changed files** are set aside (stashed) and restored afterwards; the result lists
+     them. Only that stash entry is ever popped; the agent's own stashes are untouched.
+   - **Nothing covered (`uncovered_changes`):** if nothing would be integrated but there *are*
+     changed files outside the leases, the release stops and **keeps the leases**. The agent
+     must lease those files (or revert them) and release again.
+   - **Earlier commits (`uncovered_commits`):** if commits already on the agent's branch touch
+     files its leases don't cover, the release stops the same way.
 2. **Rebase:** `git fetch` and rebase onto `origin/main`. On a conflict:
    - the rebase is aborted;
    - the commit and leases are kept;
@@ -754,11 +809,25 @@ role.
    - the agent must merge and call `lease_release` again.
 3. **Checks:** runs every command in `[integration] checks`. On failure, the leases are kept
    and the output tail is returned to the agent.
+   - **Which shell:** by default checks run in the machine's native shell, cmd.exe on
+     Windows and `/bin/sh` elsewhere.
+   - **Mixed fleets:** one `hive.toml` serves every machine, so write portable commands
+     (`python -m pytest -q`, `npm test`), or set `[integration] shell` to `bash` (Git Bash on
+     Windows) or `powershell` so every machine uses the same shell.
+   - **Time limit:** each check may run for up to 30 minutes.
 4. **Push:** pushes the agent's branch `hive/<slot>`.
 5. **Integrate:**
-   - **Local mode** (default): the daemon pushes `HEAD:main` with a plain, non-forced push,
-     which fails if `main` moved. In that case it re-fetches and retries from step 2, up to 3
-     times. It then confirms to the server.
+   - **Local mode** (default):
+     1. The server grants a **one-time integration grant**, bound to this agent, this commit,
+        and its leases with their fencing numbers.
+     2. The daemon pushes `HEAD:main` with a plain, non-forced push, which fails if `main`
+        moved. In that case it re-fetches and retries from step 2, up to 3 times.
+     3. It then confirms to the server with the grant. Without a valid grant, nobody can
+        release leases or move the recorded `main`.
+
+     **If the server can't be reached for the confirmation,** the daemon retries. The result
+     is `integrated_unconfirmed`, and the daemon keeps resending the confirmation in the
+     background until it gets through.
    - **GitHub mode** (§14.4): the server fast-forwards `main` through the GitHub API.
 6. **Done:**
    - the leases are released;
@@ -766,7 +835,8 @@ role.
    - every other slot whose worktree is clean rebases onto it immediately;
    - slots with uncommitted work get a notice and rebase at their next release.
 
-With review enabled, step 5 becomes "submit for review" instead (§15).
+With review enabled, step 5 becomes "submit for review" instead (§15). The `task_id` is then
+required, and it must be the agent's own task.
 
 `lease_release(abandon=true)` frees the leases without integrating anything.
 
@@ -793,15 +863,19 @@ Set `[integration] review` in `hive.toml`:
 |---|---|
 | `off` (default) | Work integrates as soon as checks pass. |
 | `orchestrator` | The orchestrator reviews every integration. |
-| `reviewer` | An agent with the reviewer role reviews. If none exists, the orchestrator does. |
+| `reviewer` | An agent with the reviewer role reviews. If no reviewer other than the author exists, the orchestrator does. |
 
 **Flow with review on:**
 1. The programmer's `lease_release` pushes its branch and the task enters **review**. The
-   programmer **keeps its leases**.
+   programmer **keeps its leases**. The `task_id` must be passed and must be the
+   programmer's own task, so review can't be skipped.
 2. The reviewer is woken with the commit to inspect (`git diff origin/main...<sha>`) and calls
-   `review_verdict(task_id, approve, notes)`.
+   `review_verdict(task_id, approve, notes)`. Nobody can review their own task.
 3. **Approve:** the programmer's daemon re-runs the release automatically (rebase, checks,
-   integrate), and the task becomes **done**.
+   integrate) and the task becomes **done**.
+   - **If the programmer is mid-turn,** the daemon waits for the turn to end first, so
+     half-finished edits are never committed.
+   - **The approval is single-use:** it only counts for that review.
 4. **Changes requested:** the task returns to `in_progress`, and the programmer is woken with
    the notes.
 
@@ -840,6 +914,7 @@ Every agent has the **base set**:
 | `task_list`, `task_get`, `task_claim`, `task_update`, `task_handoff`, `task_complete` | work on tasks |
 | `report_stuck(details, task_id)` | ask for help (may lead to a freeze) |
 | `report_submit`, `report_list`, `report_get` | reports |
+| `request_approval(command, reason, shell, task_id, wait_seconds)`, `run_approved(id)`, `approval_list` | run a dangerous command with the orchestrator's approval (§17.4) |
 | `lease_status`, `repo_state`, `fleet_state`, `status_read` | look around |
 
 **Coding roles** add: `lease_acquire`, `lease_extend`, `lease_release`.
@@ -850,6 +925,7 @@ Every agent has the **base set**:
 - `decision_request(kind, question, options, context, task_id, freeze)`;
 - `status_publish(summary, body, level)`;
 - `report_request`;
+- `approval_decide(approval_id, approve, note)`;
 - `review_verdict`;
 - `lease_force_release`;
 - `role_reassign`;
@@ -906,6 +982,139 @@ The hooks ship inside the bundles and call `hive hook <event> --vendor <cli>`.
 
 Both are plain Markdown in `.hive/agent/*/skills/`. Edit them to tune behaviour; `hive init`
 overwrites the bundles, so keep your own copy of any edits.
+
+### 17.4 Shell-command permissions
+
+Headless agents can't answer "may I run this command?" prompts; an unapproved command is
+simply refused. So `hive init` pre-approves the commands agents routinely need, **per
+session**:
+
+| CLI | Generated file | Attached with |
+|---|---|---|
+| Claude Code | `.hive/agent/claude/settings/{orchestrator,worker}.json` | `--settings` |
+| Gemini CLI | `.hive/agent/gemini/policies/{orchestrator,worker}.toml` | `--policy` |
+
+- **Which file:** the orchestrator gets the `orchestrator` set; every other role gets the
+  `worker` set.
+- **Scope:** nothing is added to your own CLI settings, so your normal sessions are unaffected.
+- **Hive's own tools:** always allowed.
+
+Commands fall into three tiers. The aim is to need as little human intervention as possible
+while staying safe.
+
+**1. Allowed: run directly.** With the `standard` preset:
+
+| Group | Examples | Orchestrator | Workers |
+|---|---|---|---|
+| Reading | `git status/diff/log/show/blame/fetch/reflog`, `ls`, `cat`, `grep`, `rg`, `find`, `tree`, PowerShell `Get-ChildItem`/`Get-Content`/`Select-String` | ✓ | ✓ |
+| Tests and checks | `pytest`, `python -m pytest`, `npm test`, `cargo test`, `go test`, `ruff check`, `mypy`, `tsc --noEmit`, plus every command in `[integration] checks` | ✓ | ✓ |
+| Git history work | `git add`, `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `checkout`, `switch`, `restore`, `stash`, `tag`, `mv`, `rm`, `am`, `apply` | – | ✓ |
+| Building and running | `python`, `node`, `uv run`, `npm run`, `npm install`, `npx`, `make`, `cargo build`, `go build`, formatters and linters, `mkdir`, `touch`, `cp`, `mv`, plain `rm`, `Copy-Item`/`Move-Item`/`New-Item`/`Remove-Item` | – | ✓ |
+
+**2. Needs approval: dangerous commands.** These publish, discard or rewrite history, or delete
+recursively:
+
+| Group | Commands |
+|---|---|
+| Git | `git push`, `git reset --hard`, `git clean`, `git checkout --`/`-f`, `git restore --source`, `git branch -D`, `git update-ref`, `git filter-branch`/`filter-repo`, `git reflog expire`, `git gc --prune`, `git stash drop`/`clear`, `git rebase --root` |
+| Recursive or forced deletes | POSIX `rm -r`/`-rf`/`-f`/`--recursive`, `find -delete`, `find -exec rm …`, `… \| xargs rm -rf`; cmd.exe `del /s /q /f`, `rd /s`, `rmdir /s`; PowerShell `Remove-Item -Recurse`/`-Force` (any abbreviation, any position) and its aliases `rm`, `del`, `ri`, `rd` |
+| Elevation and permissions | `sudo`, `su`, `doas`, `runas`, `gsudo`, `Start-Process -Verb RunAs`; `chmod -R`, `chown -R`, `takeown`, `Set-Acl`, `icacls` with `/grant`, `/deny`, `/t`, … |
+| Machine-level | `dd`, `mkfs`, `shred`, `format`, `diskpart`, `Format-Volume`, `Clear-Disk`, `reg delete`, `Remove-ItemProperty`, `shutdown`, `Stop-Computer`, `Restart-Computer`, `Set-ExecutionPolicy` |
+
+**How Hive recognises these in every shell:** it parses each command itself instead of
+matching text prefixes only:
+- **Compound commands** are split, while separators inside quotes are left alone. So
+  `git commit -m "fix; rm -rf x"` is just a commit.
+- **Nested shells are unwrapped:** `bash -c`, `cmd /c`, `powershell -Command` and
+  `-EncodedCommand`.
+- **Program names are normalised:** `C:\…\git.exe` → `git`, `/bin/rm` → `rm`.
+- **Dangerous flags are found in any position:** `Remove-Item build -Recurse` is caught just
+  like `rm -rf build`.
+
+The CLIs' own permission files hold the common prefix forms as a first layer. Hive's hook is
+the authority.
+
+**How approval works for workers:** **the orchestrator approves, not you.**
+1. The worker's CLI blocks the command, and the hook tells it to call
+   `request_approval(command, reason)`.
+2. The orchestrator is woken within seconds (`approval.requested`). It approves or denies with
+   a note, following criteria in its skill:
+   - the command is needed for the task;
+   - it's limited to the agent's own worktree and branch;
+   - it's the narrowest command that works.
+
+   It escalates to you with a question only when consequences are unclear or reach outside
+   the repository.
+3. **The Hive daemon runs the exact approved command once** in the worker's worktree, with a
+   10-minute limit, and returns the output to the agent. It uses the shell the command was
+   written for:
+   - `bash`: Git Bash on Windows;
+   - `powershell`: pwsh if installed, otherwise Windows PowerShell;
+   - `cmd`: Windows only.
+
+   The hook tells the agent which shell it used. `auto` means PowerShell on Windows and bash
+   elsewhere.
+
+**Why the worker usually doesn't need a new turn:** `request_approval` waits for the decision
+(up to 10 minutes, using no tokens), so the worker usually gets the result within the same
+turn. If no decision arrives, it ends its turn, is woken when the decision lands, and calls
+`run_approved(id)`.
+
+**Approval rules:**
+- An approval is single-use and expires after an hour.
+- The requesting agent can't approve itself.
+- Everything is recorded on the server: who asked, why, who decided, the exit code and the
+  output.
+- **Who sees the output:** only the requesting agent and you. Other agents, including the
+  orchestrator, see the request and the decision but not the output, which can contain
+  secrets.
+- **Git options don't hide a command:** git global options (`git -C dir …`, `git -c k=v …`)
+  are looked through, so `git -C . push origin main` is still recognised as a push to `main`.
+
+The **orchestrator's own** dangerous commands prompt *you* in its interactive session, since
+there's nobody else to approve them.
+
+**3. Never: no approval possible.**
+- **Hive's user commands:** `hive decide`, `admin`, `start`, `say`, `pause`, `resume`,
+  `reset`, `init`, `join`, `up`. An agent must never answer your decisions or speak as you,
+  even on a machine where you're logged in as admin.
+- **Pushing to `main`,** including `--all` and `--mirror`. Integration goes through
+  `lease_release`.
+
+These are checked by the hook, by the server when a request is made, and by the daemon again
+just before it runs an approved command.
+
+**Anything not covered** by these lists is refused in headless sessions. In an interactive
+session (the orchestrator, or `hive chat`), you're asked instead.
+
+**Customize** in `hive.toml`, then re-run `hive init` and commit:
+
+```toml
+[permissions]
+preset = "standard"     # standard | strict (no build/run tools) | none (only your lists)
+allow = ["docker compose ps", "npm run e2e"]
+approval = ["npm publish", "terraform apply"]   # extra commands the orchestrator must approve
+deny = ["kubectl delete"]                       # extra commands agents may never run
+```
+
+- **Prefix format:** entries are command prefixes without wildcards. Hive translates each one
+  per CLI: `"git diff"` becomes `Bash(git diff *)` and `PowerShell(git diff *)` for Claude, and
+  `commandPrefix = "git diff"` for Gemini.
+- **Stricter tier wins:** a command can't be allowed if it's also listed for approval or
+  never-allowed, and the built-in dangerous commands always need approval, whatever the
+  preset.
+
+**Trust implications:**
+- **Interpreters run anything.** `python`, `node`, `npx`, `uv run`, `npm run` and `make` can
+  run arbitrary code. That's why `strict` leaves them out.
+- **Pattern rules aren't a security boundary.** Both CLIs' docs say so: an agent could reach
+  the same program another way, e.g. `sh -c '…'`. The workers' skill forbids working around a
+  block. The hard protections are:
+  - the admin token, needed for decisions;
+  - lease checks on integration;
+  - the server's and the daemon's checks on approved commands.
+
+  Keep the admin token off machines that host worker agents.
 
 ---
 
@@ -981,11 +1190,18 @@ main = "main"                # integration branch
 [integration]
 review = "off"               # off | orchestrator | reviewer   (§15)
 checks = ["python -m pytest -q"]   # run before every integration; must exit 0
+shell = "native"             # native (cmd.exe on Windows, sh elsewhere) | bash | powershell | cmd
 
 [orchestrator]
 standby = ["claude-2"]       # failover candidates, in order (§11.3)
 debounce_seconds = 90        # batching window for routine events
 heartbeat_hours = 4          # headless orchestrator only: periodic check-in
+
+[permissions]                # shell-command tiers for agents (§17.4)
+preset = "standard"          # standard | strict | none
+allow = ["docker compose ps"]          # run directly
+approval = ["npm publish"]             # run once the orchestrator approves
+deny = ["kubectl delete"]              # never
 
 [roles.docs-writer]          # custom roles / overrides (§11.2)
 can_code = true
@@ -1103,11 +1319,13 @@ feed, reports, live-output lines.
   including file contents it reads, ends up there. Use HTTPS, protect the admin token, and
   keep real credentials out of the repository. Reports and status updates are instructed
   never to contain secrets.
-- **Permission modes:** headless workers default to `acceptEdits` (Claude) or `auto_edit`
-  (Gemini). Edits are auto-approved, but shell commands not covered by the account's own
-  allow rules may be refused. If your checks or tests need shell access, either add allow
-  rules in that slot's config folder, or join with `--permission-mode bypassPermissions` /
-  `yolo`. That is a real trust decision: the agent can then run any command on that machine.
+- **Permissions:** headless workers run in `acceptEdits` (Claude) or `auto_edit` (Gemini) mode,
+  with the session permission files from §17.4. File edits are auto-approved, while lease
+  enforcement still blocks edits outside leases. Shell commands follow the three tiers of
+  §17.4: allowed, approved by the orchestrator, or never. Anything else is refused. Widen
+  `[permissions]` rather than joining with `--permission-mode bypassPermissions` / `yolo`.
+  That flag lets the agent run any command on that machine and skips the approval step;
+  Hive's hook still blocks the never-allowed commands.
 - **Prompt injection:** other agents' messages are marked as untrusted information, and the
   skills say so explicitly. Hive's hard limits (leases, roles, freeze, decisions) are enforced
   by the server and hooks, not by the model's goodwill.

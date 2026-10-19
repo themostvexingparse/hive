@@ -71,6 +71,8 @@ def test_launch_commands_attach_capabilities_per_session(tmp_path):
 def test_hive_tool_names_across_clis():
     assert is_hive_tool("mcp__plugin_hive_hive__lease_acquire")
     assert is_hive_tool("mcp__hive__post")
+    assert is_hive_tool("mcp_hive_await_events")      # Gemini fully-qualified name
+    assert not is_hive_tool("mcp_hivemind_post")
     assert is_hive_tool("await_events")
     assert not is_hive_tool("mcp__other__post")
     assert not is_hive_tool("Write")

@@ -95,9 +95,18 @@ def world(tmp_path, monkeypatch, request):
 
 
 def read_log(path):
-    if not path.exists():
-        return []
-    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    """Entries from every fake agent's log (`<path>.<slot>`). A line still being written by a
+    running agent is incomplete; it is skipped and picked up by a later read."""
+    out = []
+    for f in sorted(path.parent.glob(path.name + ".*")):
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    return out
 
 
 def test_full_cycle(world):
@@ -146,6 +155,62 @@ def test_full_cycle(world):
     with pytest.raises(Exception) as e:
         orch.get("/streams")
     assert getattr(e.value, "status", None) == 403
+
+
+def test_dangerous_command_runs_after_orchestrator_approval(world):
+    """A worker is blocked from `rm -r`, asks for approval, the orchestrator approves, and the
+    daemon runs the exact command once in the worker's worktree."""
+    admin, daemon = world["admin"], world["daemon"]
+    prog = daemon.slots["prog1"]
+    wait_for(lambda: all(a["online"] for a in admin.get("/agents")), what="agents online")
+    admin.post("/fleet/start", {"goal": "x"})
+    d = wait_for(lambda: admin.get("/decisions", state="open"), what="start approval")[0]
+    admin.post(f"/decisions/{d['id']}/answer", {"answer": "approve"})
+    wait_for(lambda: all(t["state"] == "done" for t in admin.get("/tasks")), timeout=90,
+             what="task done")
+    daemon.refresh(prog)
+    build = Path(prog.cfg.worktree) / "build"
+    (build / "sub").mkdir(parents=True)
+    (build / "sub" / "out.o").write_text("x")
+
+    # The hook blocks it with instructions; forbidden commands are blocked outright.
+    v = daemon.handle_hook("prog1", "pre_tool", {"tool_name": "Bash",
+                                                 "tool_input": {"command": "rm -r build"}})
+    assert "request_approval" in v["deny"]
+    v = daemon.handle_hook("prog1", "pre_tool", {"tool_name": "Bash", "tool_input": {
+        "command": "git status && git push origin main"}})
+    assert "lease_release" in v["deny"]
+    v = daemon.handle_hook("prog1", "pre_tool", {"tool_name": "Bash",
+                                                 "tool_input": {"command": "git commit -m x"}})
+    assert v == {}  # ordinary git history work runs directly
+    with pytest.raises(Exception):
+        daemon.call_tool("prog1", "request_approval", {"command": "hive decide 1 approve",
+                                                       "reason": "x"})
+
+    result = {}
+
+    def ask():
+        result["r"] = daemon.call_tool("prog1", "request_approval", {
+            "command": "rm -r build", "reason": "remove stale build output",
+            "wait_seconds": 60})
+
+    th = threading.Thread(target=ask)
+    th.start()
+    pending = wait_for(lambda: admin.get("/approvals", state="requested"),
+                       what="approval request")[0]
+    assert build.exists()  # nothing runs before the decision
+    daemon.call_tool("orch", "approval_decide", {"approval_id": pending["id"],
+                                                 "approve": True, "note": "fine"})
+    th.join(70)
+    r = result["r"]
+    assert r["decision"] == "approved" and r["executed"] and r["exit_code"] == 0, r
+    assert not build.exists()
+    assert admin.get(f"/approvals/{pending['id']}")["state"] == "executed"
+    with pytest.raises(Exception):  # one-time use
+        daemon.call_tool("prog1", "run_approved", {"approval_id": pending["id"]})
+    # The blocked call consumed the decision, so no extra wake was queued for it.
+    assert not any(t["kind"] == "approval.decided"
+                   for t in daemon.store.pending_triggers("prog1"))
 
 
 def test_interactive_orchestrator_await_and_reports(world):

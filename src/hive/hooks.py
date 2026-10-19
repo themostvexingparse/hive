@@ -30,6 +30,11 @@ def format_output(vendor: str, raw_event: str, verdict: dict) -> dict | None:
             return {"decision": "deny", "reason": verdict["deny"]}
         return {"hookSpecificOutput": {"hookEventName": raw_event, "permissionDecision": "deny",
                                        "permissionDecisionReason": verdict["deny"]}}
+    if "ask" in verdict:
+        if vendor == "gemini":
+            return None
+        return {"hookSpecificOutput": {"hookEventName": raw_event, "permissionDecision": "ask",
+                                       "permissionDecisionReason": verdict["ask"]}}
     if "block" in verdict:
         if vendor == "gemini":
             return {"decision": "deny", "reason": verdict["block"]}
@@ -70,8 +75,10 @@ def git_pre_commit() -> int:
     d = LocalDaemon()
     if not os.environ.get("HIVE_SLOT") or not d.slot:
         return 0  # commits by the user or the daemon itself
-    staged = subprocess.run(["git", "diff", "--cached", "--name-only"], capture_output=True,
-                            text=True).stdout.split()
+    # -z: NUL-separated and unquoted, so paths with spaces or non-ASCII names stay intact.
+    staged = [p for p in subprocess.run(["git", "diff", "--cached", "--name-only", "-z"],
+                                        capture_output=True, text=True, encoding="utf-8",
+                                        errors="replace").stdout.split("\0") if p]
     try:
         r = d.post("/check-paths", {"paths": staged}, timeout=5)
     except Exception:

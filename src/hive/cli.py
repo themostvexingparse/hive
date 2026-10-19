@@ -167,12 +167,20 @@ def cmd_join(a):
         name=a.name, vendor=a.vendor, token=a.token, worktree=str(wt), config_dir=config_dir,
         permission_mode=a.permission_mode or "")]
     save_machine_config(cfg)
-    login = (f"CLAUDE_CONFIG_DIR={config_dir} claude" if a.vendor == "claude"
-             else f"GEMINI_CLI_HOME={config_dir} gemini")
+    var = "CLAUDE_CONFIG_DIR" if a.vendor == "claude" else "GEMINI_CLI_HOME"
     print(f"Slot {a.name} ready: worktree {wt}\n"
           f"Log this slot's account in once (interactive), from the worktree:\n"
-          f"  cd {wt} && {login}\n"
-          f"(or simply `hive chat {a.name}` while `hive up` runs). Then run `hive up`.")
+          + login_instructions(var, config_dir, str(wt), a.vendor)
+          + f"\n(or simply `hive chat {a.name}` while `hive up` runs). Then run `hive up`.")
+
+
+def login_instructions(var: str, config_dir: str, worktree: str, cli: str) -> str:
+    """Shell-appropriate commands to start a CLI with a private config folder."""
+    if os.name == "nt":
+        return (f"  PowerShell:  cd \"{worktree}\"; $env:{var} = \"{config_dir}\"; {cli}; "
+                f"Remove-Item Env:{var}\n"
+                f"  cmd.exe:     cd /d \"{worktree}\" && set \"{var}={config_dir}\" && {cli}")
+    return f"  cd '{worktree}' && {var}='{config_dir}' {cli}"
 
 
 def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = None,
@@ -187,15 +195,33 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
     session = session or str(uuid.uuid4())
     store.put(slot.name, "session", session)
     env = wake.slot_env(slot, cfg.local_url, cfg.local_secret)
-    wake.ensure_gemini_extension(slot, env)
+    err = wake.ensure_gemini_extension(slot, env)
+    if err:
+        print(f"Warning: {err}. Hive tools will be missing in this session.")
     if initial is None and orchestrator:
         initial = wake.ORCH_RESUME_PROMPT if resume else wake.ORCH_FIRST_PROMPT
-    cmd = wake.build_interactive_command(slot, session, resume, initial)
+    cmd = wake.build_interactive_command(slot, session, resume, initial,
+                                         "orchestrator" if orchestrator else "worker")
     p = subprocess.run(wake.resolve(cmd), cwd=slot.worktree, env=env)
     if p.returncode != 0 and resume:
         # The stored session may be gone (e.g. different machine); start a fresh one next time.
         store.put(slot.name, "session", None)
     return p.returncode
+
+
+def refresh_git_hooks(cfg) -> None:
+    """Rewrite Hive's pre-commit hook in each slot's repository (older versions blocked the
+    user's own commits when `hive` was not on PATH). Foreign hooks are left alone."""
+    from .init import install_git_hook
+    seen = set()
+    for s in cfg.slots:
+        if not s.worktree or s.worktree in seen or not Path(s.worktree).exists():
+            continue
+        seen.add(s.worktree)
+        try:
+            install_git_hook(Path(s.worktree), quiet=True)
+        except (OSError, subprocess.CalledProcessError):
+            pass
 
 
 def cmd_up(a):
@@ -207,10 +233,22 @@ def cmd_up(a):
     if not cfg.slots:
         die("no slots on this machine; run `hive join` first")
     save_machine_config(cfg)  # persists a generated local secret
+    refresh_git_hooks(cfg)
     d = Daemon(cfg)
-    d.start_background()
+    # Each slot's roles decide how it runs, so they must be known before anything starts.
+    print(f"Connecting to {cfg.server_url} ...")
+    missing = d.wait_for_identity(timeout=30)
+    if missing:
+        die(f"could not reach the Hive server at {cfg.server_url} for {', '.join(missing)} "
+            "(is it running, and are the tokens in ~/.hive/machine.toml valid?)")
     orch = None if a.headless else next(
         (rt for rt in d.slots.values() if rt.is_orchestrator), None)
+    if orch:
+        # Mark it attached before the wake loop starts, so no headless turn can race the
+        # interactive session on the same conversation.
+        orch.attached = True
+        d.set_echo(False)
+    d.start_background()
     if not orch:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -232,8 +270,6 @@ def cmd_up(a):
     # running headless and stream to the server (watch them with `hive watch` elsewhere).
     import threading
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    d.set_echo(False)
-    orch.attached = True
     others = [n for n in d.slots if n != orch.name]
     if others:
         print(f"Workers on this machine ({', '.join(others)}) run in the background; "
@@ -261,15 +297,19 @@ def cmd_chat(a):
     cfg = load_machine_config()
     slot = next((s for s in cfg.slots if s.name == a.slot), None) or die(f"no slot {a.slot}")
     hdr = {"X-Hive-Local": cfg.local_secret}
+    is_orch = False
     try:
         r = requests.post(f"{cfg.local_url}/slot/{slot.name}/attach", json={"attached": True},
                           headers=hdr, timeout=5).json()
         if r.get("running"):
             print("Note: a headless wake is running for this slot; it will finish first.")
-    except requests.RequestException:
+        slots = requests.get(f"{cfg.local_url}/slots", headers=hdr, timeout=5).json()
+        is_orch = any(s["name"] == slot.name and "orchestrator" in s["roles"] for s in slots)
+    except (requests.RequestException, ValueError, KeyError):
         print("Warning: daemon not reachable; hooks and tools will not work until `hive up`.")
     try:
-        run_interactive(slot, cfg, fresh=a.fresh, initial="")
+        # initial="" → no automatic first prompt; the role still selects the permission file.
+        run_interactive(slot, cfg, fresh=a.fresh, initial="", orchestrator=is_orch)
     finally:
         try:
             requests.post(f"{cfg.local_url}/slot/{slot.name}/attach", json={"attached": False},

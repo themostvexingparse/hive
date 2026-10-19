@@ -18,11 +18,13 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from ..config import Slot
+from .shells import kill_tree, popen_group_kwargs
 
 QUOTA_RE = re.compile(r"usage limit|rate.?limit|limit reached|quota (?:exceeded|exhausted)|"
                       r"out of (?:credits|quota)|resource.?exhausted", re.I)
@@ -41,10 +43,15 @@ ORCH_RESUME_PROMPT = ("Hive session resumed. Follow the hive-orchestrator skill:
                       "waiting with await_events.")
 
 
+_CLOSING_TAG = re.compile(r"</\s*hive-message", re.I)
+
+
 def fmt_message(m: dict) -> str:
     where = "dm" if m.get("recipient") and not m.get("channel") else m.get("channel") or ""
+    # A body must not be able to close the wrapper and pose as instructions outside it.
+    body = _CLOSING_TAG.sub("<\\\\/hive-message", m["body"])
     return (f'<hive-message id="{m["id"]}" from="{m["author"]}" where="{where}" '
-            f'priority="{m["priority"]}">\n{m["body"]}\n</hive-message>')
+            f'priority="{m["priority"]}">\n{body}\n</hive-message>')
 
 
 GUIDE = """\
@@ -131,23 +138,47 @@ def slot_env(slot: Slot, local_url: str, secret: str) -> dict:
     return env
 
 
-def ensure_gemini_extension(slot: Slot, env: dict) -> None:
-    """Link the repo's Hive extension into this slot's private Gemini home (never ~/.gemini)."""
+def ensure_gemini_extension(slot: Slot, env: dict) -> str | None:
+    """Link the repo's Hive extension into this slot's private Gemini home (never ~/.gemini).
+    Returns an error description if linking failed, else None."""
     if slot.vendor != "gemini" or not slot.config_dir:
-        return
+        return None
     marker = Path(slot.config_dir) / ".gemini" / "extensions" / "hive"
     if marker.exists():
-        return
+        return None
+    if not bundle_dir(slot).exists():
+        return (f"Gemini extension missing at {bundle_dir(slot)}: run `hive init` in the "
+                "repository and commit it")
     exe = shutil.which("gemini") or "gemini"
-    subprocess.run([exe, "extensions", "link", str(bundle_dir(slot)), "--consent"], env=env,
-                   capture_output=True, text=True, cwd=slot.worktree)
+    try:
+        p = subprocess.run([exe, "extensions", "link", str(bundle_dir(slot)), "--consent"],
+                           env=env, capture_output=True, text=True, cwd=slot.worktree,
+                           timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"could not run `gemini extensions link`: {e}"
+    if p.returncode != 0 or not marker.exists():
+        return ("`gemini extensions link` failed: "
+                + ((p.stderr or p.stdout or "").strip()[-500:] or f"exit {p.returncode}"))
+    return None
 
 
 def session_flags(vendor: str, session_id: str, resume: bool) -> list[str]:
     return ["--resume" if resume else "--session-id", session_id]
 
 
-def build_command(slot: Slot, session_id: str, resume: bool) -> list[str]:
+def claude_settings_arg(slot: Slot, role_class: str) -> str:
+    """The session's permission file from `hive init`; inline MCP-only rules for old bundles."""
+    path = bundle_dir(slot, "claude") / "settings" / f"{role_class}.json"
+    return str(path) if path.exists() else CLAUDE_SESSION_SETTINGS
+
+
+def gemini_policy_args(slot: Slot, role_class: str) -> list[str]:
+    path = bundle_dir(slot, "gemini") / "policies" / f"{role_class}.toml"
+    return ["--policy", str(path)] if path.exists() else []
+
+
+def build_command(slot: Slot, session_id: str, resume: bool,
+                  role_class: str = "worker") -> list[str]:
     """Headless worker command; prompt goes on stdin; output is stream-json."""
     mode = slot.permission_mode or DEFAULT_PERMISSION.get(slot.vendor, "")
     if slot.command:
@@ -157,28 +188,30 @@ def build_command(slot: Slot, session_id: str, resume: bool) -> list[str]:
                 for a in slot.command]
     if slot.vendor == "claude":
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-               "--plugin-dir", str(bundle_dir(slot)), "--settings", CLAUDE_SESSION_SETTINGS]
+               "--plugin-dir", str(bundle_dir(slot)),
+               "--settings", claude_settings_arg(slot, role_class)]
         if mode:
             cmd += ["--permission-mode", mode]
     else:
         cmd = ["gemini", "-p", "Follow the Hive wake notice provided on standard input.",
-               "-o", "stream-json", "-e", "hive"]
+               "-o", "stream-json", "-e", "hive", *gemini_policy_args(slot, role_class)]
         if mode:
             cmd += ["--approval-mode", mode]
     return cmd + session_flags(slot.vendor, session_id, resume)
 
 
 def build_interactive_command(slot: Slot, session_id: str, resume: bool,
-                              initial_prompt: str | None) -> list[str]:
+                              initial_prompt: str | None,
+                              role_class: str = "worker") -> list[str]:
     """Native interactive CLI with Hive capabilities attached for this session only."""
     if slot.vendor == "claude":
         cmd = ["claude", "--plugin-dir", str(bundle_dir(slot)),
-               "--settings", CLAUDE_SESSION_SETTINGS]
+               "--settings", claude_settings_arg(slot, role_class)]
         if slot.permission_mode:
             cmd += ["--permission-mode", slot.permission_mode]
         cmd += session_flags("claude", session_id, resume)
         return cmd + ([initial_prompt] if initial_prompt else [])
-    cmd = ["gemini", "-e", "hive"]
+    cmd = ["gemini", "-e", "hive", *gemini_policy_args(slot, role_class)]
     if slot.permission_mode:
         cmd += ["--approval-mode", slot.permission_mode]
     cmd += session_flags("gemini", session_id, resume)
@@ -281,10 +314,11 @@ def run_cli(slot: Slot, cmd: list[str], prompt: str, env: dict, log_path: Path,
     t0 = time.time()
     proc = subprocess.Popen(resolve(cmd), cwd=slot.worktree, env=env, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            encoding="utf-8", errors="replace", bufsize=1)
+                            encoding="utf-8", errors="replace", bufsize=1,
+                            **popen_group_kwargs())
     if on_start:
         on_start(proc)
-    killer = threading.Timer(timeout, proc.kill)
+    killer = threading.Timer(timeout, kill_tree, args=(proc,))  # the CLI and its children
     killer.daemon = True
     killer.start()
     try:
@@ -292,7 +326,7 @@ def run_cli(slot: Slot, cmd: list[str], prompt: str, env: dict, log_path: Path,
         proc.stdin.close()
     except OSError:
         pass
-    raw: list[str] = []
+    raw: deque[str] = deque(maxlen=400)  # only the tail is needed (quota detection, log)
     is_error = False
     joiner = GeminiDeltaJoiner()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +353,7 @@ def run_cli(slot: Slot, cmd: list[str], prompt: str, env: dict, log_path: Path,
             on_lines(tail)
     proc.wait()
     killer.cancel()
-    out = "".join(raw[-400:])
+    out = "".join(raw)
     is_error = is_error or proc.returncode != 0
     quota = is_error and bool(QUOTA_RE.search(out[-5000:]))
     return WakeResult(proc.returncode or 0, out, quota, time.time() - t0)

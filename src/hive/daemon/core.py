@@ -10,9 +10,12 @@ from collections import deque
 from pathlib import Path
 
 from .. import globs as G
+from .. import permissions as P
+from ..permissions import role_class
 from ..config import MachineConfig, Slot, find_repo_root, hive_home, load_repo_config
 from . import gitops, wake
 from .client import HiveError, ServerClient
+from .shells import resolve_shell, run_shell, tool_shell
 from .store import Store
 
 log = logging.getLogger("hive.daemon")
@@ -22,13 +25,13 @@ COALESCE_SECONDS = 3
 MIN_GAP_SECONDS = 10
 MAX_WAKES_PER_HOUR = 20
 MAX_STOP_BLOCKS = 3
+AUTO_RELEASE_MAX_WAIT = 1800  # wait at most this long for a running turn to finish
 
 CLAUDE_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 GEMINI_WRITE_TOOLS = {"write_file", "replace", "edit"}
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS", "read_file", "read_many_files", "glob",
                    "search_file_content", "list_directory", "grep"}
-
-
+SHELL_TOOLS = {"Bash", "PowerShell", "run_shell_command"}
 class StreamSink:
     """Shows a worker's formatted output locally and uploads it (admin-only view) in batches."""
 
@@ -74,14 +77,45 @@ class SlotRuntime:
         self.running = False
         self.attached = False  # a human-facing interactive session owns this slot
         self.awaiting = False  # the interactive agent is blocked in await_events
+        self.waiting_approvals: set[int] = set()  # request_approval calls blocked on a decision
+        # Decisions a blocked request_approval call already consumed; its event may arrive later.
+        self.consumed_approvals: deque[int] = deque(maxlen=200)
         self.sink: StreamSink | None = None
         self.quota_until = 0.0
         self.stop_blocks = 0
         self.last_wake_end = 0.0
         self.wake_times: deque[float] = deque()
         self.lock = threading.RLock()
+        self.releasing = False  # an automatic integration is running; don't start a wake
         self.repo_root = find_repo_root(Path(cfg.worktree)) if cfg.worktree else None
         self.repo_cfg = load_repo_config(self.repo_root)
+        self._other_worktrees: tuple[float, list[Path]] = (0.0, [])
+
+    def reload_config(self) -> None:
+        """hive.toml changes (config uploads, or main advancing) take effect without restart."""
+        if self.cfg.worktree:
+            self.repo_root = find_repo_root(Path(self.cfg.worktree)) or self.repo_root
+        self.repo_cfg = load_repo_config(self.repo_root)
+
+    def other_worktrees(self) -> list[Path]:
+        """Every other checkout of this repository (other slots, the user's own clone), which
+        an agent must never write into. Cached for a minute."""
+        at, paths = self._other_worktrees
+        if time.time() - at < 60 or not self.cfg.worktree:
+            return paths
+        paths = []
+        try:
+            out = gitops.git(self.cfg.worktree, "worktree", "list", "--porcelain")
+            own = Path(self.cfg.worktree).resolve()
+            for line in out.splitlines():
+                if line.startswith("worktree "):
+                    p = Path(line[len("worktree "):]).resolve()
+                    if p != own:
+                        paths.append(p)
+        except (gitops.GitError, OSError):
+            pass
+        self._other_worktrees = (time.time(), paths)
+        return paths
 
     @property
     def roles(self) -> list[str]:
@@ -98,6 +132,13 @@ class SlotRuntime:
     @property
     def main(self) -> str:
         return self.repo_cfg.get("repo", {}).get("main", "main")
+
+    @property
+    def rules(self) -> dict:
+        try:
+            return P.build_rules(self.repo_cfg)
+        except ValueError:  # a broken [permissions] section must not disable the hard limits
+            return P.build_rules({})
 
 
 class Daemon:
@@ -136,13 +177,26 @@ class Daemon:
             raise KeyError(f"unknown slot {slot!r}")
         return self.slots[slot]
 
-    def refresh(self, rt: SlotRuntime) -> None:
+    def refresh(self, rt: SlotRuntime) -> bool:
         try:
             rt.me = rt.client.get("/agents/me")
             rt.fleet = rt.me["fleet"]
             rt.leases = rt.client.get("/leases", holder=rt.name)
+            return True
         except HiveError as e:
             log.warning("[%s] refresh failed: %s", rt.name, e)
+            return False
+
+    def wait_for_identity(self, timeout: float = 30, interval: float = 2) -> list[str]:
+        """Fetch every slot's identity from the server, retrying; returns slots still unknown.
+        Until this succeeds the daemon cannot tell which roles (and wake events) apply."""
+        end = time.time() + timeout
+        missing = [rt for rt in self.slots.values() if not rt.me]
+        while True:
+            missing = [rt for rt in missing if not self.refresh(rt)]
+            if not missing or time.time() >= end or self.stop_event.is_set():
+                return [rt.name for rt in missing]
+            self.stop_event.wait(interval)
 
     # ------------------------------------------------------------------ loops
 
@@ -170,9 +224,12 @@ class Daemon:
         while not self.stop_event.is_set():
             for rt in list(self.slots.values()):
                 try:
+                    if not rt.me:  # the server was unreachable when the daemon started
+                        self.refresh(rt)
                     r = rt.client.post("/agents/me/heartbeat",
                                        {"busy": rt.running, "attached": rt.attached})
                     rt.fleet = r["fleet"]
+                    self.resend_confirms(rt)
                     for l in list(rt.leases):
                         if l["expires_at"] - time.time() < 300:
                             l.update(rt.client.post(f"/leases/{l['id']}/extend", {"ttl": 600}))
@@ -194,7 +251,9 @@ class Daemon:
     # ------------------------------------------------------------------ events
 
     def trigger(self, rt: SlotRuntime, kind: str, summary: str, urgent: bool | None = None) -> None:
-        if kind not in rt.me.get("wake_on", wake_on_default(rt)):
+        # While the agent's identity is unknown (server unreachable so far) keep everything;
+        # waking still waits until the identity is known (maybe_wake needs rt.active).
+        if rt.me and kind not in rt.me.get("wake_on", wake_on_default(rt)):
             return
         if urgent is None:
             urgent = not (rt.is_orchestrator and kind in ORCH_BATCHED)
@@ -228,6 +287,14 @@ class Daemon:
         if t in ("fleet.state", "agent.roles_changed", "config.updated", "orchestrator.failover",
                  "fleet.started"):
             self.refresh(rt)
+        if t == "config.updated":
+            rt.reload_config()
+        if t == "agent.roles_changed" and p.get("name") == me and rt.attached:
+            # Headless wakes start a fresh MCP server each time; an open interactive session
+            # keeps the tool list it started with.
+            self.store.add_notice(me, f"Your roles changed to {', '.join(p.get('roles', []))}. "
+                                  "Exit and relaunch this session to load the matching Hive "
+                                  "tools.", "high")
         if t in ("lease.acquired", "lease.released", "lease.expired", "lease.revoked") \
                 and p.get("holder") == me:
             self.refresh(rt)
@@ -282,6 +349,15 @@ class Daemon:
             if p.get("by") != me:
                 self.sync_worktree(rt, p)
             return
+        if t == "approval.decided":
+            if p["id"] in rt.waiting_approvals or p["id"] in rt.consumed_approvals:
+                return  # the blocked request_approval call picks the decision up itself
+            verdict = "APPROVED" if p["approve"] else "denied"
+            nxt = (f" Run it now with run_approved({p['id']})." if p["approve"] else "")
+            self.trigger(rt, "approval.decided",
+                         f"{p['by']} {verdict} your request #{p['id']} to run `{p['command']}`"
+                         f"{': ' + p['note'] if p.get('note') else ''}.{nxt}")
+            return
         if t == "report.requested":
             self.trigger(rt, "report.requested",
                          f"{p['by']} requests a report (request #{p['id']}"
@@ -312,16 +388,29 @@ class Daemon:
                 status = gitops.sync_to_main(rt.cfg.worktree, rt.main)
             except gitops.GitError as e:
                 status = f"error: {e}"
-        if status != "rebased":
+        if status == "rebased":
+            rt.reload_config()  # main may carry a new hive.toml
+        else:
             self.store.add_notice(rt.name, f"main advanced to {p['sha'][:10]} by {p['by']} "
                                   f"(changed: {', '.join(p.get('paths', [])[:15])}). Your "
                                   f"worktree was not rebased ({status}); it will be rebased "
                                   "when you call lease_release.", "normal")
         log.info("[%s] main advanced to %s: %s", rt.name, p["sha"][:10], status)
 
-    def auto_release(self, rt: SlotRuntime, task_id: int) -> None:
-        msg = self.store.get(rt.name, "last_commit_message", "hive: integrate reviewed work")
-        res = self.release(rt, msg, task_id)
+    def auto_release(self, rt: SlotRuntime, task_id: int,
+                     max_wait: float = AUTO_RELEASE_MAX_WAIT) -> None:
+        # Never integrate while the agent is mid-turn: it may be editing leased files, and
+        # those half-done edits would be committed. Block new wakes meanwhile.
+        rt.releasing = True
+        try:
+            end = time.time() + max_wait
+            while rt.running and time.time() < end and not self.stop_event.is_set():
+                self.stop_event.wait(2)
+            msg = self.store.get(rt.name, "last_commit_message",
+                                 "hive: integrate reviewed work")
+            res = self.release(rt, msg, task_id)
+        finally:
+            rt.releasing = False
         self.store.add_notice(rt.name, f"Review of task #{task_id} approved; integration "
                               f"result: {res['status']}: {res['message']}", "high")
         if res["status"] == "integrated":
@@ -333,7 +422,8 @@ class Daemon:
     # ------------------------------------------------------------------ wakes
 
     def maybe_wake(self, rt: SlotRuntime) -> None:
-        if rt.running or rt.attached or not rt.active or rt.quota_until > time.time():
+        if rt.running or rt.releasing or rt.attached or not rt.active \
+                or rt.quota_until > time.time():
             return
         trig = self.store.pending_triggers(rt.name)
         now = time.time()
@@ -380,17 +470,22 @@ class Daemon:
             msgs = self.store.undelivered(rt.name, "normal")
             prompt = wake.build_prompt(rt.name, rt.me, rt.fleet, trig, msgs,
                                        self.my_open_tasks(rt), first_in_session=not resume)
-            self.store.mark_injected(rt.name, [m["id"] for m in msgs])
-            cmd = wake.build_command(rt.cfg, session, resume)
+            cmd = wake.build_command(rt.cfg, session, resume, role_class(rt.roles))
             env = wake.slot_env(rt.cfg, self.mcfg.local_url, self.mcfg.local_secret)
-            wake.ensure_gemini_extension(rt.cfg, env)
+            err = wake.ensure_gemini_extension(rt.cfg, env)
+            if err:
+                log.warning("[%s] %s", rt.name, err)
+                rt.sink.write([f"· {err}"])
             log.info("[%s] wake (%d triggers, resume=%s)", rt.name, len(trig), resume)
-            self.store.consume_triggers(rt.name, max(t["id"] for t in trig))
             rt.sink.start_run(time.strftime("%Y%m%d-%H%M%S"))
             rt.sink.write([f"· why: {t['summary'][:200]}" for t in trig])
 
             def started(proc):
+                # Only now is the work handed over: if the CLI can't even start, the reasons
+                # and messages stay pending and the wake is retried.
                 rt.proc = proc
+                self.store.consume_triggers(rt.name, max(t["id"] for t in trig))
+                self.store.mark_injected(rt.name, [m["id"] for m in msgs])
 
             res = wake.run_cli(rt.cfg, cmd, prompt, env, self.logdir / f"{rt.name}.log",
                                on_start=started, on_lines=rt.sink.write)
@@ -488,6 +583,33 @@ class Daemon:
             return {}
         return {}
 
+    def _check_shell(self, rt: SlotRuntime, command: str, shell: str) -> dict:
+        """Hard limits for every agent; the approval route for workers. The orchestrator's own
+        dangerous commands are left to its CLI, which asks the user (interactive session)."""
+        rules = rt.rules["worker"]
+        hit = P.matches(command, rules["forbidden"])
+        if hit:
+            return {"kind": "forbidden",
+                    "deny": f"`{hit}` is never allowed for Hive agents, not even with approval. "
+                            "Ask the user (via the orchestrator) to do it."}
+        if P.pushes_to(command, rt.main):
+            return {"kind": "forbidden",
+                    "deny": f"Pushing to {rt.main} is not allowed. Integrate with "
+                            "lease_release(commit_message, task_id)."}
+        why = P.needs_approval(command, rules["approval"])
+        if not why:
+            return {}
+        if rt.is_orchestrator:
+            # Interactive session: let the user confirm. Covers forms the CLI's prefix rules
+            # can't express, such as `Remove-Item dir -Recurse`.
+            return {"kind": "ask", "ask": f"Hive: this command is dangerous ({why}). "
+                                          "Confirm only if you intend it."}
+        return {"kind": "approval",
+                "deny": f"This command needs the orchestrator's approval ({why}). Call "
+                        f"request_approval(command={command!r}, shell={shell!r}, "
+                        "reason=<why it is needed and what it affects>); if approved, Hive "
+                        "runs it in your worktree and returns the output."}
+
     def _pre_tool(self, rt: SlotRuntime, state: str, data: dict) -> dict:
         tool = data.get("tool_name", "")
         if is_hive_tool(tool):
@@ -497,6 +619,11 @@ class Daemon:
                 return {}
             return {"deny": f"Hive fleet is {state}; your roles ({', '.join(rt.roles)}) must "
                             "not act now. End your turn; you will be woken when it is your turn."}
+        if tool in SHELL_TOOLS:
+            verdict = self._check_shell(rt, str((data.get("tool_input") or {}).get("command", "")),
+                                        tool_shell(tool))
+            if verdict:
+                return verdict
         if tool in CLAUDE_WRITE_TOOLS or tool in GEMINI_WRITE_TOOLS:
             ti = data.get("tool_input") or {}
             raw = ti.get("file_path") or ti.get("notebook_path") or ti.get("path") or ""
@@ -506,7 +633,9 @@ class Daemon:
             if rel is None:
                 return {}
             if rel is False:
-                return {"deny": f"{raw} is inside another agent's worktree."}
+                return {"deny": f"{raw} is inside another checkout of this repository (another "
+                                "agent's worktree or the user's own clone). Only edit files "
+                                "in your own worktree."}
             allowed = list(rt.me.get("write_globs", []))
             if rt.me.get("can_code"):
                 allowed += [g for l in rt.leases for g in l["globs"]]
@@ -520,23 +649,23 @@ class Daemon:
         return {}
 
     def _relpath(self, rt: SlotRuntime, raw: str):
-        """Repo-relative path; None if outside every worktree; False if in another slot's."""
+        """Repo-relative path in the agent's own worktree; None if outside every checkout of
+        the repository; False if inside another checkout (another slot's worktree or the
+        user's own clone), where agents must never write."""
         p = Path(raw)
         if not p.is_absolute():
             p = Path(rt.cfg.worktree) / p
         p = p.resolve()
-        for other in self.slots.values():
-            if other is rt or not other.cfg.worktree:
-                continue
-            try:
-                p.relative_to(Path(other.cfg.worktree).resolve())
+        own = Path(rt.cfg.worktree).resolve()
+        inside_own = p == own or own in p.parents
+        others = [Path(o.cfg.worktree).resolve() for o in self.slots.values()
+                  if o is not rt and o.cfg.worktree] + rt.other_worktrees()
+        for o in others:
+            if p == o or o in p.parents:
+                if inside_own and (o == own or o in own.parents):
+                    continue  # the clone that merely contains this agent's own worktree
                 return False
-            except ValueError:
-                pass
-        try:
-            return p.relative_to(Path(rt.cfg.worktree).resolve()).as_posix()
-        except ValueError:
-            return None
+        return p.relative_to(own).as_posix() if inside_own else None
 
     # ------------------------------------------------------------------ interactive orchestrator
 
@@ -573,6 +702,65 @@ class Daemon:
         finally:
             rt.awaiting = False
 
+    # ------------------------------------------------------------------ command approvals
+
+    def request_approval(self, rt: SlotRuntime, command: str, reason: str, shell: str,
+                         task_id: int | None, wait_seconds: float) -> dict:
+        """Ask the orchestrator to approve a dangerous command; by default wait (without using
+        tokens) for the decision and, if approved, run it straight away."""
+        try:
+            shell = resolve_shell(shell)
+        except ValueError as e:
+            raise HiveError(400, "bad_shell", str(e))
+        verdict = self._check_shell(rt, command, shell)
+        if verdict.get("kind") == "forbidden":
+            raise HiveError(403, "forbidden_command", verdict["deny"])
+        r = rt.client.post("/approvals", {"command": command, "reason": reason, "shell": shell,
+                                          "task_id": task_id})
+        aid = r["id"]
+        end = time.time() + max(0.0, min(wait_seconds, 1500.0))
+        rt.waiting_approvals.add(aid)
+        state: dict = {}
+        try:
+            while time.time() < end and not self.stop_event.is_set():
+                state = rt.client.get(f"/approvals/{aid}")
+                if state["state"] != "requested":
+                    break
+                self.stop_event.wait(2)
+            state = rt.client.get(f"/approvals/{aid}")
+        finally:
+            if state.get("state") not in (None, "requested"):
+                rt.consumed_approvals.append(aid)  # its event must not queue another wake
+            rt.waiting_approvals.discard(aid)
+        if state["state"] == "approved":
+            return {"approval_id": aid, "decision": "approved", "note": state.get("note"),
+                    **self.run_approved(rt, aid)}
+        if state["state"] == "denied":
+            return {"approval_id": aid, "decision": "denied", "note": state.get("note"),
+                    "message": "Not approved. Follow the note or find a safer approach."}
+        return {"approval_id": aid, "decision": "pending",
+                "message": "No decision yet. End your turn; you will be woken when the "
+                           f"orchestrator decides. If approved, call run_approved({aid})."}
+
+    def run_approved(self, rt: SlotRuntime, aid: int) -> dict:
+        """Run an approved command exactly once, in this agent's worktree."""
+        a = rt.client.post(f"/approvals/{aid}/claim")  # one-time: the server marks it used
+        verdict = self._check_shell(rt, a["command"], a["shell"])
+        if verdict.get("kind") == "forbidden":  # hard limits are re-checked here too
+            rt.client.post(f"/approvals/{aid}/result", {"exit_code": -1,
+                                                        "output": verdict["deny"]})
+            raise HiveError(403, "forbidden_command", verdict["deny"])
+        rt.sink.write([f"· approved #{aid}: {a['command'][:300]}"])
+        with rt.lock:
+            code, output = run_shell(rt.cfg.worktree, a["command"], a["shell"])
+        rt.sink.write([f"· approved #{aid} exited {code}"])
+        try:
+            rt.client.post(f"/approvals/{aid}/result", {"exit_code": code, "output": output})
+        except HiveError as e:
+            log.warning("[%s] could not report result of approval #%s: %s", rt.name, aid, e)
+        self.refresh(rt)
+        return {"executed": True, "exit_code": code, "output": output[-8000:]}
+
     # ------------------------------------------------------------------ tools (SPEC §15)
 
     def release(self, rt: SlotRuntime, commit_message: str, task_id: int | None) -> dict:
@@ -584,9 +772,24 @@ class Daemon:
             checks = rt.repo_cfg.get("integration", {}).get("checks", [])
             res = gitops.release_transaction(
                 rt.cfg.worktree, rt.client, rt.name, rt.leases, commit_message, task_id,
-                rt.me.get("write_globs", []), checks, rt.main)
+                rt.me.get("write_globs", []), checks, rt.main,
+                checks_shell=rt.repo_cfg.get("integration", {}).get("shell", "native"))
+            if res.pending_confirm:
+                pending = self.store.get(rt.name, "pending_confirms", [])
+                self.store.put(rt.name, "pending_confirms", pending + [res.pending_confirm])
             self.refresh(rt)
             return res.as_dict()
+
+    def resend_confirms(self, rt: SlotRuntime) -> None:
+        """Retry integrations whose confirmation didn't reach the server (main was pushed)."""
+        pending = self.store.get(rt.name, "pending_confirms", [])
+        if not pending:
+            return
+        left = [body for body in pending
+                if not gitops.confirm(rt.client, body, delays=())]
+        self.store.put(rt.name, "pending_confirms", left)
+        if len(left) < len(pending):
+            self.refresh(rt)
 
     def call_tool(self, slot: str, name: str, a: dict):
         rt = self.rt(slot)
@@ -702,6 +905,18 @@ class Daemon:
             return c.get("/reports", kind=a.get("kind"), author=a.get("author"),
                          target=a.get("target"), state=a.get("state"),
                          limit=a.get("limit", 20))
+        if name == "request_approval":
+            return self.request_approval(rt, a["command"], a.get("reason", ""),
+                                         a.get("shell", "auto"), a.get("task_id"),
+                                         float(a.get("wait_seconds", 600)))
+        if name == "run_approved":
+            return self.run_approved(rt, int(a["approval_id"]))
+        if name == "approval_list":
+            return c.get("/approvals", state=a.get("state"), agent=a.get("agent"),
+                         limit=a.get("limit", 20))
+        if name == "approval_decide":
+            return c.post(f"/approvals/{int(a['approval_id'])}/decide",
+                          {"approve": bool(a["approve"]), "note": a.get("note", "")})
         if name == "report_get":
             return c.get(f"/reports/{int(a['report_id'])}")
         raise HiveError(404, "no_such_tool", name)
@@ -713,14 +928,17 @@ HIVE_TOOL_NAMES = {
     "report_stuck", "lease_acquire", "lease_status", "lease_extend", "lease_release",
     "lease_force_release", "repo_state", "status_publish", "status_read", "decision_request",
     "fleet_state", "fleet_control", "review_verdict", "role_reassign", "await_events",
-    "report_request", "report_submit", "report_list", "report_get",
+    "report_request", "report_submit", "report_list", "report_get", "request_approval",
+    "run_approved", "approval_list", "approval_decide",
 }
 
 
 def is_hive_tool(tool: str) -> bool:
     """Matches the hive MCP tools under any CLI naming: mcp__hive__x (project config),
-    mcp__plugin_hive_hive__x (Claude plugin), or bare/prefixed names (Gemini)."""
+    mcp__plugin_hive_hive__x (Claude plugin), mcp_hive_x (Gemini FQN) or bare names."""
     if tool in HIVE_TOOL_NAMES:
+        return True
+    if tool.startswith("mcp_hive_") and tool[len("mcp_hive_"):] in HIVE_TOOL_NAMES:
         return True
     head, _, name = tool.rpartition("__")
     return name in HIVE_TOOL_NAMES and "hive" in head
@@ -758,6 +976,11 @@ def summarize_event(ev: dict) -> str:
         return f"The user started the fleet with goal: {p.get('goal', '')[:1000]}"
     if t == "orchestrator.failover":
         return f"Orchestrator failover: {p['old']} → {p['new']}"
+    if t == "approval.requested":
+        return f"{p['agent']} requests APPROVAL #{p['id']} to run `{p['command'][:500]}` " \
+               f"({p['shell']}{', task #' + str(p['task_id']) if p.get('task_id') else ''}). " \
+               f"Reason: {p['reason'][:800]} — decide with approval_decide({p['id']}, " \
+               "approve, note); the agent is waiting."
     if t == "report.submitted":
         return f"{p['author']} filed report #{p['id']}" + \
             (f" (task #{p['task_id']})" if p.get("task_id") else "") + \

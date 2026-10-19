@@ -13,9 +13,10 @@ import tomli_w
 DEFAULT_REPO_CONFIG = {
     "server": {"url": "http://127.0.0.1:8765"},
     "repo": {"main": "main"},
-    "integration": {"review": "off", "checks": []},
+    "integration": {"review": "off", "checks": [], "shell": "native"},
     "orchestrator": {"standby": [], "debounce_seconds": 90, "heartbeat_hours": 4},
     "roles": {},
+    "permissions": {"preset": "standard", "allow": [], "approval": [], "deny": []},
 }
 
 

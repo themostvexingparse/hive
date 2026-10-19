@@ -13,7 +13,9 @@ from hive.local import LocalDaemon
 
 prompt = sys.stdin.read()
 d = LocalDaemon()
-log = Path(os.environ["FAKE_AGENT_LOG"])
+# One file per agent: two fake agents may run at once, and interleaved appends to a shared
+# file are not atomic on every platform.
+log = Path(os.environ["FAKE_AGENT_LOG"] + "." + d.slot)
 
 
 def emit(ev):
