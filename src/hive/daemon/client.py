@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import requests
 
 
@@ -19,12 +21,17 @@ class ServerClient:
         self.session.headers["Authorization"] = f"Bearer {token}"
 
     def request(self, method: str, path: str, json: dict | None = None,
-                params: dict | None = None):
-        try:
-            r = self.session.request(method, self.base + path, json=json, params=params,
-                                     timeout=self.timeout)
-        except requests.RequestException as e:
-            raise HiveError(0, "unreachable", str(e)) from e
+                params: dict | None = None, retries: int = 3):
+        for attempt in range(retries + 1):
+            try:
+                r = self.session.request(method, self.base + path, json=json, params=params,
+                                         timeout=self.timeout)
+            except requests.RequestException as e:
+                raise HiveError(0, "unreachable", str(e)) from e
+            if r.status_code != 503 or attempt == retries:
+                break
+            # Server busy (e.g. SQLite lock contention): back off and retry.
+            time.sleep(min(float(r.headers.get("Retry-After", 1)), 5) * (attempt + 1))
         try:
             data = r.json()
         except ValueError:

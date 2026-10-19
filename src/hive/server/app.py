@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hmac
 import os
+import tempfile
+import time
 from functools import wraps
 from importlib import resources
 
 from flask import Flask, Response, g, jsonify, request
+from sqlalchemy.exc import OperationalError
 
 from .service import ADMIN, Actor, ApiError, Hive, create_hive
 
@@ -25,6 +28,15 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @app.errorhandler(ApiError)
     def _api_error(e: ApiError):
         return jsonify({"error": e.code, "message": e.message, **e.extra}), e.status
+
+    @app.errorhandler(OperationalError)
+    def _db_busy(e: OperationalError):
+        # SQLite under contention (or a slow network filesystem): ask the client to retry.
+        if "locked" in str(e.orig).lower() or "busy" in str(e.orig).lower():
+            resp = jsonify({"error": "db_busy", "message": "database busy; retry shortly"})
+            resp.headers["Retry-After"] = "1"
+            return resp, 503
+        raise e
 
     @app.before_request
     def _tick():
@@ -353,9 +365,37 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     def get_report(rid):
         return jsonify(hive.get_report(rid))
 
+    @app.get(f"{api}/admin/backup")
+    @auth(admin=True)
+    def backup():
+        """Download a consistent copy of a SQLite database (made inside this process)."""
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            hive.backup_sqlite(path)
+        except BaseException:
+            os.remove(path)
+            raise
+
+        def stream():
+            try:
+                with open(path, "rb") as f:
+                    while chunk := f.read(1 << 20):
+                        yield chunk
+            finally:
+                os.remove(path)
+
+        name = time.strftime("hive-%Y%m%d-%H%M%S.db")
+        return Response(stream(), mimetype="application/vnd.sqlite3",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                 "Content-Length": str(os.path.getsize(path))})
+
     @app.get(f"{api}/health")
     def health():
-        return jsonify({"ok": True})
+        out = {"ok": True}
+        if hive.is_sqlite:
+            out["sqlite_journal"] = getattr(hive.engine, "hive_sqlite_journal", None)
+        return jsonify(out)
 
     # ---------------------------------------------------------------- dashboard
     @app.get("/")

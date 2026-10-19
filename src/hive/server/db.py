@@ -5,6 +5,9 @@ Timestamps are float epoch seconds. JSON columns hold lists/dicts.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text,
                         create_engine, event)
 from sqlalchemy.pool import StaticPool
@@ -157,24 +160,53 @@ reports = Table(
 )
 
 
-def make_engine(url: str):
+SQLITE_JOURNALS = ("wal", "delete", "truncate")
+
+
+def on_pythonanywhere() -> bool:
+    return any(k in os.environ for k in ("PYTHONANYWHERE_DOMAIN", "PYTHONANYWHERE_SITE"))
+
+
+def sqlite_journal_mode(explicit: str | None = None) -> str:
+    """WAL on local disks; rollback journal on network filesystems such as PythonAnywhere's,
+    where WAL's shared-memory index does not work."""
+    mode = (explicit or os.environ.get("HIVE_SQLITE_JOURNAL") or
+            ("delete" if on_pythonanywhere() else "wal")).lower()
+    if mode not in SQLITE_JOURNALS:
+        raise ValueError(f"HIVE_SQLITE_JOURNAL must be one of {SQLITE_JOURNALS}")
+    return mode
+
+
+def make_engine(url: str, sqlite_journal: str | None = None):
     if url.startswith("sqlite"):
         kwargs = {"connect_args": {"check_same_thread": False, "timeout": 30}}
-        if url in ("sqlite://", "sqlite:///:memory:"):
+        memory = url in ("sqlite://", "sqlite:///:memory:")
+        if memory:
             kwargs["poolclass"] = StaticPool
         engine = create_engine(url, **kwargs)
+        if not memory and engine.url.database:
+            Path(engine.url.database).expanduser().resolve().parent.mkdir(parents=True,
+                                                                          exist_ok=True)
+        journal = "memory" if memory else sqlite_journal_mode(sqlite_journal)
+        engine.hive_sqlite_journal = journal
 
         @event.listens_for(engine, "connect")
         def _pragma(dbapi_conn, _):
             cur = dbapi_conn.cursor()
-            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute(f"PRAGMA journal_mode={journal.upper()}")
             cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=" + ("NORMAL" if journal == "wal" else "FULL"))
             cur.close()
 
         @event.listens_for(engine, "begin")
         def _begin(conn):
-            # Serialize writers: one IMMEDIATE transaction at a time, matching SELECT FOR UPDATE.
-            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            # Writers take the write lock up front (like SELECT FOR UPDATE elsewhere); readers
+            # (engines with the hive_read option) use a deferred BEGIN and never block writers
+            # longer than a read, nor each other.
+            if conn.get_execution_options().get("hive_read"):
+                conn.exec_driver_sql("BEGIN")
+            else:
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
 
         # Let SQLAlchemy's begin() emit our BEGIN instead of pysqlite's implicit one.
         @event.listens_for(engine, "connect")

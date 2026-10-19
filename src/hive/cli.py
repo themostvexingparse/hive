@@ -51,6 +51,8 @@ def ago(ts: float | None) -> str:
 
 def cmd_server(a):
     os.environ.setdefault("HIVE_DATABASE_URL", a.db)
+    if a.sqlite_journal:
+        os.environ["HIVE_SQLITE_JOURNAL"] = a.sqlite_journal
     if a.admin_token:
         os.environ["HIVE_ADMIN_TOKEN"] = a.admin_token
     if not os.environ.get("HIVE_ADMIN_TOKEN"):
@@ -80,6 +82,31 @@ def cmd_admin_roles(a):
     c = admin_client()
     roles = [r.strip() for r in a.roles.split(",") if r.strip()]
     print(call(c.patch, f"/agents/{a.name}", {"roles": roles}))
+
+
+def cmd_admin_backup(a):
+    import requests
+    cfg = load_admin_config()
+    if not cfg.server_url or not cfg.token:
+        die("not logged in as admin; run `hive admin login --server URL --token TOKEN`")
+    out = Path(a.output or time.strftime("hive-backup-%Y%m%d-%H%M%S.db"))
+    try:
+        with requests.get(cfg.server_url.rstrip("/") + "/api/v1/admin/backup", stream=True,
+                          headers={"Authorization": f"Bearer {cfg.token}"}, timeout=300) as r:
+            if r.status_code != 200:
+                try:
+                    detail = r.json().get("message", r.text)
+                except ValueError:
+                    detail = r.text[:300]
+                die(f"backup failed ({r.status_code}): {detail}")
+            tmp = out.with_suffix(out.suffix + ".part")
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+            os.replace(tmp, out)
+    except requests.RequestException as e:
+        die(f"backup failed: {e}")
+    print(f"Saved {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 
 def cmd_admin_push_config(a):
@@ -382,6 +409,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--db", default="sqlite:///hive.db")
+    s.add_argument("--sqlite-journal", choices=["wal", "delete", "truncate"],
+                   help="SQLite journal mode (default: wal; delete on network filesystems)")
     s.add_argument("--admin-token")
     s.set_defaults(fn=cmd_server)
 
@@ -402,6 +431,9 @@ def main(argv: list[str] | None = None) -> None:
     s.set_defaults(fn=cmd_admin_roles)
     s = adm.add_parser("push-config", help="upload hive.toml to the server")
     s.set_defaults(fn=cmd_admin_push_config)
+    s = adm.add_parser("backup", help="download a copy of the server's SQLite database")
+    s.add_argument("-o", "--output", help="file to write (default hive-backup-<time>.db)")
+    s.set_defaults(fn=cmd_admin_backup)
 
     s = sub.add_parser("init", help="wire this repository for Hive")
     s.add_argument("path", nargs="?", default=".")

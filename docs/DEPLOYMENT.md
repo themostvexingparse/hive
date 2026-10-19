@@ -38,7 +38,7 @@ one SQL database.
 |---|---|
 | Protocol | HTTPS + JSON. Every request is short; there are **no long-polls and no WebSockets**. |
 | Background work | **None.** Lease expiry, offline detection, orchestrator failover and task scheduling run lazily at the start of requests, at most once per second per worker process. No cron jobs, scheduled tasks or always-on tasks are needed. |
-| Database | SQLite (single host, local disk), MySQL, or Postgres, via SQLAlchemy. Tables are created automatically on first start. |
+| Database | SQLite (a local file; on network filesystems such as PythonAnywhere's in rollback-journal mode), MySQL, or Postgres, via SQLAlchemy. Tables and the SQLite file's folder are created automatically on first start. |
 | Outbound internet | Only for the optional GitHub mode (`api.github.com`). Otherwise none. |
 | Inbound | The agent machines' daemons, your admin CLI, and your browser (dashboard). |
 | Secrets | `HIVE_ADMIN_TOKEN` (required) and optionally `HIVE_GITHUB_TOKEN`. |
@@ -59,7 +59,7 @@ one SQL database.
 | Host | Suits | Database | Notes |
 |---|---|---|---|
 | **PythonAnywhere – Developer** ($10/mo at the time of writing) | Recommended easy option | MySQL (included) | 3 web workers, 5 GB disk, unrestricted outbound internet, HTTPS included. See §3.5 for the verdict. |
-| PythonAnywhere – free (Beginner) | Not suitable | – | New free accounts (since 2026-01-15) have no MySQL. SQLite on PythonAnywhere's network filesystem is unsafe for concurrent writers. One web worker only. |
+| PythonAnywhere – free (Beginner) | Trials and small fleets | **SQLite** (a `.db` file in your home directory) | Works with Hive's SQLite mode for network filesystems (§4.8). Limits: 512 MB disk, one web worker, and PythonAnywhere itself advises against SQLite for production. |
 | VPS (Hetzner, DigitalOcean, …) | Full control, lowest cost at scale | SQLite, Postgres or MySQL | You manage TLS, updates and backups (§5). |
 | Fly.io / Railway / Render | Container platforms | Managed Postgres | Run the same gunicorn command as §5. Use a managed database, not container-local SQLite. |
 | Your own computer / LAN | Trials, one-site fleets | SQLite | §6. Not reachable from outside without a tunnel. |
@@ -185,10 +185,26 @@ typically a few ms more):
 - **Database:** MySQL is included. Its idle-connection timeout is handled: Hive recycles
   connections every 280 s.
 
-**Free plan: not suitable.**
-- New accounts have no MySQL.
-- SQLite on its network filesystem isn't safe with concurrent writers.
-- A single web worker serves every request.
+**Free plan: workable for trials and small fleets, with SQLite (§4.8).** New free accounts have
+no MySQL, so Hive stores its data in a SQLite file. It runs in a mode built for
+PythonAnywhere's network filesystem:
+- rollback journal instead of WAL;
+- reads that never take the write lock;
+- one writer at a time inside the single web worker;
+- an idle server that does no writes at all;
+- automatic retries when the database is briefly busy;
+- backups taken inside the server process.
+
+The limits that remain:
+
+| Limit | Impact |
+|---|---|
+| **512 MB disk** | A busy fleet's database (§3.3) fits for roughly 1–1½ years without pruning; with the pruning in §11, indefinitely. Old access logs and backup files also count. |
+| **One web worker** | Every request is served one at a time. Fine for ~3–4 requests per second of short requests, but each write must also sync to network storage, so expect slower responses than on a paid plan, especially with several agents streaming output at once. |
+| **SQLite on a network filesystem** | PythonAnywhere staff [advise against SQLite in production](https://pythonanywhere.com/forums/topic/35474) because locks on their storage can occasionally get stuck until they intervene. Hive keeps all access inside one process, which avoids the usual causes, but this risk can't be fully removed. Take regular backups (`hive admin backup`). |
+
+**Recommendation:** the free plan is a good way to try Hive or run a small fleet (a few
+agents). For daily use with a full fleet, the Developer plan with MySQL is the reliable choice.
 
 **Scale limits:** roughly, beyond ~15 agent slots or several always-open dashboards, consider
 adding workers (PythonAnywhere custom plan) or moving to a VPS with Postgres.
@@ -299,6 +315,59 @@ workon hive && pip install --upgrade "$HOME/hive[mysql]"
 
 Then click **Reload** on the Web tab. See §9 for database changes between versions.
 
+### 4.8 Free (Beginner) plan with SQLite
+
+The free plan has no MySQL for new accounts, so store Hive's data in a SQLite file in your home
+directory. Steps 4.1, 4.2, 4.4, 4.6 and 4.7 are the same, with these differences:
+
+1. **Install without the MySQL extra.** Get the code as in 4.1. Free accounts' restricted
+   internet access still allows GitHub and PyPI, so cloning and installing the dependencies
+   work:
+   ```bash
+   mkvirtualenv --python=python3.12 hive
+   pip install "$HOME/hive"
+   ```
+2. **Skip the database step (4.3).** The SQLite file and its folder are created on the first
+   request.
+3. **Use this WSGI file (4.5):**
+   ```python
+   import os
+
+   os.environ["HIVE_ADMIN_TOKEN"] = "<the token from 4.4>"
+   # An absolute path: four slashes after "sqlite:" (three + the leading "/" of the path)
+   os.environ["HIVE_DATABASE_URL"] = "sqlite:////home/USER/hive-data/hive.db"
+   # Rollback journal: required on PythonAnywhere's network filesystem.
+   # Hive selects it automatically there; setting it explicitly makes sure.
+   os.environ["HIVE_SQLITE_JOURNAL"] = "delete"
+
+   from hive.server.wsgi import application  # noqa: E402
+   ```
+   Keep the database **outside** the code folder, so updating the code never touches it.
+4. **Verify:** `curl https://USER.pythonanywhere.com/api/v1/health` should return
+   `{"ok": true, "sqlite_journal": "delete"}`. If it says `"wal"`, the environment variable
+   isn't set before the import line.
+
+**Rules for SQLite on PythonAnywhere:**
+- **Don't open the live `.db` file from another process** while the web app runs: no
+  `sqlite3` in a console, no scheduled task reading it. Every access goes through the web app.
+- **Back up through the server** instead. On your computer, run `hive admin backup` (or
+  `-o file.db`). It asks the web app for a consistent copy made inside its own process and
+  downloads it (§10). Run it daily, for example from your computer's scheduler.
+- **Prune with the server stopped.** To run the SQL from §11:
+  1. Disable the web app on the Web tab, which stops its worker.
+  2. Run `sqlite3 /home/USER/hive-data/hive.db` in a console and execute the statements, then
+     `VACUUM;`.
+  3. Enable the web app again.
+- **Renew the web app.** Free web apps must be renewed from the Web tab every few months, or
+  they're disabled. The data stays.
+- **Watch the disk quota** on the Files and Account pages. Delete old access-log archives and
+  downloaded backups you no longer need.
+
+**Moving to a paid plan later:** upgrade, create the MySQL database (4.3), and switch
+`HIVE_DATABASE_URL` to it. Hive doesn't migrate data between databases automatically.
+Transfer the data with a tool such as `sqlite3-to-mysql`, or start fresh: re-enroll the agents
+and re-run `hive join` on each machine.
+
 ---
 
 ## 5. Deploying on a VPS (gunicorn + Caddy + systemd)
@@ -321,7 +390,7 @@ sudo -u hive /srv/hive/venv/bin/pip install /srv/hive/app gunicorn
 
 | Option | `HIVE_DATABASE_URL` | Notes |
 |---|---|---|
-| SQLite (simplest) | `sqlite:////srv/hive/data/hive.db` | Fine on a single VPS with local disk. Hive uses WAL mode and serialized write transactions, which works with several gunicorn workers. Create `/srv/hive/data` owned by `hive`. |
+| SQLite (simplest) | `sqlite:////srv/hive/data/hive.db` | Fine on a single VPS with local disk. WAL mode (the default) works with several gunicorn workers. The folder is created automatically; it must be writable by `hive`. |
 | Postgres | `postgresql+psycopg://hive:PASSWORD@localhost/hive` | Best for larger fleets or managed databases. |
 | MySQL / MariaDB | `mysql+pymysql://hive:PASSWORD@localhost/hive?charset=utf8mb4` | Needs `pip install pymysql`. |
 
@@ -419,6 +488,15 @@ Cloudflare Tunnel) in front of it works.
 | `HIVE_ADMIN_TOKEN` | **yes** | – | The admin token. The app refuses to start without it. |
 | `HIVE_DATABASE_URL` | no | `sqlite:///hive.db` (relative to the working directory) | SQLAlchemy database URL. |
 | `HIVE_GITHUB_TOKEN` | no | – | Enables GitHub mode: the server fast-forwards `main` through the GitHub API. Also requires `[repo] github = "owner/repo"` in the uploaded `hive.toml`. Needs a fine-grained token with *Contents: read and write* on that repository. |
+| `HIVE_SQLITE_JOURNAL` | no | `wal`; `delete` when PythonAnywhere is detected | SQLite only. `wal` for local disks (fastest; readers and the writer don't block each other). `delete` (or `truncate`) for network filesystems such as PythonAnywhere's, where WAL doesn't work. `GET /api/v1/health` reports the active mode. |
+
+**How Hive uses SQLite:**
+- **Reads** use deferred transactions, so they never take the write lock.
+- **Writes** take it up front (`BEGIN IMMEDIATE`) and are serialized inside each process.
+- **Busy timeout:** 30 s. A request that still finds the database locked gets `503` with
+  `Retry-After`, and Hive's clients retry it automatically (3 attempts with back-off).
+- **Idle maintenance writes nothing:** the tick first checks, read-only, whether anything
+  needs doing.
 
 **Fleet behaviour** (review policy, checks, roles, standby orchestrator) is not server
 configuration. It comes from the repository's `hive.toml`, uploaded with
@@ -482,7 +560,8 @@ Code lives in git and is not in the database.
 | Database | Backup | Restore |
 |---|---|---|
 | MySQL (PythonAnywhere) | `mysqldump -u USER -h USER.mysql.pythonanywhere-services.com --set-gtid-purged=OFF --no-tablespaces 'USER$hive' \| gzip > ~/backups/hive-$(date +%F).sql.gz` | `gunzip -c file.sql.gz \| mysql -u USER -h … 'USER$hive'` |
-| SQLite | `sqlite3 /srv/hive/data/hive.db ".backup '/srv/hive/backups/hive-$(date +%F).db'"`. Safe while running. | Stop the service and copy the file back. |
+| SQLite (any host) | `hive admin backup -o hive-$(date +%F).db` from your computer. The server makes a consistent copy inside its own process and streams it to you. This is the **only** safe way on PythonAnywhere. | Stop the server, copy the file over the live database, start it again. |
+| SQLite (local disk, VPS) | Alternatively `sqlite3 /srv/hive/data/hive.db ".backup '/srv/hive/backups/hive-$(date +%F).db'"` on the server. Safe while running on a local disk. | Same as above. |
 | Postgres | `pg_dump -Fc hive > hive-$(date +%F).dump` | `pg_restore -d hive --clean hive-….dump` |
 
 **Scheduling backups:**
@@ -583,6 +662,9 @@ well. Keep the window longer than any plan the orchestrator might still be refer
 | `ModuleNotFoundError: hive` or `pymysql` | The web app's virtualenv setting doesn't point at the env where you installed `hive[mysql]` (§4.2, §4.5). |
 | `Access denied for user` / `Unknown database` | Check the MySQL password (separate from your login), the `USER$hive` database name (the `$` is literal), and the host `USER.mysql.pythonanywhere-services.com`. URL-encode special characters in the password. |
 | `MySQL server has gone away` | Idle connections are recycled after 280 s automatically. If it persists, reload the web app. |
+| Agents log `503 db_busy`, or requests are slow (SQLite) | The database is briefly locked. Clients retry automatically. If it's frequent: make sure nothing else opens the `.db` file (consoles, scheduled tasks), and check `/api/v1/health` shows `"sqlite_journal": "delete"` on PythonAnywhere. |
+| SQLite stays locked permanently on PythonAnywhere | A stale lock on the network filesystem. Reload the web app. If that doesn't help, contact PythonAnywhere support, or restore the latest `hive admin backup` to a new file path and point `HIVE_DATABASE_URL` at it. |
+| `disk I/O error` / `database disk image is malformed` (SQLite) | Usually WAL on a network filesystem: set `HIVE_SQLITE_JOURNAL=delete`. Restore from a backup if the file is damaged. |
 | Agents get `401 bad_token` | Wrong or rotated agent token in `~/.hive/machine.toml`, or the server's database was replaced. |
 | `hive admin login` fails with 403 | The token isn't the admin token configured on the server. |
 | Dashboard loads but stays empty / asks for the token again | The admin token was mistyped; clear it via the browser's site data and re-enter it. |

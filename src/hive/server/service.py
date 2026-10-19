@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+from contextlib import contextmanager
 import re
 import secrets
 import threading
@@ -34,6 +36,7 @@ MAX_BODY = 8192
 RATE_PER_MIN = 20
 LEASE_TTL_DEFAULT, LEASE_TTL_MAX = 600, 3600
 STREAM_LINE_MAX, STREAM_BATCH_MAX, STREAM_KEEP = 4000, 500, 20000
+SCHEDULE_FALLBACK_SECONDS = 15
 
 
 class ApiError(Exception):
@@ -77,11 +80,32 @@ class Hive:
         self.failover_after = failover_after
         self.tick_interval = tick_interval
         self._last_tick = 0.0
+        self._last_sched = 0.0
         self._tick_lock = threading.Lock()
-        with engine.begin() as c:
+        self.is_sqlite = engine.dialect.name == "sqlite"
+        # SQLite: one writer per process at a time, so threads queue here instead of contending
+        # for the file lock (which on network filesystems is slow and fragile).
+        self._write_lock = threading.RLock()
+        self._reader = engine.execution_options(hive_read=True)
+        with self._write() as c:
             if c.execute(select(fleet.c.id)).first() is None:
                 c.execute(insert(fleet).values(id=1, state="setup", since=now(), config={},
                                                fencing_counter=0, goal=""))
+
+    # ------------------------------------------------------------------ transactions
+
+    @contextmanager
+    def _write(self):
+        if self.is_sqlite:
+            with self._write_lock, self.engine.begin() as c:
+                yield c
+        else:
+            with self.engine.begin() as c:
+                yield c
+
+    def _read(self):
+        """A read-only transaction: no write lock on SQLite, no row locks elsewhere."""
+        return self._reader.begin()
 
     # ------------------------------------------------------------------ helpers
 
@@ -142,7 +166,7 @@ class Hive:
     # ------------------------------------------------------------------ auth
 
     def authenticate(self, token: str) -> Actor:
-        with self.engine.begin() as c:
+        with self._read() as c:
             a = row(c.execute(select(agents).where(agents.c.token_hash == hash_token(token)))
                     .first())
         if a is None:
@@ -155,7 +179,7 @@ class Hive:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         load_roles(config.get("roles"))  # validate
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             self._set_fleet(c, config=config)
             self._emit(c, "config.updated", actor.name)
@@ -169,7 +193,7 @@ class Hive:
         if vendor not in ("claude", "gemini"):
             raise ApiError(400, "bad_vendor", "vendor must be 'claude' or 'gemini'")
         token = "hv_" + secrets.token_urlsafe(32)
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             try:
                 validate_assignment(roles, self._catalog(f))
@@ -188,14 +212,14 @@ class Hive:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         token = "hv_" + secrets.token_urlsafe(32)
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._agent(c, name)
             c.execute(update(agents).where(agents.c.name == name)
                       .values(token_hash=hash_token(token)))
         return {"name": name, "token": token}
 
     def roster(self) -> list[dict]:
-        with self.engine.begin() as c:
+        with self._read() as c:
             rows = c.execute(select(agents).order_by(agents.c.name)).fetchall()
             busy = {r.assignee for r in c.execute(
                 select(tasks.c.assignee).where(tasks.c.state.in_(ACTIVE_TASK_STATES)))}
@@ -211,7 +235,7 @@ class Hive:
         return out
 
     def whoami(self, actor: Actor) -> dict:
-        with self.engine.begin() as c:
+        with self._read() as c:
             f = self._fleet(c, lock=False)
         rs = self._roleset(f, actor) if not actor.is_admin else None
         return {
@@ -225,7 +249,7 @@ class Hive:
     def set_roles(self, actor: Actor, name: str, roles: list[str]) -> dict:
         """Admin applies directly. The orchestrator applies directly unless a mandatory role is
         affected, in which case a (non-blocking) role_change decision is raised for the user."""
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "role_reassign")
             cat = self._catalog(f)
@@ -250,18 +274,20 @@ class Hive:
         self._emit(c, "agent.roles_changed", by, name=name, roles=roles, old=old)
 
     def heartbeat(self, actor: Actor, busy: bool = False, attached: bool = False) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             a = self._agent(c, actor.name)
             was_offline = now() - a["last_seen"] >= self.offline_after
             c.execute(update(agents).where(agents.c.name == actor.name).values(
                 last_seen=now(), status="busy" if busy else "online", attached=attached))
             if was_offline:
                 self._emit(c, "agent.online", actor.name, name=actor.name)
+                f = self._fleet(c)
+                self._schedule(c, f)  # a returning agent may unblock waiting tasks
             f = self._fleet(c, lock=False)
         return {"fleet": self._public_fleet(f)}
 
     def report_quota(self, actor: Actor, until: float, detail: str = "") -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             c.execute(update(agents).where(agents.c.name == actor.name).values(quota_until=until))
             self._emit(c, "agent.quota_exhausted", actor.name, "role:orchestrator",
@@ -276,7 +302,7 @@ class Hive:
         if not actor.is_admin:
             aud = ["*", f"agent:{actor.name}"] + [f"role:{r}" for r in actor.roles]
             q = q.where(events.c.audience.in_(aud))
-        with self.engine.begin() as c:
+        with self._read() as c:
             rows = [row(r) for r in c.execute(q)]
             head = c.execute(select(func.max(events.c.seq))).scalar() or 0
         return {"events": rows, "head": head}
@@ -295,7 +321,7 @@ class Hive:
         elif not channel or not re.match(r"^#[a-z0-9][a-z0-9_-]{0,62}$", channel):
             raise ApiError(400, "bad_channel", "channel must look like #name")
         mentions = sorted(set(re.findall(r"@([a-z][a-z0-9-]{1,31})", body)))
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             if not actor.is_admin:
                 self._require_tool(f, actor, "dm" if recipient else "post")
@@ -333,11 +359,11 @@ class Hive:
             q = q.where(or_(messages.c.recipient.is_(None),
                             messages.c.recipient == actor.name, messages.c.author == actor.name))
         q = q.order_by(messages.c.id.desc()).limit(max(1, min(limit, 500)))
-        with self.engine.begin() as c:
+        with self._read() as c:
             return [row(r) for r in reversed(c.execute(q).fetchall())]
 
     def ack(self, actor: Actor, ids: list[int]) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             have = {r.message_id for r in c.execute(select(receipts.c.message_id).where(and_(
                 receipts.c.agent == actor.name, receipts.c.message_id.in_(ids))))}
             for i in set(ids) - have:
@@ -351,7 +377,7 @@ class Hive:
                     priority: int = 0, assignee: str | None = None) -> dict:
         if not title or len(title) > 200:
             raise ApiError(400, "bad_title", "title must be 1..200 chars")
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "task_create")
             for d in deps or []:
@@ -377,15 +403,15 @@ class Hive:
             q = q.where(tasks.c.state.in_(state.split(",")))
         if assignee:
             q = q.where(tasks.c.assignee == assignee)
-        with self.engine.begin() as c:
+        with self._read() as c:
             return [row(r) for r in c.execute(q)]
 
     def get_task(self, task_id: int) -> dict:
-        with self.engine.begin() as c:
+        with self._read() as c:
             return self._task(c, task_id)
 
     def assign_task(self, actor: Actor, task_id: int, to: str) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "task_assign")
             self._assign(c, f, actor.name, task_id, to)
@@ -405,7 +431,7 @@ class Hive:
                        assignee=to, kind=t["kind"], previous=t["assignee"])
 
     def claim_task(self, actor: Actor, task_id: int) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_active(f, actor)
             t = self._task(c, task_id)
@@ -422,7 +448,7 @@ class Hive:
 
     def update_task(self, actor: Actor, task_id: int, state: str | None = None,
                     note: str = "") -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             t = self._task(c, task_id)
             privileged = actor.is_admin or "orchestrator" in actor.roles
@@ -447,7 +473,7 @@ class Hive:
             return self._task(c, task_id)
 
     def handoff_task(self, actor: Actor, task_id: int, to: str, notes: str) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             t = self._task(c, task_id)
             if t["assignee"] != actor.name and "orchestrator" not in actor.roles \
@@ -459,7 +485,7 @@ class Hive:
             return self._task(c, task_id)
 
     def complete_task(self, actor: Actor, task_id: int, result: str = "") -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             t = self._task(c, task_id)
             if t["assignee"] != actor.name and not actor.is_admin \
@@ -478,7 +504,7 @@ class Hive:
         return self.update_task(actor, task_id, "cancelled", reason)
 
     def report_stuck(self, actor: Actor, task_id: int | None, details: str) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             if task_id:
                 t = self._task(c, task_id)
@@ -490,7 +516,7 @@ class Hive:
         return {"ok": True, "message": "The orchestrator was notified. End your turn and wait."}
 
     def review_verdict(self, actor: Actor, task_id: int, approve: bool, notes: str = "") -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "review_verdict")
             t = self._task(c, task_id)
@@ -554,7 +580,7 @@ class Hive:
         except ValueError as e:
             raise ApiError(400, "bad_globs", str(e))
         ttl = max(30, min(int(ttl), LEASE_TTL_MAX))
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "lease_acquire")
             self._require_active(f, actor)
@@ -586,7 +612,7 @@ class Hive:
             q = q.where(leases.c.state == "active")
         if holder:
             q = q.where(leases.c.holder == holder)
-        with self.engine.begin() as c:
+        with self._read() as c:
             return [row(r) for r in c.execute(q)]
 
     def _own_lease(self, c, actor: Actor, lease_id: int) -> dict:
@@ -601,7 +627,7 @@ class Hive:
 
     def extend_lease(self, actor: Actor, lease_id: int, ttl: int = LEASE_TTL_DEFAULT) -> dict:
         ttl = max(30, min(int(ttl), LEASE_TTL_MAX))
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._expire_leases(c, f)
             l = self._own_lease(c, actor, lease_id)
@@ -612,7 +638,7 @@ class Hive:
 
     def release_lease(self, actor: Actor, lease_id: int) -> dict:
         """Release without integrating (abandon). Integration releases via integrate()."""
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             l = self._own_lease(c, actor, lease_id)
             c.execute(update(leases).where(leases.c.id == lease_id).values(state="released"))
@@ -621,7 +647,7 @@ class Hive:
         return {"ok": True}
 
     def force_release_lease(self, actor: Actor, lease_id: int, reason: str = "") -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "lease_force_release")
             l = row(c.execute(select(leases).where(leases.c.id == lease_id)).first())
@@ -648,7 +674,7 @@ class Hive:
                   task_id: int | None = None, paths: list[str] | None = None) -> dict:
         if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise ApiError(400, "bad_sha", "sha must be a full 40-hex commit id")
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "lease_release")
             if f["state"] in ("frozen", "paused"):
@@ -686,7 +712,7 @@ class Hive:
 
     def confirm_integration(self, actor: Actor, sha: str, lease_fences: dict[str, int],
                             task_id: int | None = None, paths: list[str] | None = None) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             for lid in lease_fences:
                 c.execute(update(leases).where(and_(leases.c.id == int(lid),
@@ -706,7 +732,7 @@ class Hive:
         return {"status": "integrated", "sha": sha}
 
     def report_conflict(self, actor: Actor, task_id: int | None, detail: str) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._emit(c, "merge.conflict", actor.name, "role:orchestrator", name=actor.name,
                        task_id=task_id, detail=detail[:4000])
         return {"ok": True}
@@ -728,7 +754,7 @@ class Hive:
                                   "blocking_decision", "orchestrator", "main_sha", "goal")}
 
     def get_fleet(self) -> dict:
-        with self.engine.begin() as c:
+        with self._read() as c:
             f = self._fleet(c, lock=False)
             out = self._public_fleet(f)
             out["review"] = self._review_mode(f)
@@ -740,7 +766,7 @@ class Hive:
     def start_fleet(self, actor: Actor, goal: str) -> dict:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "only the user starts the fleet")
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             if f["state"] != "setup":
                 raise ApiError(409, "bad_state", f"fleet is already {f['state']}")
@@ -757,7 +783,7 @@ class Hive:
         return self.get_fleet()
 
     def fleet_control(self, actor: Actor, action: str) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "fleet_control")
             if action == "pause":
@@ -786,7 +812,7 @@ class Hive:
         """Admin escape hatch: return to setup (keeps agents, tasks and history)."""
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             self._set_fleet(c, state="setup", prev_state=None, frozen_at=None,
                             blocking_decision=None)
@@ -798,7 +824,7 @@ class Hive:
                          task_id: int | None = None, freeze: bool | None = None) -> dict:
         if kind not in ("start_approval", "stuck", "question"):
             raise ApiError(400, "bad_kind", "kind must be start_approval, stuck or question")
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "decision_request")
             if kind == "start_approval":
@@ -847,13 +873,13 @@ class Hive:
         q = select(decisions).order_by(decisions.c.id)
         if state:
             q = q.where(decisions.c.state.in_(state.split(",")))
-        with self.engine.begin() as c:
+        with self._read() as c:
             return [row(r) for r in c.execute(q)]
 
     def answer_decision(self, actor: Actor, did: int, answer: str, note: str = "") -> dict:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "only the user answers decisions")
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             d = row(c.execute(select(decisions).where(decisions.c.id == did)).first())
             if d is None:
@@ -916,7 +942,7 @@ class Hive:
                        level: str = "fyi") -> dict:
         if level not in ("fyi", "decision-needed", "alert"):
             raise ApiError(400, "bad_level", "level must be fyi, decision-needed or alert")
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "status_publish")
             sid = c.execute(insert(status_feed).values(
@@ -929,7 +955,7 @@ class Hive:
     def list_status(self, since_id: int = 0, limit: int = 50) -> list[dict]:
         q = (select(status_feed).where(status_feed.c.id > since_id)
              .order_by(status_feed.c.id.desc()).limit(max(1, min(limit, 200))))
-        with self.engine.begin() as c:
+        with self._read() as c:
             return [row(r) for r in reversed(c.execute(q).fetchall())]
 
     # ------------------------------------------------------------------ live output streams
@@ -941,7 +967,7 @@ class Hive:
         if not lines:
             return {"ok": True}
         t = now()
-        with self.engine.begin() as c:
+        with self._write() as c:
             c.execute(insert(streams), [{"agent": actor.name, "ts": t, "run": run[:64],
                                          "text": l} for l in lines])
             # Keep a bounded tail per agent.
@@ -960,7 +986,7 @@ class Hive:
         if agent:
             q = q.where(streams.c.agent == agent)
         limit = max(1, min(limit, 2000))
-        with self.engine.begin() as c:
+        with self._read() as c:
             if since_id <= 0:  # initial view: the latest `limit` lines
                 rows = list(reversed(c.execute(q.order_by(streams.c.id.desc()).limit(limit))
                                      .fetchall()))
@@ -973,7 +999,7 @@ class Hive:
 
     def request_report(self, actor: Actor, target: str, about: str,
                        task_id: int | None = None) -> dict:
-        with self.engine.begin() as c:
+        with self._write() as c:
             f = self._fleet(c)
             self._require_tool(f, actor, "report_request")
             self._agent(c, target)
@@ -989,7 +1015,7 @@ class Hive:
                       task_id: int | None = None, request_id: int | None = None) -> dict:
         if not summary:
             raise ApiError(400, "bad_summary", "summary is required")
-        with self.engine.begin() as c:
+        with self._write() as c:
             self._fleet(c)
             if request_id:
                 r = row(c.execute(select(reports).where(reports.c.id == request_id)).first())
@@ -1014,11 +1040,11 @@ class Hive:
                          ("state", state)):
             if val:
                 q = q.where(getattr(reports.c, col) == val)
-        with self.engine.begin() as c:
+        with self._read() as c:
             return [row(r) for r in reversed(c.execute(q).fetchall())]
 
     def get_report(self, rid: int) -> dict:
-        with self.engine.begin() as c:
+        with self._read() as c:
             r = row(c.execute(select(reports).where(reports.c.id == rid)).first())
         if r is None:
             raise ApiError(404, "no_such_report", f"no report #{rid}")
@@ -1034,7 +1060,9 @@ class Hive:
             return
         try:
             self._last_tick = t
-            with self.engine.begin() as c:
+            if not self._tick_due(t):
+                return
+            with self._write() as c:
                 f = self._fleet(c)
                 self._expire_leases(c, f)
                 for a in c.execute(select(agents).where(agents.c.status != "offline")).fetchall():
@@ -1047,6 +1075,54 @@ class Hive:
                 self._schedule(c, self._fleet(c))
         finally:
             self._tick_lock.release()
+
+    def _tick_due(self, t: float) -> bool:
+        """Cheap read-only check so an idle server never takes the write lock in tick()."""
+        with self._read() as c:
+            f = self._fleet(c, lock=False)
+            if f["state"] not in ("frozen", "paused") and c.execute(
+                    select(leases.c.id).where(and_(leases.c.state == "active",
+                                                   leases.c.expires_at < t)).limit(1)).first():
+                return True
+            if c.execute(select(agents.c.name).where(and_(
+                    agents.c.status != "offline", agents.c.last_seen > 0,
+                    agents.c.last_seen <= t - self.offline_after)).limit(1)).first():
+                return True
+            if f["orchestrator"] and f["state"] != "setup" and \
+                    self._cfg(f, "orchestrator").get("standby"):
+                a = c.execute(select(agents.c.last_seen, agents.c.quota_until)
+                              .where(agents.c.name == f["orchestrator"])).first()
+                if a and ((a.last_seen and t - a.last_seen > self.failover_after)
+                          or a.quota_until > t):
+                    return True
+            # Scheduling normally happens on every state change; this is only a safety net.
+            if t - self._last_sched >= SCHEDULE_FALLBACK_SECONDS and \
+                    f["state"] in ("running", "planning") and c.execute(
+                        select(tasks.c.id).where(and_(tasks.c.state == "open",
+                                                      tasks.c.assignee.is_(None))).limit(1)
+                    ).first():
+                self._last_sched = t
+                return True
+        return False
+
+    # ------------------------------------------------------------------ backups
+
+    def backup_sqlite(self, dest_path: str) -> None:
+        """Consistent online copy of a SQLite database, made inside the server process so no
+        second process ever opens the live file (important on network filesystems)."""
+        if not self.is_sqlite or getattr(self.engine, "hive_sqlite_journal", None) == "memory":
+            raise ApiError(400, "not_sqlite",
+                           "backups via the API are for SQLite; use your database's dump tool")
+        with self._write_lock:
+            raw = self.engine.raw_connection()
+            try:
+                dst = sqlite3.connect(dest_path)
+                try:
+                    raw.driver_connection.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                raw.close()
 
     def _failover(self, c, f: dict) -> None:
         orch = f["orchestrator"]
@@ -1082,5 +1158,5 @@ class Hive:
             return
 
 
-def create_hive(database_url: str, **kw) -> Hive:
-    return Hive(db.make_engine(database_url), **kw)
+def create_hive(database_url: str, sqlite_journal: str | None = None, **kw) -> Hive:
+    return Hive(db.make_engine(database_url, sqlite_journal), **kw)

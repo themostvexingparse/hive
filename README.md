@@ -176,7 +176,9 @@ server for anything public.
 
 In short, the server is a WSGI app (`hive.server.wsgi:application`) that needs no background
 workers. A PythonAnywhere **Developer** plan with its included MySQL has a wide margin for a
-7-agent fleet: well under 1 GB of data per busy year. The free plan isn't suitable.
+7-agent fleet: well under 1 GB of data per busy year. The **free plan** works for trials and
+small fleets, using a SQLite file in Hive's network-filesystem mode
+([DEPLOYMENT.md §4.8](docs/DEPLOYMENT.md#48-free-beginner-plan-with-sqlite)).
 
 ### 4.3 Log in as admin
 
@@ -932,7 +934,8 @@ It refreshes every 5 s; live output refreshes every 1.5 s.
 
 | Command | Description |
 |---|---|
-| `hive server [--host H] [--port P] [--db URL] [--admin-token T]` | Run the server (development). |
+| `hive server [--host H] [--port P] [--db URL] [--sqlite-journal wal\|delete\|truncate] [--admin-token T]` | Run the server (development). |
+| `hive admin backup [-o FILE]` | Download a consistent copy of the server's SQLite database. |
 | `hive admin login --server URL --token T` | Save admin credentials to `~/.hive/admin.toml`. |
 | `hive admin enroll NAME --vendor claude\|gemini --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
 | `hive admin roles NAME r1,r2` | Change an agent's roles. |
@@ -1029,6 +1032,7 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `HIVE_ADMIN_TOKEN` | server, admin CLI | Admin token (overrides `admin.toml` for the CLI). |
 | `HIVE_DATABASE_URL` | server | Database URL. |
 | `HIVE_GITHUB_TOKEN` | server | Enables GitHub mode. |
+| `HIVE_SQLITE_JOURNAL` | server | SQLite journal mode: `wal` (default) or `delete`/`truncate` for network filesystems; auto-`delete` on PythonAnywhere. |
 | `HIVE_SERVER_URL` | admin CLI | Overrides the server URL in `admin.toml`. |
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |

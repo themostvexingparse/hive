@@ -44,8 +44,8 @@ def wait_for(pred, timeout=60, what="condition"):
     raise AssertionError(f"timed out waiting for {what}")
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
+@pytest.fixture(params=["wal", "delete"])
+def world(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HIVE_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(core, "COALESCE_SECONDS", 0)
     monkeypatch.setattr(core, "MIN_GAP_SECONDS", 0)
@@ -64,7 +64,8 @@ def world(tmp_path, monkeypatch):
     git(clone, "commit", "-m", "init")
     git(clone, "push", "origin", "main")
 
-    hive = create_hive(f"sqlite:///{tmp_path / 'hive.db'}", tick_interval=0)
+    hive = create_hive(f"sqlite:///{tmp_path / 'hive.db'}", sqlite_journal=request.param,
+                       tick_interval=0)
     srv = serve(create_app(hive, admin_token=ADMIN))
     url = f"http://127.0.0.1:{srv.server_port}"
     admin = ServerClient(url, ADMIN)

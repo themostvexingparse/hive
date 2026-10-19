@@ -21,9 +21,10 @@ class Client:
         return call
 
 
-@pytest.fixture
-def env(tmp_path):
-    hive = create_hive(f"sqlite:///{tmp_path / 'hive.db'}", tick_interval=0)
+@pytest.fixture(params=["wal", "delete"])
+def env(tmp_path, request):
+    hive = create_hive(f"sqlite:///{tmp_path / 'hive.db'}", sqlite_journal=request.param,
+                       tick_interval=0)
     app = create_app(hive, admin_token=ADMIN)
     fc = app.test_client()
     admin = Client(fc, ADMIN)
