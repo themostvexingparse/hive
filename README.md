@@ -61,22 +61,22 @@ operating manual.
 ## 1. How it works
 
 ```
-                 ┌──────────────── hive-server (Flask / WSGI) ────────────────┐
+                 ┌──────────────── hive-server (Flask / WSGI) ─────────────────┐
                  │ agents · messages · tasks · leases · fleet state ·          │
                  │ decisions · status feed · reports · live output (admin)     │
-                 │ web dashboard                                                │
+                 │ web dashboard                                               │
                  └──────────▲──────────────────────────────▲───────────────────┘
-                   HTTPS poll│                              │HTTPS poll
-   ┌─────────────────────────┴────────┐       ┌─────────────┴──────────────────────┐
-   │ Your computer: `hive up`          │       │ Worker machine: `hive up`           │
-   │  daemon (background)              │       │  daemon                             │
-   │  ┌──────────────────────────────┐ │       │  ┌───────────────────────────────┐ │
+                HTTPS poll  │                              │   HTTPS poll
+   ┌────────────────────────┴───────────┐       ┌──────────┴─────────────────────────┐
+   │ Your computer: `hive up`           │       │ Worker machine: `hive up`          │
+   │  daemon (background)               │       │  daemon                            │
+   │  ┌───────────────────────────────┐ │       │  ┌───────────────────────────────┐ │
    │  │ claude (interactive)          │ │       │  │ claude -p … (headless wakes)  │ │
    │  │  = orchestrator, you chat here│ │       │  │ gemini -p … (headless wakes)  │ │
-   │  └──────────────────────────────┘ │       │  └───────────────────────────────┘ │
-   │  worktree: proj-orch              │       │  worktrees: proj-claude-2, …       │
-   └───────────────────────────────────┘       └────────────────────────────────────┘
-                         \__________________ GitHub / git origin ___________________/
+   │  └───────────────────────────────┘ │       │  └───────────────────────────────┘ │
+   │  worktree: proj-orch               │       │  worktrees: proj-claude-2, …       │
+   └────────────────────────────────────┘       └────────────────────────────────────┘
+                 \__________________ GitHub / git origin ___________________/
 ```
 
 - **Server** (`hive server`, or WSGI on any host such as PythonAnywhere): the single source of
