@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hive Dashboard</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e2dc;
+          --accent:#2f5bd3; --warn:#b4540a; --bad:#b42318; --ok:#1f7a3f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --fg:#ecebe6; --muted:#9a9993; --card:#1f1f1d; --line:#33332f;
+            --accent:#7c9cf5; --warn:#f0a35a; --bad:#f27b70; --ok:#6cc58c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; gap:12px; align-items:center; padding:12px 16px;
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  .pill { padding:2px 10px; border-radius:999px; border:1px solid var(--line); font-size:12px; }
+  .pill.frozen,.pill.awaiting_approval { color:var(--warn); border-color:var(--warn); }
+  .pill.running { color:var(--ok); border-color:var(--ok); }
+  main { display:grid; gap:16px; padding:16px; grid-template-columns: 1fr; max-width:1200px;
+         margin:0 auto; }
+  @media (min-width: 900px) { main { grid-template-columns: 1.3fr 1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+               margin:0 0 8px; }
+  .item { border-top:1px solid var(--line); padding:8px 0; }
+  .item:first-of-type { border-top:0; }
+  .muted { color:var(--muted); font-size:12px; }
+  .decision { border:1px solid var(--warn); border-radius:6px; padding:10px; margin-bottom:8px; }
+  .alert { color:var(--bad); }
+  input, textarea, button { font:inherit; color:inherit; }
+  textarea, input[type=text], input[type=password] { width:100%; background:var(--bg);
+           border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 12px;
+           cursor:pointer; }
+  button.secondary { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  .row { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:4px 6px; border-top:1px solid var(--line); vertical-align:top; }
+  pre { white-space:pre-wrap; margin:4px 0 0; font:12px/1.4 ui-monospace, monospace; }
+  #login { max-width:420px; margin:80px auto; }
+</style>
+</head>
+<body>
+<div id="login" hidden>
+  <section>
+    <h2>Admin token</h2>
+    <input type="password" id="tok" placeholder="HIVE_ADMIN_TOKEN">
+    <div class="row"><button id="save">Open dashboard</button></div>
+  </section>
+</div>
+<div id="app" hidden>
+  <header>
+    <h1>Hive</h1>
+    <span id="state" class="pill">…</span>
+    <span id="goal" class="muted"></span>
+    <span style="flex:1"></span>
+    <button class="secondary" id="pause">Pause</button>
+    <button class="secondary" id="resume">Resume</button>
+  </header>
+  <main>
+    <div>
+      <section id="decisions-wrap" hidden><h2>Decisions needed</h2><div id="decisions"></div></section>
+      <section style="margin-top:16px"><h2>Talk to the orchestrator</h2>
+        <div id="startbox" hidden>
+          <textarea id="goalText" rows="3" placeholder="Describe the goal for the fleet"></textarea>
+          <div class="row"><button id="start">Start fleet</button></div>
+        </div>
+        <div id="chat"></div>
+        <textarea id="say" rows="2" placeholder="Message #user (wakes the orchestrator)"></textarea>
+        <div class="row"><button id="send">Send</button></div>
+      </section>
+      <section style="margin-top:16px"><h2>Status feed</h2><div id="status"></div></section>
+    </div>
+    <div>
+      <section><h2>Agents</h2><table id="agents"></table></section>
+      <section style="margin-top:16px"><h2>Tasks</h2><table id="tasks"></table></section>
+      <section style="margin-top:16px"><h2>Leases</h2><table id="leases"></table></section>
+      <section style="margin-top:16px"><h2>Live output</h2>
+        <select id="streamAgent"><option value="">all agents</option></select>
+        <pre id="stream" style="max-height:420px;overflow:auto;margin-top:8px"></pre>
+      </section>
+    </div>
+  </main>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let token = "";
+try { token = localStorage.getItem("hiveToken") || ""; } catch (e) {}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ago = (t) => { const s = Math.round(Date.now()/1000 - t); return s < 60 ? s+"s" : s < 3600 ? Math.round(s/60)+"m" : Math.round(s/3600)+"h"; };
+async function api(path, method="GET", body) {
+  const r = await fetch("/api/v1" + path, { method, headers: { "Authorization": "Bearer " + token,
+    "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 || r.status === 403) { showLogin(); throw new Error("auth"); }
+  if (!r.ok) { alert(data.message || r.status); throw new Error(data.message); }
+  return data;
+}
+function showLogin() { $("login").hidden = false; $("app").hidden = true; }
+$("save").onclick = () => { token = $("tok").value.trim(); try { localStorage.setItem("hiveToken", token); } catch (e) {} boot(); };
+async function refresh() {
+  const [fleet, decisions, status, agents, tasks, leases, chat] = await Promise.all([
+    api("/fleet"), api("/decisions?state=open"), api("/status?limit=30"), api("/agents"),
+    api("/tasks"), api("/leases"), api("/messages?channel=%23user&limit=30")]);
+  $("state").textContent = fleet.state; $("state").className = "pill " + fleet.state;
+  $("goal").textContent = fleet.goal ? "Goal: " + fleet.goal.slice(0, 120) : "";
+  $("startbox").hidden = fleet.state !== "setup";
+  $("decisions-wrap").hidden = decisions.length === 0;
+  $("decisions").innerHTML = decisions.map(d => `<div class="decision">
+    <b>#${d.id} · ${esc(d.kind)}</b> <span class="muted">from ${esc(d.raised_by)} · ${ago(d.created)} ago</span>
+    <pre>${esc(d.question)}</pre>${d.context ? `<details><summary class="muted">context</summary><pre>${esc(d.context)}</pre></details>` : ""}
+    <input type="text" id="note${d.id}" placeholder="Note / instructions (optional)">
+    <div class="row">${(d.options.length ? d.options : ["approve", "reject"]).map(o =>
+      `<button data-d="${d.id}" data-a="${esc(o)}">${esc(o)}</button>`).join("")}</div></div>`).join("");
+  document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
+    await api(`/decisions/${b.dataset.d}/answer`, "POST", { answer: b.dataset.a, note: $("note" + b.dataset.d).value });
+    refresh(); });
+  $("status").innerHTML = status.slice().reverse().map(s => `<div class="item ${s.level === "alert" ? "alert" : ""}">
+    <b>${esc(s.summary)}</b> <span class="muted">${esc(s.level)} · ${esc(s.author)} · ${ago(s.ts)} ago</span>
+    ${s.body ? `<pre>${esc(s.body)}</pre>` : ""}</div>`).join("") || '<span class="muted">No updates yet.</span>';
+  $("chat").innerHTML = chat.map(m => `<div class="item"><b>${esc(m.author)}</b> <span class="muted">${ago(m.ts)} ago</span><pre>${esc(m.body)}</pre></div>`).join("");
+  $("agents").innerHTML = "<tr><th>Agent</th><th>Roles</th><th>State</th></tr>" + agents.map(a =>
+    `<tr><td>${esc(a.name)} <span class="muted">${esc(a.vendor)}</span></td><td>${esc(a.roles.join(", "))}</td>
+     <td>${a.exhausted ? "out of quota" : a.online ? esc(a.status) : "offline"}</td></tr>`).join("");
+  $("tasks").innerHTML = "<tr><th>#</th><th>Task</th><th>State</th><th>Assignee</th></tr>" + tasks.map(t =>
+    `<tr><td>${t.id}</td><td>${esc(t.title)} <span class="muted">${esc(t.kind)}</span></td><td>${esc(t.state)}</td><td>${esc(t.assignee || "")}</td></tr>`).join("");
+  $("leases").innerHTML = "<tr><th>#</th><th>Holder</th><th>Paths</th><th>Expires</th></tr>" + leases.map(l =>
+    `<tr><td>${l.id}</td><td>${esc(l.holder)}</td><td>${esc(l.globs.join(", "))}</td><td>${Math.round((l.expires_at - Date.now()/1000)/60)}m</td></tr>`).join("");
+}
+let streamLast = 0, streamAgent = "", streamLines = [];
+$("streamAgent").onchange = () => { streamAgent = $("streamAgent").value; streamLast = 0; streamLines = []; pollStream(); };
+async function pollStream() {
+  const q = `/streams?since_id=${streamLast}&limit=${streamLast ? 1000 : 300}` + (streamAgent ? `&agent=${encodeURIComponent(streamAgent)}` : "");
+  const r = await api(q);
+  if (!r.lines.length) return;
+  streamLast = r.last_id;
+  streamLines = streamLines.concat(r.lines.map(l => (streamAgent ? "" : `[${l.agent}] `) + l.text)).slice(-2000);
+  const el = $("stream"), atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  el.textContent = streamLines.join("\n");
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+async function fillAgents() {
+  const agents = await api("/agents");
+  $("streamAgent").innerHTML = '<option value="">all agents</option>' + agents.map(a =>
+    `<option value="${esc(a.name)}">${esc(a.name)}</option>`).join("");
+  $("streamAgent").value = streamAgent;
+}
+$("send").onclick = async () => { const body = $("say").value.trim(); if (!body) return;
+  await api("/messages", "POST", { channel: "#user", body, priority: "high" }); $("say").value = ""; refresh(); };
+$("start").onclick = async () => { await api("/fleet/start", "POST", { goal: $("goalText").value }); refresh(); };
+$("pause").onclick = async () => { await api("/fleet/pause", "POST", {}); refresh(); };
+$("resume").onclick = async () => { await api("/fleet/resume", "POST", {}); refresh(); };
+async function boot() {
+  if (!token) return showLogin();
+  $("login").hidden = true; $("app").hidden = false;
+  try { await refresh(); await fillAgents(); } catch (e) { return; }
+  setInterval(() => refresh().catch(() => {}), 5000);
+  setInterval(() => pollStream().catch(() => {}), 1500);
+}
+boot();
+</script>
+</body>
+</html>
