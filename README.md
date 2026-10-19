@@ -32,7 +32,7 @@ operating manual.
 1. [How it works](#1-how-it-works)
 2. [Requirements](#2-requirements)
 3. [Installation](#3-installation)
-4. [Running the server](#4-running-the-server)
+4. [Running the server](#4-running-the-server) (full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md))
 5. [Preparing the repository (`hive init`)](#5-preparing-the-repository-hive-init)
 6. [Enrolling agents and setting up machines](#6-enrolling-agents-and-setting-up-machines)
 7. [Running the fleet (`hive up`)](#7-running-the-fleet-hive-up)
@@ -166,43 +166,19 @@ hive server --admin-token "$(openssl rand -hex 24)" --db sqlite:///hive.db --por
 This is Flask's built-in server: fine for trying Hive and for a LAN. Use a proper WSGI
 server for anything public.
 
-### 4.2 PythonAnywhere
+### 4.2 Public deployment (PythonAnywhere, VPS, containers)
 
-1. Upload or clone this repository, then run `pip install --user '/path/to/hive[mysql]'` in a
-   Bash console.
-2. Create a MySQL database in the **Databases** tab, e.g. `USER$hive`.
-3. **Web** tab: add a new web app with *Manual configuration* and your Python version. Edit
-   its WSGI file to contain:
+**➜ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full guide:
+- choosing a host;
+- **capacity planning** with measured storage and request-load numbers;
+- step-by-step PythonAnywhere and VPS (gunicorn + Caddy + systemd) setups;
+- upgrades, backups, data pruning, monitoring, hardening and troubleshooting.
 
-   ```python
-   import os
-   os.environ["HIVE_ADMIN_TOKEN"] = "<long random secret>"
-   os.environ["HIVE_DATABASE_URL"] = (
-       "mysql+pymysql://USER:PASSWORD@USER.mysql.pythonanywhere-services.com/USER$hive")
-   # os.environ["HIVE_GITHUB_TOKEN"] = "<fine-grained token>"   # optional, see §14.4
-   from hive.server.wsgi import application
-   ```
-4. Reload the web app. Open `https://USER.pythonanywhere.com/api/v1/health`; it should return
-   `{"ok": true}`.
+In short, the server is a WSGI app (`hive.server.wsgi:application`) that needs no background
+workers. A PythonAnywhere **Developer** plan with its included MySQL has a wide margin for a
+7-agent fleet: well under 1 GB of data per busy year. The free plan isn't suitable.
 
-Why it works there:
-- Daemons poll instead of holding connections open.
-- Lease expiry, offline detection, failover and scheduling all run lazily at the start of
-  requests, so no scheduled tasks are needed.
-
-Use a paid plan: free accounts restrict outbound internet and CPU time.
-
-### 4.3 Any other host (VPS, Fly.io, Railway, …)
-
-Run the WSGI app with any WSGI server, for example:
-
-```sh
-HIVE_ADMIN_TOKEN=… HIVE_DATABASE_URL=… gunicorn -w 2 'hive.server.wsgi:application'
-```
-
-Put it behind TLS (Caddy, nginx, or the platform's proxy).
-
-### 4.4 Log in as admin
+### 4.3 Log in as admin
 
 On your computer:
 
@@ -1206,3 +1182,4 @@ uv run pytest -q
 | `src/hive/init.py` | bundles and skills |
 | `src/hive/cli.py` | the `hive` command |
 | `src/hive/roles.py`, `globs.py`, `config.py` | shared logic |
+| `scripts/simulate_load.py` | storage and request-cost simulation behind [docs/DEPLOYMENT.md §3](docs/DEPLOYMENT.md#3-capacity-planning-how-much-data-and-load-to-expect) |
