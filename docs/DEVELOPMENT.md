@@ -1,0 +1,75 @@
+# Development
+
+This page is for working on Hive itself: running the tests, finding your way around the
+source, and the documents that record its design and reviews.
+
+---
+
+## Setting up
+
+```sh
+uv sync
+uv run pytest -q
+uv run hive --version        # the development copy, without installing it
+```
+
+To try a change in a real fleet, re-install it on each machine with the installer scripts
+([Installation](INSTALLATION.md)); `install.bat /test` or `install.sh --test` runs the suite
+first and installs only if it passes.
+
+---
+
+## Tests
+
+| Test file | Covers |
+|---|---|
+| `tests/test_server.py` | roles and fleet validation, the approval gate, scheduling, leases and fencing, freeze and thaw, message audiences, reviews, role-change decisions |
+| `tests/test_e2e.py` | a real server, daemon, bare git origin and two worktrees. A scripted fake agent CLI (`tests/fake_agent.py`) plans, gets approved, is denied an unleased write, leases, integrates into `main`, completes, reports and streams output. Also covers an interactive orchestrator in `await_events` and the freeze on a stuck agent. |
+| `tests/test_init_and_launch.py` | bundle generation and legacy cleanup, launch commands, tool-name matching, stream formatting |
+| `tests/test_codex.py` | Codex CLI support: bundle, launch commands, the slot's private `CODEX_HOME`, output, hooks |
+| `tests/test_codex_e2e.py` | end to end with the real Codex CLI and a scripted model server; runs only when `codex` is installed |
+| `tests/test_gitops.py` | git status parsing and the lease release transaction against a real git repository |
+| `tests/test_permissions.py` | shell-command tiers and the generated permission files |
+| `tests/test_shells.py` | running commands in bash, PowerShell and cmd.exe |
+| `tests/test_prompts.py` | project prompt files in `.hive/prompts/`, and that agents can't change them |
+| `tests/test_join.py` | `hive join`: each slot keeps the server it was joined to |
+| `tests/test_overview.py` | `hive overview`, offline and against a live server |
+| `tests/test_projects.py` | several projects on one server: routing, isolation, the two kinds of admin token |
+| `tests/test_archives.py` | archiving a fleet's history, clearing it, and reading archives back |
+| `tests/test_sqlite.py` | SQLite deployment, including the PythonAnywhere free-tier setup |
+| `tests/test_daemon.py` | daemon and CLI robustness |
+| `tests/test_ui.py` | coloured terminal output |
+
+The end-to-end tests use `tests/fake_agent.py`, a scripted stand-in for a vendor CLI, so
+they need no accounts and use no quota.
+
+---
+
+## Source layout
+
+| Path | Contents |
+|---|---|
+| `src/hive/server/` | Flask app (`app.py`), business logic (`service.py`), schema (`db.py`), project routing (`router.py`, `projects.py`), archives, the dashboard (`dashboard.html`) |
+| `src/hive/daemon/` | daemon core, local API, git operations (`gitops.py`), CLI launching and stream formatting (`wake.py`), shells, local state |
+| `src/hive/mcp_server.py`, `hooks.py`, `local.py` | the pieces the agent CLIs run |
+| `src/hive/init.py`, `prompts.py` | bundles, skills and project prompt files |
+| `src/hive/permissions.py` | shell-command parsing and the permission tiers |
+| `src/hive/overview.py` | `hive overview` |
+| `src/hive/cli.py` | the `hive` command |
+| `src/hive/roles.py`, `globs.py`, `config.py`, `ui.py` | shared logic and terminal output |
+| `scripts/simulate_load.py` | storage and request-cost simulation behind [DEPLOYMENT.md §3](DEPLOYMENT.md#3-capacity-planning-how-much-data-and-load-to-expect) |
+| `scripts/audit/` | probes used by the code audits |
+
+---
+
+## Design and review documents
+
+| Document | Contents |
+|---|---|
+| [SPEC.md](../SPEC.md) | The design rationale and full specification: server API, state machine, protocols. Source code docstrings refer to its sections (`SPEC §13`). |
+| [AUDIT.md](AUDIT.md) | A code audit of the whole codebase (2026-10-20). |
+| [MULTI_PROJECT_AUDIT.md](MULTI_PROJECT_AUDIT.md) | The audit behind several projects on one server. |
+
+---
+
+[← Back to the README](../README.md)

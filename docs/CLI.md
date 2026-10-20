@@ -2,9 +2,9 @@
 
 `hive` is the one command for everything in Hive: running the server, setting up a
 repository, adding agents, running machines, and steering the fleet. This guide shows each
-command with examples. The README's [command reference](../README.md#19-command-reference) is
-the one-table summary; [§20](../README.md#20-configuration-reference) has every config file
-and environment variable.
+command with examples. [§15](#15-command-summary) is the one-table summary of every command
+and option; the [configuration reference](CONFIGURATION.md) has every config file and
+environment variable.
 
 ---
 
@@ -24,6 +24,8 @@ and environment variable.
 12. [Commands the agent CLIs run](#12-commands-the-agent-clis-run)
 13. [Common recipes](#13-common-recipes)
 14. [Error messages and what to do](#14-error-messages-and-what-to-do)
+15. [Command summary](#15-command-summary)
+16. [Coloured output](#16-coloured-output)
 
 ---
 
@@ -218,7 +220,7 @@ hive prompts --role reviewer --full                  # include the built-in skil
 hive prompts --path ../myapp
 ```
 
-Use it after editing `.hive/prompts/` (README §17.5) to check your additions and placeholders.
+Use it after editing `.hive/prompts/` ([Customising what agents are told](PROMPTS.md)) to check your additions and placeholders.
 
 ---
 
@@ -392,15 +394,15 @@ hive reset     # emergency: back to setup; keeps agents, tasks and history
 ```
 
 To end a run and start over cleanly, use the dashboard's *Archives… → Archive & clear…*
-instead of `reset` (README §18).
+instead of `reset` ([Monitoring](MONITORING.md#archives)).
 
 ---
 
 ## 10. Several projects on one server
 
 One server can host several projects, each with its own fleet, agents and database. A project
-lives at `https://host/p/NAME`. The server's own address is the `default` project. See README
-[§4.4](../README.md#44-several-projects-on-one-server) for how it works.
+lives at `https://host/p/NAME`. The server's own address is the `default` project. See
+[Several projects on one server](PROJECTS.md) for how it works.
 
 ### Managing projects (server admin only)
 
@@ -544,5 +546,85 @@ then type. From anywhere else: `hive say "…"`.
 | `no project named 'x' on this server` | Wrong project name in the URL, or the project was archived (`hive admin project list`). |
 | `no hive.toml found (run hive init)` | Run the command inside a repository prepared with `hive init`. |
 
-For anything else, `hive overview` lists problems with their fixes, and README
-[§24](../README.md#24-troubleshooting) covers troubleshooting.
+For anything else, `hive overview` lists problems with their fixes, and [Troubleshooting](TROUBLESHOOTING.md) covers the rest.
+
+---
+
+## 15. Command summary
+
+Every command and option in one place. The sections above explain each one with examples.
+The commands the agent CLIs run are in [§12](#12-commands-the-agent-clis-run).
+
+### User / admin
+
+| Command | Description |
+|---|---|
+| `hive server [--host H] [--port P] [--db URL] [--sqlite-journal wal\|delete\|truncate] [--admin-token T]` | Run the server (development). |
+| `hive admin backup [-o FILE]` | Download a consistent copy of the project's SQLite database. |
+| `hive admin login --server URL --token T` | Save admin credentials to `~/.hive/admin.toml`. `URL` may be a project's (`…/p/NAME`), with that project's admin token. |
+| `hive admin project create NAME [--name TEXT] [--db-url URL] [--github-token-env VAR]` | Add a project (server admin only); prints its URL and admin token ([§10](#10-several-projects-on-one-server)). |
+| `hive admin project list` | List the server's projects. |
+| `hive admin project set NAME [--name TEXT] [--github-token-env VAR] [--archive\|--unarchive]` | Rename, archive or change a project's GitHub token variable. |
+| `hive admin project rotate NAME` | Replace a project's admin token. |
+| `hive admin enroll NAME --vendor claude\|gemini\|codex --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
+| `hive admin roles NAME r1,r2` | Change an agent's roles. |
+| `hive admin push-config` | Upload `hive.toml` from the current repository. |
+| `hive init [PATH] [--server URL] [--main BRANCH] [--hive-cmd CMD]` | Prepare a repository ([Preparing the repository](REPOSITORY.md)). |
+| `hive overview [PATH] [--offline]` | Describe this project's Hive setup: repository, configuration, permissions, roles, prompts, this machine's slots, the fleet, and problems with their fixes ([Preparing the repository](REPOSITORY.md)). |
+| `hive prompts [--role R1,R2] [--slot NAME] [--vendor claude\|gemini\|codex] [--full] [--path DIR]` | Show what Hive tells an agent with those roles, including your additions ([Customising what agents are told](PROMPTS.md)). |
+| `hive start "GOAL"` | Start the fleet; uploads `hive.toml` if run in the repo. |
+| `hive status [--all] [-n N] [-v]` | Fleet state, waiting decision, agents, tasks (`--all` includes finished ones), leases, last N status entries (`-v` with bodies). |
+| `hive decisions [--all]` | Open and queued decisions with context (`--all`: also answered ones). |
+| `hive decide ID ANSWER [--note TEXT]` | Answer a decision. |
+| `hive say "TEXT"` | Message the orchestrator in `#user`. |
+| `hive watch [AGENT] [-n N] [--no-follow]` | Follow live output ([Following live output in the terminal (`hive watch`)](MONITORING.md#following-live-output-in-the-terminal-hive-watch)). |
+| `hive pause` / `hive resume` / `hive reset` | Fleet control ([Pausing, resuming, resetting](LIFECYCLE.md#pausing-resuming-resetting)). |
+
+Every admin command takes `--project NAME` (anywhere on the line; also `HIVE_PROJECT`) to act
+on that project; inside a repository whose `hive.toml` names a project, that project is the
+default ([§10](#10-several-projects-on-one-server)).
+
+### Machine
+
+| Command | Description |
+|---|---|
+| `hive join NAME --vendor V --token T [--server URL] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--model MODEL] [--hive-cmd CMD] [--replace]` | Add a slot to this machine ([Join each slot on the machine that will run it](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)). |
+| `hive up [-v] [--headless]` | Run this machine's slots ([Running the fleet](RUNNING.md)). |
+| `hive chat SLOT [--fresh]` | Attach interactively to a slot ([Taking over a slot interactively (`hive chat`)](RUNNING.md#taking-over-a-slot-interactively-hive-chat)). |
+
+---
+
+## 16. Coloured output
+
+
+Everything Hive prints for a person is coloured and laid out the same way on Windows, macOS
+and Linux:
+
+- **Message markers:** `√` done, `!` warning, `×` error, `»` step, `•` info, `→` note.
+- **Sections:** `── Title ──` headings and aligned tables.
+- **Colour by meaning:** states are coloured by what they mean (green running/online/done,
+  yellow waiting or needing you, red frozen/failed/offline). Each agent name keeps its own
+  colour everywhere.
+- **Agent output:** in `hive up` and `hive watch`, tool calls, results, errors and session
+  notes each get their own colour.
+
+Hive's ANSI colours work in Windows Terminal, PowerShell and cmd.exe on Windows 10+, where Hive
+switches the console's VT mode on itself, and in any macOS or Linux terminal. If a console font
+can't show a symbol, or the output encoding can't represent it, Hive falls back to ASCII.
+
+Colour is used only when the output is a terminal. Pipes, files, git hooks and agent CLIs get
+plain text, and the MCP and hook protocols are never coloured. To force colour on or off,
+these settings are checked in order and the first one set wins:
+
+1. `hive --color always|never|auto ...` (before the subcommand);
+2. `HIVE_COLOR=always|never`;
+3. `NO_COLOR=1` (off);
+4. `FORCE_COLOR=1` (on).
+
+Git Bash's default terminal (mintty) doesn't present itself as a console to Windows programs,
+so set `HIVE_COLOR=always` there. The installers (`install.bat`, `install.sh`) are coloured
+too and respect `NO_COLOR`; `install.sh` uses no colour when its output isn't a terminal.
+
+---
+
+[← Back to the README](../README.md)

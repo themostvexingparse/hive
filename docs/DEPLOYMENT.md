@@ -6,7 +6,7 @@ This guide covers everything about running `hive-server`:
 - step-by-step deployment on PythonAnywhere, on a VPS, and locally;
 - upgrades, backups, data retention, monitoring and hardening.
 
-For setting up the agent machines afterwards, see the [README](../README.md#5-preparing-the-repository-hive-init).
+For setting up the agent machines afterwards, see [Preparing the repository](REPOSITORY.md) and [Enrolling agents and setting up machines](MACHINES.md).
 
 ---
 
@@ -280,7 +280,7 @@ Store it in your password manager. This token is full control over the fleet.
        "mysql+pymysql://USER:MYSQL_PASSWORD@USER.mysql.pythonanywhere-services.com/"
        "USER$hive?charset=utf8mb4"
    )
-   # Optional: let the server advance main via the GitHub API (README §14.4)
+   # Optional: let the server advance main via the GitHub API (docs/INTEGRATION.md, GitHub mode)
    # os.environ["HIVE_GITHUB_TOKEN"] = "github_pat_..."
 
    from hive.server.wsgi import application  # noqa: E402
@@ -534,7 +534,7 @@ Cloudflare Tunnel) in front of it works.
 | `HIVE_ADMIN_TOKEN` | **yes** | – | The admin token. The app refuses to start without it. |
 | `HIVE_DATABASE_URL` | no | `sqlite:///hive.db` (relative to the working directory) | SQLAlchemy database URL. |
 | `HIVE_GITHUB_TOKEN` | no | – | Enables GitHub mode: the server fast-forwards `main` through the GitHub API. Also requires `[repo] github = "owner/repo"` in the uploaded `hive.toml`. Needs a fine-grained token with *Contents: read and write* on that repository. |
-| `HIVE_ARCHIVE_DIR` | no | `hive-archives/` next to a SQLite database file, else `~/hive-archives` | Where the dashboard's archives are written (README §18). The server process must be able to write there. On PythonAnywhere the files count toward your disk quota. |
+| `HIVE_ARCHIVE_DIR` | no | `hive-archives/` next to a SQLite database file, else `~/hive-archives` | Where the dashboard's archives are written ([Archives](MONITORING.md#archives)). The server process must be able to write there. On PythonAnywhere the files count toward your disk quota. |
 | `HIVE_PROJECT_DATABASE_URL` | no | – | Database URL for new projects, with a `{slug}` placeholder, e.g. `mysql+pymysql://USER:PW@HOST/USER$hive_{slug}` (§15). Without it, projects on a SQLite server get their own SQLite file, and on MySQL/Postgres each `project create` needs `--db-url`. |
 | `HIVE_DATA_DIR` | no | next to a SQLite database file, else `~/hive-data` | Where project SQLite databases and project archives go: `projects/<project>/` (§15). |
 | `HIVE_SQLITE_JOURNAL` | no | `wal`; `delete` when PythonAnywhere is detected | SQLite only. `wal` for local disks (fastest; readers and the writer don't block each other). `delete` (or `truncate`) for network filesystems such as PythonAnywhere's, where WAL doesn't work. `GET /api/v1/health` reports the active mode. |
@@ -569,8 +569,8 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
 2. `hive admin login --server https://<server> --token <token>` on your computer.
 3. `hive status` shows fleet `setup` and no agents.
 4. In your project: `hive init`, commit and push, then `hive admin push-config`.
-5. Enroll the agents (`hive admin enroll …`) and join each machine (`hive join …`), as in the
-   README §6.
+5. Enroll the agents (`hive admin enroll …`) and join each machine (`hive join …`), as in
+   [Enrolling agents and setting up machines](MACHINES.md).
 6. `hive up` on every machine. `hive status` should show every agent `online` within 20 s.
 7. `hive start "<goal>"`.
 
@@ -610,7 +610,7 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
 - active leases;
 - the uploaded `hive.toml`.
 
-Code lives in git and is not in the database. Dashboard archives (README §18) are separate
+Code lives in git and is not in the database. Dashboard archives ([Archives](MONITORING.md#archives)) are separate
 files in `HIVE_ARCHIVE_DIR`. Copy that folder too if you want to keep them, but they are
 read-only history, not a way to restore the database.
 
@@ -674,7 +674,7 @@ or as a monthly scheduled task.
 
 **The easier way, between runs:** the dashboard's ⋯ → *Archives…* → *Archive & clear…* saves
 a finished run's history to a compressed file in `HIVE_ARCHIVE_DIR` and empties those tables
-in one step, without touching agents or config (README §18). Archives are gzip-compressed
+in one step, without touching agents or config ([Archives](MONITORING.md#archives)). Archives are gzip-compressed
 JSON; the dialog shows each one's size. Delete old archives from the same dialog, or download
 them first.
 
@@ -757,7 +757,7 @@ well. Keep the window longer than any plan the orchestrator might still be refer
 ## 15. Hosting several projects
 
 One server can run several projects. Each one is a separate repository and fleet with its own
-database, served at `https://<server>/p/<project>/`. README §4.4 covers using them; this
+database, served at `https://<server>/p/<project>/`. [PROJECTS.md](PROJECTS.md) covers using them; this
 section covers the server side.
 
 **What changes on the server:**

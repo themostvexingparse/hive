@@ -52,7 +52,7 @@ heartbeat_hours = 4
 [permissions]             # shell commands agents may run without asking (re-run `hive init` after edits)
 preset = "standard"       # standard: read-only + tests + git history + build/run tools
                           # strict:   read-only + tests + git history;  none: only your lists
-                          # Dangerous git and recursive deletes always need approval (README §17.4)
+                          # Dangerous git and recursive deletes always need approval (docs/PERMISSIONS.md)
 allow = []                # extra command prefixes, e.g. ["docker compose ps", "npm run e2e"]
 approval = []             # extra prefixes that need the orchestrator's approval, e.g. ["npm publish"]
 deny = []                 # extra prefixes agents may never run
