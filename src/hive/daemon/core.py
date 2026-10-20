@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import globs as G
 from .. import permissions as P
+from .. import ui
 from ..permissions import role_class
 from ..config import MachineConfig, Slot, find_repo_root, hive_home, load_repo_config
 from . import gitops, wake
@@ -35,6 +36,8 @@ SHELL_TOOLS = {"Bash", "PowerShell", "run_shell_command"}
 class StreamSink:
     """Shows a worker's formatted output locally and uploads it (admin-only view) in batches."""
 
+    name_width = 0  # widest slot name on this machine, so echoed lines line up
+
     def __init__(self, rt: "SlotRuntime", echo: bool):
         self.rt, self.echo = rt, echo
         self.buf: list[str] = []
@@ -47,8 +50,8 @@ class StreamSink:
 
     def write(self, lines: list[str]) -> None:
         if self.echo:
-            for l in lines:
-                print(f"[{self.rt.name}] {l}", flush=True)
+            ui.out("\n".join(ui.stream_line(self.rt.name, l, name_width=self.name_width)
+                              for l in lines))
         with self.lock:
             self.buf.extend(lines)
 
@@ -146,6 +149,7 @@ class Daemon:
         self.mcfg = mcfg
         self.store = store or Store(hive_home() / "state.db")
         self.slots = {s.name: SlotRuntime(s, mcfg.server_url) for s in mcfg.slots}
+        StreamSink.name_width = max((len(n) for n in self.slots), default=0)
         for rt in self.slots.values():
             rt.sink = StreamSink(rt, echo)
         self.stop_event = threading.Event()

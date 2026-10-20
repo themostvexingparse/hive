@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import tomli_w
@@ -440,8 +441,9 @@ def install_git_hook(repo: Path, hive_cmd: str | None = None,
     existing = hook.read_text("utf-8", "replace") if hook.exists() else ""
     if existing and "hook git-pre-commit" not in existing:
         if not quiet:
-            print(f"Existing {hook} left untouched; add `{hive_cmd or 'hive'} hook "
-                  "git-pre-commit` to it (only when HIVE_SLOT is set).")
+            from . import ui
+            ui.warn(f"Existing {hook} left untouched; add `{hive_cmd or 'hive'} hook "
+                    "git-pre-commit` to it (only when HIVE_SLOT is set).", sys.stdout)
         return None
     if hive_cmd is None:
         m = re.search(r"exec (.+) hook git-pre-commit", existing)

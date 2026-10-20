@@ -13,7 +13,7 @@ import time
 import tomllib
 from pathlib import Path
 
-from . import __version__
+from . import __version__, ui
 from .config import (AdminConfig, Slot, find_repo_root, hive_home, load_admin_config,
                      load_machine_config, load_repo_config, save_admin_config,
                      save_machine_config)
@@ -21,7 +21,7 @@ from .daemon.client import HiveError, ServerClient
 
 
 def die(msg: str) -> None:
-    print(f"hive: {msg}", file=sys.stderr)
+    ui.error(msg)
     raise SystemExit(1)
 
 
@@ -37,14 +37,16 @@ def call(fn, *a, **kw):
         return fn(*a, **kw)
     except HiveError as e:
         detail = e.data.get("problems") or e.data.get("conflicts")
-        die(f"{e.code}: {e.message}" + (f"\n{json.dumps(detail, indent=1)}" if detail else ""))
+        if isinstance(detail, list):
+            detail = "\n".join(f"  - {d if isinstance(d, str) else json.dumps(d)}"
+                               for d in detail)
+        elif detail:
+            detail = json.dumps(detail, indent=1)
+        die(f"{ui.paint(e.code, 'bold', stream=sys.stderr)}: {e.message}"
+            + (f"\n{ui.dim(detail, sys.stderr)}" if detail else ""))
 
 
-def ago(ts: float | None) -> str:
-    if not ts:
-        return "never"
-    s = int(time.time() - ts)
-    return f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600 else f"{s // 3600}h"
+ago = ui.ago
 
 
 # ---------------------------------------------------------------------- server & admin
@@ -58,30 +60,44 @@ def cmd_server(a):
     if not os.environ.get("HIVE_ADMIN_TOKEN"):
         die("set HIVE_ADMIN_TOKEN (or pass --admin-token)")
     from .server.app import create_app
-    create_app().run(host=a.host, port=a.port, threaded=True)
+    app = create_app()
+    ui.banner(f"Hive server {__version__}", "development server; see docs/DEPLOYMENT.md")
+    ui.kv([("listening", ui.path(f"http://{a.host}:{a.port}")),
+           ("dashboard", ui.path(f"http://{a.host}:{a.port}/")),
+           ("database", os.environ["HIVE_DATABASE_URL"])])
+    ui.out(ui.dim("  Ctrl+C to stop.") + "\n")
+    app.run(host=a.host, port=a.port, threaded=True)
 
 
 def cmd_admin_login(a):
     c = ServerClient(a.server, a.token)
     call(c.get, "/fleet")
     save_admin_config(AdminConfig(a.server, a.token))
-    print(f"Logged in to {a.server}")
+    ui.ok(f"Logged in to {ui.path(a.server)} as admin.")
 
 
 def cmd_admin_enroll(a):
     c = admin_client()
     roles = [r.strip() for r in a.roles.split(",") if r.strip()]
     r = call(c.post, "/agents", {"name": a.name, "vendor": a.vendor, "roles": roles})
-    print(f"Enrolled {r['name']} ({a.vendor}; roles: {', '.join(roles)}).\n"
-          f"Token (shown once): {r['token']}\n\nOn the agent's machine run:\n"
-          f"  hive join {r['name']} --vendor {a.vendor} --token {r['token']} "
-          f"--server {c.base.removesuffix('/api/v1')} --repo <path-to-clone>")
+    ui.ok(f"Enrolled {ui.agent(r['name'])} ({a.vendor}; roles: {', '.join(roles)}).")
+    ui.kv([("token", ui.paint(r["token"], "bold", "bright_yellow")),
+           ("", ui.dim("shown only once; treat it like a password"))])
+    ui.section("On the agent's machine run")
+    ui.out("  " + ui.cmd(f"hive join {r['name']} --vendor {a.vendor} --token {r['token']} "
+                         f"--server {c.base.removesuffix('/api/v1')} --repo <path-to-clone>"))
 
 
 def cmd_admin_roles(a):
     c = admin_client()
     roles = [r.strip() for r in a.roles.split(",") if r.strip()]
-    print(call(c.patch, f"/agents/{a.name}", {"roles": roles}))
+    r = call(c.patch, f"/agents/{a.name}", {"roles": roles})
+    if r.get("status") == "proposed":
+        did = r.get("decision_id")
+        ui.warn(f"The fleet is active, so this became decision #{did}; approve it with "
+                + ui.cmd(f"hive decide {did} approve"), sys.stdout)
+    else:
+        ui.ok(f"{ui.agent(a.name)} now has roles: {', '.join(roles)}.")
 
 
 def cmd_admin_backup(a):
@@ -106,7 +122,7 @@ def cmd_admin_backup(a):
             os.replace(tmp, out)
     except requests.RequestException as e:
         die(f"backup failed: {e}")
-    print(f"Saved {out} ({out.stat().st_size / 1e6:.1f} MB)")
+    ui.ok(f"Saved {ui.path(out)} ({out.stat().st_size / 1e6:.1f} MB).")
 
 
 def cmd_admin_push_config(a):
@@ -114,7 +130,7 @@ def cmd_admin_push_config(a):
     with open(root / "hive.toml", "rb") as f:
         data = tomllib.load(f)
     call(admin_client().put, "/config", data)
-    print("Uploaded hive.toml to the server.")
+    ui.ok("Uploaded hive.toml to the server.")
 
 
 # ---------------------------------------------------------------------- repo & machine setup
@@ -126,12 +142,18 @@ def cmd_init(a):
         die(f"{root} is not a git repository")
     server = a.server or load_admin_config().server_url or "http://127.0.0.1:8765"
     written, cleaned = init_repo(root, server, a.main, a.hive_cmd)
+    ui.section("Wired for Hive", ui.dim(str(root)))
     for f in written:
-        print(f"  wrote {f}")
+        ui.out(f"  {ui.paint('+', 'green', 'bold')} {f}")
     for f in cleaned:
-        print(f"  removed old hive wiring from {f}")
-    print("\nThe agent bundles in .hive/agent/ load only in sessions launched by `hive`.\n"
-          "Next: review hive.toml, commit these files, push, then `hive admin push-config`.")
+        ui.out(f"  {ui.paint('-', 'yellow', 'bold')} {f} {ui.dim('(old hive wiring removed)')}")
+    ui.out()
+    ui.info("The agent bundles in .hive/agent/ load only in sessions launched by `hive`.")
+    ui.section("Next")
+    for i, t in enumerate(["Review " + ui.path("hive.toml") + " (roles, checks, permissions).",
+                           "Commit these files and push.",
+                           "Upload the config: " + ui.cmd("hive admin push-config")], 1):
+        ui.out(f"  {ui.num(f'{i}.')} {t}")
 
 
 def cmd_join(a):
@@ -160,7 +182,7 @@ def cmd_join(a):
             die(str(e))
         hook = install_git_hook(repo, a.hive_cmd)
         if hook:
-            print(f"Installed git pre-commit hook at {hook}")
+            ui.ok(f"Installed the git pre-commit hook at {ui.path(hook)}")
     config_dir = a.config_dir or str(hive_home() / "accounts" / a.name)
     Path(config_dir).mkdir(parents=True, exist_ok=True)
     cfg.slots = [s for s in cfg.slots if s.name != a.name] + [Slot(
@@ -168,19 +190,24 @@ def cmd_join(a):
         permission_mode=a.permission_mode or "")]
     save_machine_config(cfg)
     var = "CLAUDE_CONFIG_DIR" if a.vendor == "claude" else "GEMINI_CLI_HOME"
-    print(f"Slot {a.name} ready: worktree {wt}\n"
-          f"Log this slot's account in once (interactive), from the worktree:\n"
-          + login_instructions(var, config_dir, str(wt), a.vendor)
-          + f"\n(or simply `hive chat {a.name}` while `hive up` runs). Then run `hive up`.")
+    ui.ok(f"Slot {ui.agent(a.name)} ready.")
+    ui.kv([("worktree", ui.path(wt)), ("account", ui.path(config_dir))])
+    ui.section("Log this slot's account in once (interactive)")
+    ui.out(login_instructions(var, config_dir, str(wt), a.vendor))
+    ui.out(f"  {ui.dim('or, while `hive up` runs:')}  {ui.cmd(f'hive chat {a.name}')}")
+    ui.section("Then start the machine")
+    ui.out("  " + ui.cmd("hive up"))
 
 
 def login_instructions(var: str, config_dir: str, worktree: str, cli: str) -> str:
     """Shell-appropriate commands to start a CLI with a private config folder."""
     if os.name == "nt":
-        return (f"  PowerShell:  cd \"{worktree}\"; $env:{var} = \"{config_dir}\"; {cli}; "
-                f"Remove-Item Env:{var}\n"
-                f"  cmd.exe:     cd /d \"{worktree}\" && set \"{var}={config_dir}\" && {cli}")
-    return f"  cd '{worktree}' && {var}='{config_dir}' {cli}"
+        return (f"  {ui.dim('PowerShell')}  "
+                + ui.cmd(f"cd \"{worktree}\"; $env:{var} = \"{config_dir}\"; {cli}; "
+                         f"Remove-Item Env:{var}") + "\n"
+                f"  {ui.dim('cmd.exe   ')}  "
+                + ui.cmd(f"cd /d \"{worktree}\" && set \"{var}={config_dir}\" && {cli}"))
+    return "  " + ui.cmd(f"cd '{worktree}' && {var}='{config_dir}' {cli}")
 
 
 def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = None,
@@ -197,7 +224,7 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
     env = wake.slot_env(slot, cfg.local_url, cfg.local_secret)
     err = wake.ensure_gemini_extension(slot, env)
     if err:
-        print(f"Warning: {err}. Hive tools will be missing in this session.")
+        ui.warn(f"{err}. Hive tools will be missing in this session.")
     if initial is None and orchestrator:
         initial = wake.ORCH_RESUME_PROMPT if resume else wake.ORCH_FIRST_PROMPT
     cmd = wake.build_interactive_command(slot, session, resume, initial,
@@ -229,6 +256,7 @@ def cmd_up(a):
     from .daemon.localapi import serve
     hive_home().joinpath("logs").mkdir(parents=True, exist_ok=True)
     handlers = [logging.FileHandler(hive_home() / "logs" / "daemon.log", encoding="utf-8")]
+    handlers[0].setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     cfg = load_machine_config()
     if not cfg.slots:
         die("no slots on this machine; run `hive join` first")
@@ -236,7 +264,7 @@ def cmd_up(a):
     refresh_git_hooks(cfg)
     d = Daemon(cfg)
     # Each slot's roles decide how it runs, so they must be known before anything starts.
-    print(f"Connecting to {cfg.server_url} ...")
+    ui.step(f"Connecting to {ui.path(cfg.server_url)} ...")
     missing = d.wait_for_identity(timeout=30)
     if missing:
         die(f"could not reach the Hive server at {cfg.server_url} for {', '.join(missing)} "
@@ -250,14 +278,23 @@ def cmd_up(a):
         d.set_echo(False)
     d.start_background()
     if not orch:
-        handlers.append(logging.StreamHandler())
-    logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
+        console = logging.StreamHandler()
+        console.setFormatter(ui.LogFormatter(console.stream))
+        handlers.append(console)
+    logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, handlers=handlers)
     srv = serve(d)
-    names = ", ".join(f"{s.name} ({', '.join(s.roles) or '?'})" for s in d.slots.values())
-    print(f"hive daemon up - server {cfg.server_url} - slots: {names}")
+    ui.banner(f"Hive daemon {__version__}", "orchestrator mode" if orch else "worker mode")
+    ui.kv([("server", ui.path(cfg.server_url)),
+           ("log", ui.path(hive_home() / "logs" / "daemon.log"))])
+    ui.out()
+    ui.table(["slot", "vendor", "roles"],
+             [[ui.agent(s.name), s.cfg.vendor, ", ".join(s.roles) or "?"]
+              for s in d.slots.values()])
     if not orch:
-        print("Streaming agent output below (also visible to the admin via `hive watch`).")
+        ui.out()
+        ui.info("Streaming agent output below (the admin also sees it with "
+                + ui.cmd("hive watch") + "). Ctrl+C to stop.")
+        ui.out()
         try:
             srv.serve_forever()
         except KeyboardInterrupt:
@@ -272,16 +309,15 @@ def cmd_up(a):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     others = [n for n in d.slots if n != orch.name]
     if others:
-        print(f"Workers on this machine ({', '.join(others)}) run in the background; "
-              "watch them with `hive watch`.")
+        ui.info(f"Workers on this machine ({', '.join(ui.agent(n) for n in others)}) run in "
+                f"the background; watch them with {ui.cmd('hive watch')}.")
     try:
         while True:
-            print(f"Launching {orch.cfg.vendor} as orchestrator {orch.name}...")
+            ui.step(f"Launching {orch.cfg.vendor} as orchestrator {ui.agent(orch.name)} ...")
+            ui.out()
             run_interactive(orch.cfg, cfg, orchestrator=True)
-            try:
-                ans = input("\nOrchestrator session ended. Relaunch? [Y/n] ").strip().lower()
-            except EOFError:
-                ans = "n"
+            ui.out()
+            ans = ui.ask("Orchestrator session ended. Relaunch? [Y/n]", "n").lower()
             if ans in ("n", "no", "q"):
                 break
     except KeyboardInterrupt:
@@ -302,11 +338,12 @@ def cmd_chat(a):
         r = requests.post(f"{cfg.local_url}/slot/{slot.name}/attach", json={"attached": True},
                           headers=hdr, timeout=5).json()
         if r.get("running"):
-            print("Note: a headless wake is running for this slot; it will finish first.")
+            ui.note("A headless wake is running for this slot; it will finish first.")
         slots = requests.get(f"{cfg.local_url}/slots", headers=hdr, timeout=5).json()
         is_orch = any(s["name"] == slot.name and "orchestrator" in s["roles"] for s in slots)
     except (requests.RequestException, ValueError, KeyError):
-        print("Warning: daemon not reachable; hooks and tools will not work until `hive up`.")
+        ui.warn("The daemon is not reachable; hooks and tools will not work until "
+                "`hive up` runs.")
     try:
         # initial="" → no automatic first prompt; the role still selects the permission file.
         run_interactive(slot, cfg, fresh=a.fresh, initial="", orchestrator=is_orch)
@@ -323,13 +360,16 @@ def cmd_watch(a):
     c = admin_client()
     last = 0
     first = True
+    name_width = 0
     try:
         while True:
             r = call(c.get, "/streams", agent=a.agent, since_id=last,
                      limit=a.n if first else 1000)
-            for line in r["lines"]:
-                prefix = "" if a.agent else f"[{line['agent']}] "
-                print(f"{prefix}{line['text']}", flush=True)
+            if r["lines"]:
+                if not a.agent:
+                    name_width = max([name_width] + [len(l["agent"]) for l in r["lines"]])
+                ui.out("\n".join(ui.stream_line(None if a.agent else l["agent"], l["text"],
+                                                name_width=name_width) for l in r["lines"]))
             last, first = r["last_id"], False
             if not a.follow:
                 return
@@ -347,79 +387,129 @@ def cmd_start(a):
         with open(root / "hive.toml", "rb") as f:
             call(c.put, "/config", tomllib.load(f))
     f = call(c.post, "/fleet/start", {"goal": a.goal})
-    print(f"Fleet is {f['state']}; orchestrator {f['orchestrator']} is planning. You will be asked "
-          "to approve the plan (`hive decisions`).")
+    ui.ok(f"Fleet is {ui.state(f['state'])}; orchestrator {ui.agent(f['orchestrator'])} is "
+          "planning.")
+    ui.note(f"You will be asked to approve the plan: {ui.cmd('hive decisions')}")
 
 
 def cmd_decisions(a):
     rows = call(admin_client().get, "/decisions", state=None if a.all else "open,queued")
     if not rows:
-        print("No open decisions.")
+        ui.ok("No open decisions.")
     for d in rows:
-        print(f"#{d['id']} [{d['state']}] {d['kind']}{' (freezes fleet)' if d['blocking'] else ''}"
-              f" from {d['raised_by']}, {ago(d['created'])} ago")
-        print("  " + d["question"].replace("\n", "\n  "))
+        tags = [ui.state(d["state"]), d["kind"]]
+        if d["blocking"]:
+            tags.append(ui.paint("freezes the fleet", "red", "bold"))
+        ui.section(f"Decision #{d['id']}", " · ".join(tags))
+        ui.out(ui.dim(f"  from {d['raised_by']}, {ago(d['created'])} ago"))
+        ui.out()
+        ui.out("  " + ui.bold(d["question"].replace("\n", "\n  ")))
         if d["context"]:
-            print("  --- context ---\n  " + d["context"].replace("\n", "\n  "))
-        if d["options"]:
-            print(f"  options: {', '.join(d['options'])}")
+            ui.out()
+            ui.out("  " + ui.paint("Context", "gray", "underline"))
+            ui.out("  " + d["context"].replace("\n", "\n  "))
         if d["answer"]:
-            print(f"  answer: {d['answer']} {d['note'] or ''}")
-        print()
+            ui.out()
+            ui.kv([("answer", ui.paint(d["answer"], "green", "bold")), ("note", d["note"])])
+        elif d["options"]:
+            ui.out()
+            ui.out("  " + ui.paint("Answer with", "gray", "underline"))
+            for o in d["options"]:
+                ui.out("    " + ui.cmd(f"hive decide {d['id']} {_quote(o)}"))
+        else:
+            ui.out()
+            ui.out("  " + ui.paint("Answer with", "gray", "underline") + "  "
+                   + ui.cmd(f"hive decide {d['id']} \"<your answer>\""))
+    if rows:
+        ui.out()
+
+
+def _quote(arg: str) -> str:
+    return arg if arg and all(ch.isalnum() or ch in "-_.:/" for ch in arg) else f'"{arg}"'
 
 
 def cmd_decide(a):
     d = call(admin_client().post, f"/decisions/{a.id}/answer", {"answer": a.answer,
                                                                 "note": a.note or ""})
-    print(f"Decision #{d['id']} answered: {d['answer']}")
+    ui.ok(f"Decision #{d['id']} answered: {ui.paint(d['answer'], 'green', 'bold')}")
 
 
 def cmd_say(a):
     call(admin_client().post, "/messages", {"channel": "#user", "body": a.text,
                                             "priority": "high"})
-    print("Sent to #user; the orchestrator will be woken.")
+    ui.ok("Sent to #user; the orchestrator will be woken.")
+
+
+def _agent_state(ag: dict) -> str:
+    if ag["exhausted"]:
+        return ui.state("exhausted", label="out of quota")
+    return ui.state(ag["status"] if ag["online"] else "offline")
 
 
 def cmd_status(a):
     c = admin_client()
     f = call(c.get, "/fleet")
-    print(f"Fleet: {f['state']} (since {ago(f['since'])} ago) · orchestrator: {f['orchestrator']}"
-          f" · review: {f.get('review')} · main: {(f['main_sha'] or '')[:10]}")
-    if f.get("goal"):
-        print(f"Goal: {f['goal'][:200]}")
+    ui.section("Fleet", ui.state(f["state"]) + ui.dim(f"  since {ago(f['since'])} ago"))
+    ui.kv([("orchestrator", ui.agent(f["orchestrator"])),
+           ("review", str(f.get("review") or "")),
+           ("main", ui.paint((f["main_sha"] or "")[:10], "yellow")),
+           ("goal", (f.get("goal") or "")[:200])])
     if f.get("decision"):
-        print(f"!! Waiting for your decision #{f['decision']['id']}: "
-              f"{f['decision']['question'][:200]}  →  hive decisions")
-    print("\nAgents:")
-    for ag in call(c.get, "/agents"):
-        st = "out of quota" if ag["exhausted"] else ag["status"] if ag["online"] else "offline"
-        print(f"  {ag['name']:<14} {ag['vendor']:<7} {','.join(ag['roles']):<24} {st}")
+        ui.out()
+        ui.warn(f"Waiting for your decision #{f['decision']['id']}: "
+                f"{f['decision']['question'][:200]}", sys.stdout)
+        ui.out("    " + ui.cmd("hive decisions"))
+
+    agents = call(c.get, "/agents")
+    ui.section("Agents", ui.dim(f"{sum(1 for ag in agents if ag['online'])}/{len(agents)} online"))
+    ui.table(["name", "vendor", "roles", "state"],
+             [[ui.agent(ag["name"]), ag["vendor"], ", ".join(ag["roles"]), _agent_state(ag)]
+              for ag in agents])
+
     tasks = call(c.get, "/tasks")
+    shown = [t for t in tasks if a.all or t["state"] not in ("done", "cancelled")]
     if tasks:
-        print("\nTasks:")
-        for t in tasks:
-            if t["state"] in ("done", "cancelled") and not a.all:
-                continue
-            print(f"  #{t['id']:<4} {t['state']:<12} {t['assignee'] or '-':<12} {t['title'][:70]}")
+        hidden = len(tasks) - len(shown)
+        ui.section("Tasks", ui.dim(f"{len(shown)} shown" + (f", {hidden} finished hidden "
+                                                             "(--all)" if hidden else "")))
+        if shown:
+            ui.table(["id", "state", "assignee", "title"],
+                     [[ui.dim(f"#{t['id']}"), ui.state(t["state"]), ui.agent(t["assignee"]),
+                       t["title"]] for t in shown])
+
     leases = call(c.get, "/leases")
     if leases:
-        print("\nLeases:")
-        for l in leases:
-            print(f"  #{l['id']:<4} {l['holder']:<12} {', '.join(l['globs'])[:60]} "
-                  f"(expires in {int((l['expires_at'] - time.time()) / 60)}m)")
+        ui.section("Leases", ui.dim(str(len(leases))))
+        ui.table(["id", "holder", "expires", "paths"],
+                 [[ui.dim(f"#{l['id']}"), ui.agent(l["holder"]),
+                   _expires(l["expires_at"]), ", ".join(l["globs"])] for l in leases])
+
     feed = call(c.get, "/status", limit=a.n)
     if feed:
-        print("\nStatus feed:")
-        for s in feed:
-            print(f"  [{ago(s['ts'])} ago · {s['level']} · {s['author']}] {s['summary']}")
-            if a.verbose and s["body"]:
-                print("    " + s["body"].replace("\n", "\n    "))
+        ui.section("Status feed", ui.dim(f"latest {len(feed)}"))
+        if not a.verbose:
+            ui.table(["ago", "level", "by", "summary"],
+                     [[ui.dim(ago(s["ts"])), ui.state(s["level"]), ui.agent(s["author"]),
+                       s["summary"]] for s in feed])
+        for s in feed if a.verbose else []:
+            ui.out(f"  {ui.dim(ago(s['ts']) + ' ago')}  {ui.state(s['level'])}  "
+                   f"{ui.agent(s['author'])}")
+            ui.out("    " + ui.bold(s["summary"]))
+            if s["body"]:
+                ui.out("    " + s["body"].replace("\n", "\n    "))
+            ui.out()
+    ui.out()
+
+
+def _expires(ts: float) -> str:
+    m = int((ts - time.time()) / 60)
+    return ui.state("expiring" if m < 2 else "ok", label=f"in {m}m")
 
 
 def cmd_fleet(action):
     def run(a):
         f = call(admin_client().post, f"/fleet/{action}")
-        print(f"Fleet is now {f['state']}")
+        ui.ok(f"Fleet is now {ui.state(f['state'])}.")
     return run
 
 
@@ -441,8 +531,18 @@ def main(argv: list[str] | None = None) -> None:
             stream.reconfigure(errors="replace")  # legacy Windows consoles (cp1252)
         except AttributeError:
             pass
-    p = argparse.ArgumentParser(prog="hive", description="Multi-agent harness. See SPEC.md.")
+    # Decide on colour before argparse prints anything (help, usage errors).
+    args = sys.argv[1:] if argv is None else argv
+    for i, arg in enumerate(args):
+        mode = arg.split("=", 1)[1] if arg.startswith("--color=") else \
+            args[i + 1] if arg == "--color" and i + 1 < len(args) else None
+        if mode in ("auto", "always", "never"):
+            ui.set_mode(mode)
+    p = ui.ArgumentParser(prog="hive", description="Multi-agent harness. See SPEC.md.")
     p.add_argument("--version", action="version", version=__version__)
+    p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
+                   help="colour the output (default: auto = only on a terminal; also "
+                        "HIVE_COLOR, NO_COLOR)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("server", help="run the hive server (development)")

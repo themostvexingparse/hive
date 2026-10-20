@@ -535,14 +535,16 @@ hive watch --no-follow     # print and exit
 ```
 
 - **Dashboard:** the *Live output* pane, with an agent selector; it updates every 1.5 s.
-- **Line format:**
+- **Line format:** each line starts with the agent's name in its own colour, then a `│`
+  separator, then:
 
-  | Line | Meaning |
-  |---|---|
-  | `  text` | the agent's prose |
-  | `→ tool {input}` | a tool call |
-  | `← result` / `✗ error` | a tool result |
-  | `· …` | session, wake and turn markers |
+  | Line | Colour | Meaning |
+  |---|---|---|
+  | `  text` | default | the agent's prose |
+  | `→ tool {input}` | blue | a tool call |
+  | `← result` | gray | a tool result |
+  | `× error` | red | a failed tool call or an error |
+  | `· …` | magenta, italic | session, wake and turn markers |
 
 - **Retention:** the server keeps the latest 20,000 lines per agent.
 - **Raw output:** every turn's complete unformatted output is also appended to
@@ -1120,20 +1122,46 @@ deny = ["kubectl delete"]                       # extra commands agents may neve
 
 ## 18. Web dashboard
 
-Open the server's root URL (`https://…/`) and enter the admin token. It's kept in your
-browser's local storage.
+Open the server's root URL (`https://…/`) and sign in with the admin token. If you tick
+*Remember on this device*, the token stays in the browser's local storage until you sign out
+(⋯ menu); otherwise it's forgotten when the tab closes.
 
-| Panel | Contents |
+| Area | Contents |
 |---|---|
-| Header | fleet state, goal, Pause / Resume buttons |
-| Decisions needed | open decisions with context, option buttons and a note field |
-| Talk to the orchestrator | the `#user` conversation and a message box. In `setup`, a goal box and *Start fleet* button. |
-| Status feed | the orchestrator's updates, newest first |
-| Agents | roles and state: online, busy, offline, out of quota |
-| Tasks, Leases | current board and locks |
-| Live output | agents' formatted output, all or one agent |
+| Top bar | Fleet state, goal, orchestrator, `main` commit, and a *Live* / *Reconnecting…* indicator. *Pause* or *Resume*, whichever applies. A theme button that cycles light → dark → system. The ⋯ menu has the theme, *Reset fleet…* (asks for confirmation) and *Sign out*. |
+| Decisions | Shown across the top while one is open. Each has its context, one button per option, a free-text answer and a note. A queued decision is shown as *Up next*. In `setup`, this area holds the goal box and *Start fleet* instead. |
+| Agents | One card per agent: colour, vendor, roles, state (idle, working, interactive, offline, out of quota), last seen and current task. Click a card to show only that agent's output. |
+| Leases | Holder, path globs and time left (amber when under 2 minutes). |
+| Live output | All agents' formatted output in one scrolling panel; see below. |
+| Tasks | Filter by *Active*, *Review*, *Finished* or *All* (with counts). Click a row for its spec, notes, result, paths, dependencies, branch and reviewer. |
+| Orchestrator | The `#user` conversation. Enter sends; Shift+Enter starts a new line. |
+| Updates | The status feed, newest first. Alerts are tinted; long bodies fold behind *Show more*. |
+| Approvals | Commands workers asked to run. You can approve (after a confirmation showing the exact command) or deny with a note, just as the orchestrator can. The tab shows how many are waiting. |
+| Reports | Report requests and filed reports. |
 
-It refreshes every 5 s; live output refreshes every 1.5 s.
+**Live output:**
+- **Agent colours:** every agent name has its own colour, the same one `hive watch` uses in
+  the terminal.
+- **Filtering:** chips filter by agent (click one to show only it; Ctrl/Shift+click to
+  combine several). The filter box (shortcut `/`) narrows to matching lines and marks the matches.
+- **Highlighting:** done in the browser, with no extra requests or prompting. It marks tool
+  calls, errors, failure and success words, file paths, URLs, commit hashes, `#task`
+  references, quoted strings, Hive tool names, and agent names.
+- **Toggles:** *Results* hides tool results, *Wrap* switches between wrapping long lines and
+  scrolling sideways (inside the panel only), and *Follow* keeps the newest line in view.
+  Scrolling up pauses *Follow*, and a *N new lines* button takes you back down.
+- **Clear:** the bin button empties the view without deleting the server's history.
+- **Limit:** up to 5,000 lines stay in the page.
+
+**Other behaviour:**
+- **Theme:** light by default; the choice is remembered in the browser.
+- **Small screens:** the layout stacks into one column on phones.
+- **Tab title:** shows how many decisions and approvals are waiting, e.g. `(2) Hive · Frozen`.
+- **Refresh rate:** the dashboard refreshes every 4 s and live output every 1.5 s. A hidden
+  tab slows to 30 s and 10 s, to spare the server. While the server is unreachable, it retries
+  with back-off.
+- **Typing is safe:** text you're typing in a decision or approval isn't lost when the data
+  refreshes.
 
 ---
 
@@ -1172,6 +1200,35 @@ It refreshes every 5 s; live output refreshes every 1.5 s.
 |---|---|
 | `hive mcp [--slot S]` | The stdio MCP server. |
 | `hive hook EVENT [--vendor V]` | Hook bridge; `hive hook git-pre-commit` for git. |
+
+### Coloured output
+
+Everything Hive prints for a person is coloured and laid out the same way on Windows, macOS
+and Linux:
+
+- **Message markers:** `√` done, `!` warning, `×` error, `»` step, `•` info, `→` note.
+- **Sections:** `── Title ──` headings and aligned tables.
+- **Colour by meaning:** states are coloured by what they mean (green running/online/done,
+  yellow waiting or needing you, red frozen/failed/offline). Each agent name keeps its own
+  colour everywhere.
+- **Agent output:** in `hive up` and `hive watch`, tool calls, results, errors and session
+  notes each get their own colour.
+
+Hive's ANSI colours work in Windows Terminal, PowerShell and cmd.exe on Windows 10+, where Hive
+switches the console's VT mode on itself, and in any macOS or Linux terminal. If a console font
+can't show a symbol, or the output encoding can't represent it, Hive falls back to ASCII.
+
+Colour is used only when the output is a terminal. Pipes, files, git hooks and agent CLIs get
+plain text, and the MCP and hook protocols are never coloured. To force colour on or off,
+these settings are checked in order and the first one set wins:
+
+1. `hive --color always|never|auto ...` (before the subcommand);
+2. `HIVE_COLOR=always|never`;
+3. `NO_COLOR=1` (off);
+4. `FORCE_COLOR=1` (on).
+
+Git Bash's default terminal (mintty) doesn't present itself as a console to Windows programs,
+so set `HIVE_COLOR=always` there. `install.bat` is coloured too and respects `NO_COLOR`.
 
 ---
 
@@ -1251,6 +1308,7 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `HIVE_SQLITE_JOURNAL` | server | SQLite journal mode: `wal` (default) or `delete`/`truncate` for network filesystems; auto-`delete` on PythonAnywhere. |
 | `HIVE_SERVER_URL` | admin CLI | Overrides the server URL in `admin.toml`. |
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
+| `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off (§19, "Coloured output"). |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |
 | `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` | set by Hive per slot | Keep each account's CLI config separate. |
 | `MCP_TOOL_TIMEOUT` | set by Hive | Lets `await_events` block for up to 30 minutes. |

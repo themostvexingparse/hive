@@ -11,6 +11,16 @@ rem    install.bat -h         help (also --help)
 rem ===========================================================================
 setlocal EnableExtensions
 
+rem Colours: ANSI sequences, which Windows 10+ consoles show. NO_COLOR=1 turns them off.
+rem (The FOR line captures the ESC character from a PROMPT expansion.)
+set "ESC="
+if not defined NO_COLOR for /f "delims=#" %%E in ('"prompt #$E# & for %%E in (1) do rem"') do set "ESC=%%E"
+set "G=" & set "Y=" & set "RD=" & set "CY=" & set "B=" & set "DIM=" & set "R="
+if defined ESC (
+    set "G=%ESC%[92m" & set "Y=%ESC%[93m" & set "RD=%ESC%[91m" & set "CY=%ESC%[96m"
+    set "B=%ESC%[1m" & set "DIM=%ESC%[90m" & set "R=%ESC%[0m"
+)
+
 set "RUN_TESTS=0"
 set "UPDATE_PATH=1"
 set "ASSUME_YES=0"
@@ -30,28 +40,28 @@ for %%A in (%*) do (
 rem Work from the folder this script is in, wherever it was started from.
 cd /d "%~dp0" || goto :fail_nodir
 echo.
-echo === Hive installer ===
-echo Project: %CD%
+echo %B%%CY%=== Hive installer ===%R%
+echo %DIM%Project: %CD%%R%
 echo.
 
 rem --- 1. Is this the Hive project? ------------------------------------------
 if not exist "pyproject.toml" goto :fail_project
 findstr /R /C:"^name *= *\"hive\"" pyproject.toml >nul 2>&1 || goto :fail_project
 if not exist "src\hive\__init__.py" goto :fail_project
-echo [ok] Hive project found.
+echo %G%[ok]%R% Hive project found.
 
 rem --- 2. uv -------------------------------------------------------------------
 where uv >nul 2>&1
 if errorlevel 1 call :install_uv || goto :fail
-for /f "delims=" %%V in ('uv --version 2^>nul') do echo [ok] %%V
+for /f "delims=" %%V in ('uv --version 2^>nul') do echo %G%[ok]%R% %%V
 
 rem --- 3. git (agents need it; the install itself doesn't) -----------------------
 where git >nul 2>&1
 if errorlevel 1 (
-    echo [warn] git was not found on PATH. Hive agents need git; install Git for Windows:
+    echo %Y%[warn]%R% git was not found on PATH. Hive agents need git; install Git for Windows:
     echo        https://git-scm.com/download/win
 ) else (
-    for /f "delims=" %%V in ('git --version') do echo [ok] %%V
+    for /f "delims=" %%V in ('git --version') do echo %G%[ok]%R% %%V
 )
 
 rem --- 4. Running Hive processes lock hive.exe ----------------------------------
@@ -62,15 +72,15 @@ if not errorlevel 1 call :stop_running || goto :fail
 rem --- 5. Optional: tests -----------------------------------------------------------
 if "%RUN_TESTS%"=="1" (
     echo.
-    echo Running the test suite ^(this takes about a minute^)...
+    echo %CY%==^>%R% Running the test suite ^(this takes about a minute^)...
     uv run --quiet pytest -q -p no:logging
     if errorlevel 1 goto :fail_tests
-    echo [ok] Tests passed.
+    echo %G%[ok]%R% Tests passed.
 )
 
 rem --- 6. Install / re-install ------------------------------------------------------
 echo.
-echo Installing Hive ^(clean rebuild^)...
+echo %CY%==^>%R% Installing Hive ^(clean rebuild^)...
 rem --reinstall rebuilds even when the version number is unchanged, so no stale build
 rem survives; --force replaces an existing `hive` executable.
 uv tool install --force --reinstall .
@@ -83,7 +93,7 @@ if not exist "%BIN%\hive.exe" goto :fail_install
 set "HIVE_VERSION="
 for /f "delims=" %%V in ('"%BIN%\hive.exe" --version') do set "HIVE_VERSION=%%V"
 if not defined HIVE_VERSION goto :fail_install
-echo [ok] Installed hive %HIVE_VERSION% at %BIN%\hive.exe
+echo %G%[ok]%R% Installed hive %HIVE_VERSION% at %BIN%\hive.exe
 
 rem --- 7. PATH -------------------------------------------------------------------
 rem Agent CLIs start `hive mcp` / `hive hook` by name, so `hive` must be on PATH.
@@ -101,20 +111,20 @@ if not defined FIRST_HIVE (
     )
 ) else (
     if /I not "%FIRST_HIVE%"=="%BIN%\hive.exe" (
-        echo [warn] Another `hive` comes first on PATH: %FIRST_HIVE%
+        echo %Y%[warn]%R% Another `hive` comes first on PATH: %FIRST_HIVE%
         echo        Remove it ^(e.g. an old `pip install --user hive`: pip uninstall hive^)
         echo        so that %BIN%\hive.exe is used.
     ) else (
-        echo [ok] `hive` on PATH points to the new install.
+        echo %G%[ok]%R% `hive` on PATH points to the new install.
     )
 )
 
 rem --- Done ----------------------------------------------------------------------
 echo.
-echo === Hive %HIVE_VERSION% installed ===
-if defined PATH_NOTE echo NOTE: %PATH_NOTE%
+echo %B%%G%=== Hive %HIVE_VERSION% installed ===%R%
+if defined PATH_NOTE echo %Y%NOTE:%R% %PATH_NOTE%
 echo.
-echo Next steps after an upgrade:
+echo %B%Next steps after an upgrade:%R%
 echo   1. Restart `hive up` on this machine.
 echo   2. In each project using Hive: `hive init`, then commit and push the refreshed files.
 echo   3. Upgrade the Hive server too ^(docs\DEPLOYMENT.md, "Upgrading"^): server and agent
@@ -125,11 +135,11 @@ exit /b 0
 
 rem ===========================================================================
 :install_uv
-echo [!!] uv was not found. Hive is installed with uv ^(https://docs.astral.sh/uv/^).
+echo %Y%[!!]%R% uv was not found. Hive is installed with uv ^(https://docs.astral.sh/uv/^).
 call :confirm "Install uv now with its official installer"
 if errorlevel 1 (
     echo Install uv yourself, then run this script again:
-    echo   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+    echo   %CY%powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"%R%
     exit /b 1
 )
 powershell -NoProfile -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -144,7 +154,7 @@ if errorlevel 1 (
 exit /b 0
 
 :stop_running
-echo [!!] Hive is running ^(hive.exe^). Windows can't replace hive.exe while it runs.
+echo %Y%[!!]%R% Hive is running ^(hive.exe^). Windows can't replace hive.exe while it runs.
 echo      Stop `hive up` / `hive chat` yourself ^(Ctrl+C in their windows^), or let this
 echo      script stop them. Any agent turn in progress is interrupted.
 call :confirm "Stop all running hive.exe processes now"
@@ -161,7 +171,7 @@ if not errorlevel 1 (
     echo Could not stop every hive.exe; close them manually and run this script again.
     exit /b 1
 )
-echo [ok] Stopped running Hive processes.
+echo %G%[ok]%R% Stopped running Hive processes.
 exit /b 0
 
 :confirm
@@ -172,27 +182,27 @@ if errorlevel 2 exit /b 1
 exit /b 0
 
 :usage
-echo Usage: install.bat [/test] [/nopath] [/yes]
+echo %B%Usage:%R% install.bat [/test] [/nopath] [/yes]
 echo   /test     run the test suite first; install only if it passes
 echo   /nopath   don't add uv's tool folder to your PATH
 echo   /yes      answer "yes" to every question
 exit /b 0
 
 :fail_nodir
-echo [error] Could not change to the script's folder.
+echo %RD%[error]%R% Could not change to the script's folder.
 exit /b 1
 :fail_project
-echo [error] This doesn't look like the Hive project ^(pyproject.toml with name = "hive",
+echo %RD%[error]%R% This doesn't look like the Hive project ^(pyproject.toml with name = "hive",
 echo         src\hive\^). Put install.bat in the project root and run it from there.
 exit /b 1
 :fail_tests
-echo [error] Tests failed; nothing was installed. Fix the failures, or run without /test.
+echo %RD%[error]%R% Tests failed; nothing was installed. Fix the failures, or run without /test.
 exit /b 1
 :fail_install
-echo [error] Installation failed. The messages above say why; common causes:
+echo %RD%[error]%R% Installation failed. The messages above say why; common causes:
 echo         - hive.exe still in use ^(close `hive up` / `hive chat` windows^)
 echo         - no network access to download dependencies
 exit /b 1
 :fail
-echo [error] Installation stopped.
+echo %RD%[error]%R% Installation stopped.
 exit /b 1

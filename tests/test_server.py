@@ -477,3 +477,12 @@ def test_role_change_of_mandatory_role_needs_user(env):
     admin.post(f"/decisions/{r['decision_id']}/answer", {"answer": "approve"}, expect=200)
     roles = {a["name"]: a["roles"] for a in admin.get("/agents")}
     assert roles["prog2"] == ["reviewer"]
+
+
+def test_dashboard_is_served_without_external_assets(tmp_path):
+    hive = create_hive(f"sqlite:///{tmp_path / 'hive.db'}", tick_interval=0)
+    r = create_app(hive, admin_token=ADMIN).test_client().get("/")
+    html = r.get_data(as_text=True)
+    assert r.status_code == 200 and r.mimetype == "text/html"
+    assert "Hive admin" in html and 'id="out"' in html
+    assert "<script src=" not in html and "<link rel=\"stylesheet\"" not in html  # self-contained

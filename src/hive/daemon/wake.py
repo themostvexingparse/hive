@@ -251,7 +251,7 @@ def format_stream_event(ev: dict) -> list[str]:
     if t == "user" and isinstance(ev.get("message"), dict):
         for c in ev["message"].get("content", []):
             if isinstance(c, dict) and c.get("type") == "tool_result":
-                mark = "✗" if c.get("is_error") else "←"
+                mark = "×" if c.get("is_error") else "←"
                 out.append(f"{mark} {_short(_tool_text(c.get('content')), 200)}")
         return out
     if t == "system" and ev.get("subtype") == "init":
@@ -265,10 +265,10 @@ def format_stream_event(ev: dict) -> list[str]:
     if t == "tool_use":
         return [f"→ {ev.get('tool_name')} {_short(ev.get('parameters', {}))}"]
     if t == "tool_result":
-        mark = "✗" if ev.get("status") == "error" else "←"
+        mark = "×" if ev.get("status") == "error" else "←"
         return [f"{mark} {_short(ev.get('output') or ev.get('error') or '', 200)}"]
     if t == "error":
-        return [f"✗ error: {_short(ev.get('message', ev), 300)}"]
+        return [f"× error: {_short(ev.get('message', ev), 300)}"]
     # Both
     if t == "result":
         status = "error" if ev.get("is_error") or ev.get("status") == "error" else "done"

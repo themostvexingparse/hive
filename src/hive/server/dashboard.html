@@ -1,167 +1,1375 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hive Dashboard</title>
+<title>Hive</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2l12 7v14l-12 7-12-7V9z' fill='%234f46e5'/%3E%3Cpath d='M16 9l6 3.5v7L16 23l-6-3.5v-7z' fill='%23fff'/%3E%3C/svg%3E">
+<script>
+  // Apply the saved theme before first paint (no flash). Light is the default.
+  (function () {
+    var t = "light";
+    try { t = localStorage.getItem("hiveTheme") || "light"; } catch (e) {}
+    if (t === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
 <style>
-  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e2dc;
-          --accent:#2f5bd3; --warn:#b4540a; --bad:#b42318; --ok:#1f7a3f; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#151514; --fg:#ecebe6; --muted:#9a9993; --card:#1f1f1d; --line:#33332f;
-            --accent:#7c9cf5; --warn:#f0a35a; --bad:#f27b70; --ok:#6cc58c; }
+  /* ------------------------------------------------------------------ tokens */
+  :root {
+    color-scheme: light;
+    --bg: #f5f6f8; --surface: #ffffff; --surface-2: #f1f3f6; --surface-3: #e9ecf1;
+    --border: #e2e5ea; --border-strong: #cfd4dc;
+    --text: #141821; --text-2: #3b4250; --muted: #6b7280;
+    --accent: #4f46e5; --accent-hover: #4338ca; --accent-soft: #eef0ff; --on-accent: #ffffff;
+    --ok: #15803d; --warn: #b45309; --bad: #c0262d; --info: #0a6bb8;
+    --str: #a1470d; --path: #0f766e; --sha: #7c3aed; --tool: #9d2f9d;
+    --code-bg: #fbfbfc; --hover: rgba(15, 23, 42, .04); --mark: #fde68a;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .05);
+    --shadow-lg: 0 12px 32px rgba(16, 24, 40, .16);
+    /* agent colours: same order as the terminal palette (cyan, magenta, yellow, green, blue,
+       then darker variants), picked by crc32(name) % 10 like `hive watch` */
+    --a0: #0e7490; --a1: #a21caf; --a2: #a16207; --a3: #15803d; --a4: #1d4ed8;
+    --a5: #0f766e; --a6: #7e22ce; --a7: #c2410c; --a8: #4d7c0f; --a9: #4338ca;
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1016; --surface: #151a22; --surface-2: #1b212b; --surface-3: #232a36;
+    --border: #262d39; --border-strong: #343c4a;
+    --text: #e7eaf0; --text-2: #c3c8d2; --muted: #8b93a1;
+    --accent: #8b8cf8; --accent-hover: #a5a6fb; --accent-soft: #23244a; --on-accent: #0d1016;
+    --ok: #4ac26b; --warn: #e3a33b; --bad: #f2645d; --info: #58a6ff;
+    --str: #f0a868; --path: #3fd0b8; --sha: #c4a2ff; --tool: #e88ae8;
+    --code-bg: #10141b; --hover: rgba(255, 255, 255, .035); --mark: #6b5310;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, .5);
+    --a0: #22d3ee; --a1: #e879f9; --a2: #facc15; --a3: #4ade80; --a4: #60a5fa;
+    --a5: #2dd4bf; --a6: #c084fc; --a7: #fb923c; --a8: #a3e635; --a9: #a5b4fc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      color-scheme: dark;
+      --bg: #0d1016; --surface: #151a22; --surface-2: #1b212b; --surface-3: #232a36;
+      --border: #262d39; --border-strong: #343c4a;
+      --text: #e7eaf0; --text-2: #c3c8d2; --muted: #8b93a1;
+      --accent: #8b8cf8; --accent-hover: #a5a6fb; --accent-soft: #23244a; --on-accent: #0d1016;
+      --ok: #4ac26b; --warn: #e3a33b; --bad: #f2645d; --info: #58a6ff;
+      --str: #f0a868; --path: #3fd0b8; --sha: #c4a2ff; --tool: #e88ae8;
+      --code-bg: #10141b; --hover: rgba(255, 255, 255, .035); --mark: #6b5310;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+      --shadow-lg: 0 12px 32px rgba(0, 0, 0, .5);
+      --a0: #22d3ee; --a1: #e879f9; --a2: #facc15; --a3: #4ade80; --a4: #60a5fa;
+      --a5: #2dd4bf; --a6: #c084fc; --a7: #fb923c; --a8: #a3e635; --a9: #a5b4fc;
+    }
+  }
+
+  /* ------------------------------------------------------------------ base */
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display:flex; gap:12px; align-items:center; padding:12px 16px;
-           border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; }
-  .pill { padding:2px 10px; border-radius:999px; border:1px solid var(--line); font-size:12px; }
-  .pill.frozen,.pill.awaiting_approval { color:var(--warn); border-color:var(--warn); }
-  .pill.running { color:var(--ok); border-color:var(--ok); }
-  main { display:grid; gap:16px; padding:16px; grid-template-columns: 1fr; max-width:1200px;
-         margin:0 auto; }
-  @media (min-width: 900px) { main { grid-template-columns: 1.3fr 1fr; } }
-  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
-  section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
-               margin:0 0 8px; }
-  .item { border-top:1px solid var(--line); padding:8px 0; }
-  .item:first-of-type { border-top:0; }
-  .muted { color:var(--muted); font-size:12px; }
-  .decision { border:1px solid var(--warn); border-radius:6px; padding:10px; margin-bottom:8px; }
-  .alert { color:var(--bad); }
-  input, textarea, button { font:inherit; color:inherit; }
-  textarea, input[type=text], input[type=password] { width:100%; background:var(--bg);
-           border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
-  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 12px;
-           cursor:pointer; }
-  button.secondary { background:transparent; color:var(--fg); border:1px solid var(--line); }
-  .row { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  td, th { text-align:left; padding:4px 6px; border-top:1px solid var(--line); vertical-align:top; }
-  pre { white-space:pre-wrap; margin:4px 0 0; font:12px/1.4 ui-monospace, monospace; }
-  #login { max-width:420px; margin:80px auto; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono, code, pre, .pre { font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace; }
+  a { color: var(--info); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.55; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 2;
+          stroke-linecap: round; stroke-linejoin: round; }
+
+  /* buttons and inputs */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 32px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); cursor: pointer; font-weight: 500;
+    font-size: 13px; white-space: nowrap; transition: background .12s, border-color .12s;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn.danger { color: var(--bad); }
+  .btn.danger.solid { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .btn.ghost { border-color: transparent; background: transparent; }
+  .btn.ghost:hover { background: var(--surface-2); }
+  .btn.icon { width: 32px; padding: 0; }
+  .btn.sm { height: 26px; padding: 0 9px; font-size: 12px; border-radius: 6px; }
+  .btn.busy { position: relative; color: transparent !important; }
+  .btn.busy::after {
+    content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--muted); border-top-color: transparent; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .field {
+    width: 100%; background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 7px; padding: 7px 10px; font-size: 13px; transition: border-color .12s, box-shadow .12s;
+  }
+  .field:focus { outline: none; border-color: var(--accent);
+                 box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+  textarea.field { resize: vertical; min-height: 38px; line-height: 1.45; }
+
+  /* badges and chips */
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px;
+    border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+    background: var(--surface-2); color: var(--text-2);
+  }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.nodot::before { display: none; }
+  .badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+  .badge.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); }
+  .badge.bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 11%, transparent); }
+  .badge.info { color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent); }
+  .badge.accent { color: var(--accent); background: var(--accent-soft); }
+  .badge.dim { color: var(--muted); }
+  .tag {
+    display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11.5px;
+    background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); white-space: nowrap;
+  }
+  .ag {
+    --c: var(--a0); display: inline-flex; align-items: center; gap: 6px; font-weight: 600;
+    color: var(--c); white-space: nowrap;
+  }
+  .ag::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--c); flex: none; }
+  .ag.plain::before { display: none; }
+  code.glob {
+    font-size: 11.5px; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 5px; white-space: nowrap;
+  }
+
+  /* ------------------------------------------------------------------ login */
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+  .login {
+    width: 100%; max-width: 400px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 28px; box-shadow: var(--shadow-lg);
+  }
+  .login h1 { font-size: 20px; margin: 14px 0 4px; }
+  .login p { margin: 0 0 20px; color: var(--muted); }
+  .login label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+  .pw { position: relative; }
+  .pw .field { padding-right: 40px; }
+  .pw .btn { position: absolute; right: 3px; top: 3px; height: 28px; width: 32px; }
+  .check { display: flex; gap: 8px; align-items: center; margin: 14px 0 18px; font-size: 13px; color: var(--text-2); }
+  .login .error { color: var(--bad); font-size: 13px; margin-top: 10px; min-height: 1em; }
+
+  /* ------------------------------------------------------------------ top bar */
+  .topbar {
+    position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 14px;
+    min-height: 56px; padding: 8px 20px; background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; letter-spacing: -.01em; }
+  .brand svg { width: 24px; height: 24px; }
+  .divider { width: 1px; align-self: stretch; margin: 6px 0; background: var(--border); }
+  .fleet { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+  .state-pill {
+    display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px;
+    border-radius: 999px; font-weight: 600; font-size: 12.5px; white-space: nowrap;
+    background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border);
+  }
+  .state-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .state-pill.running { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+                        background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .state-pill.running::before { animation: pulse 2s ease-in-out infinite; }
+  .state-pill.frozen, .state-pill.awaiting_approval {
+    color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+    background: color-mix(in srgb, var(--warn) 11%, transparent); }
+  .state-pill.paused { color: var(--muted); }
+  .state-pill.planning { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent);
+                         background: color-mix(in srgb, var(--info) 10%, transparent); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .fleet-meta { display: flex; align-items: center; gap: 14px; min-width: 0; font-size: 13px; color: var(--muted); }
+  .fleet-meta .goal { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+  .fleet-meta .kv { white-space: nowrap; }
+  .fleet-meta .kv b { color: var(--text-2); font-weight: 500; }
+  .actions { display: flex; align-items: center; gap: 6px; }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+          white-space: nowrap; margin-right: 4px; }
+  .conn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .conn.down { color: var(--warn); }
+  .conn.down::before { background: var(--warn); animation: pulse 1s infinite; }
+  .menu { position: relative; }
+  .menu-list {
+    position: absolute; right: 0; top: calc(100% + 6px); min-width: 210px; z-index: 40;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow-lg); padding: 6px;
+  }
+  .menu-list button {
+    display: flex; width: 100%; align-items: center; gap: 9px; padding: 7px 10px; border: 0;
+    background: none; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px;
+  }
+  .menu-list button:hover { background: var(--surface-2); }
+  .menu-list .sep { height: 1px; background: var(--border); margin: 5px 2px; }
+  .menu-list .label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+                      color: var(--muted); padding: 6px 10px 4px; }
+  .menu-list button[aria-checked="true"]::after { content: "✓"; margin-left: auto; color: var(--accent); }
+
+  /* ------------------------------------------------------------------ page */
+  .page { max-width: 1720px; margin: 0 auto; padding: 18px 20px 40px; }
+  .layout {
+    display: grid; gap: 16px; align-items: start;
+    grid-template-columns: 300px minmax(0, 1fr) 380px;
+    grid-template-areas: "left center right";
+  }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .col.left { grid-area: left; } .col.center { grid-area: center; } .col.right { grid-area: right; }
+  @media (max-width: 1360px) {
+    .layout { grid-template-columns: minmax(0, 1fr) 360px; grid-template-areas: "center right" "left right"; }
+    .col.left { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+  }
+  @media (max-width: 960px) {
+    .layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "center" "right" "left"; }
+    .col.left { grid-template-columns: 1fr; }
+    .fleet-meta .kv { display: none; }
+  }
+  @media (max-width: 640px) {
+    .page { padding: 12px 12px 32px; }
+    .topbar { padding: 8px 12px; flex-wrap: wrap; }
+    .fleet-meta { display: none; }
+    .conn span { display: none; }
+  }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: var(--shadow); min-width: 0; display: flex; flex-direction: column;
+  }
+  .panel-h {
+    display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 8px 10px 8px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-h h2 { font-size: 13.5px; font-weight: 650; margin: 0; letter-spacing: -.005em; }
+  .panel-h .spacer { flex: 1; }
+  .count { font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--surface-2);
+           border-radius: 999px; padding: 1px 8px; }
+  .empty { padding: 22px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  /* ------------------------------------------------------------------ banner */
+  .banner { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+  .decision {
+    background: var(--surface); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+    border-left: 4px solid var(--warn); border-radius: 12px; padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .decision.queued { border-left-color: var(--border-strong); border-color: var(--border); opacity: .85; }
+  .dec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .dec-head .title { font-weight: 650; font-size: 14.5px; }
+  .dec-q { margin: 10px 0 0; font-size: 15px; font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .dec-ctx { margin-top: 10px; }
+  .dec-ctx summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+  .dec-ctx .pre { margin-top: 8px; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--border);
+                  border-radius: 8px; max-height: 280px; overflow: auto; }
+  .dec-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .dec-custom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 8px; margin-top: 10px; }
+  @media (max-width: 760px) { .dec-custom { grid-template-columns: 1fr; } }
+  .start {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    border-radius: 12px; padding: 18px; box-shadow: var(--shadow);
+  }
+  .start h3 { margin: 0 0 2px; font-size: 15px; }
+  .start p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .start .row { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+
+  /* ------------------------------------------------------------------ agents */
+  .agents { list-style: none; margin: 0; padding: 6px; }
+  .agent {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 9px 10px;
+    border-radius: 8px; cursor: pointer;
+  }
+  .agent:hover { background: var(--hover); }
+  .agent.selected { background: var(--accent-soft); }
+  .agent .name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .agent .vendor { font-size: 11.5px; color: var(--muted); }
+  .agent .sub { grid-column: 1 / -1; display: flex; gap: 5px; flex-wrap: wrap; align-items: center;
+                font-size: 12px; color: var(--muted); min-width: 0; }
+  .agent .task { grid-column: 1 / -1; font-size: 12px; color: var(--text-2); overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+  .agent.off .name .ag { opacity: .55; }
+
+  /* ------------------------------------------------------------------ leases */
+  .leases { list-style: none; margin: 0; padding: 4px 0; }
+  .lease { padding: 9px 16px; border-top: 1px solid var(--border); display: grid; gap: 5px; }
+  .lease:first-child { border-top: 0; }
+  .lease .top { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .lease .globs { display: flex; flex-wrap: wrap; gap: 4px; }
+  .exp.soon { color: var(--warn); font-weight: 600; }
+
+  /* ------------------------------------------------------------------ live output */
+  .out-panel { position: relative; }
+  .out-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 10px 8px 16px;
+               border-bottom: 1px solid var(--border); }
+  .agent-filter { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+  .fchip {
+    --c: var(--muted); display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--surface); cursor: pointer;
+    font-size: 12px; font-weight: 600; color: var(--text-2);
+  }
+  .fchip i { width: 8px; height: 8px; border-radius: 2px; background: var(--c); }
+  .fchip:hover { border-color: var(--border-strong); }
+  .fchip[aria-pressed="true"] { border-color: var(--c); color: var(--c);
+                                background: color-mix(in srgb, var(--c) 10%, transparent); }
+  .fchip.all[aria-pressed="true"] { --c: var(--accent); }
+  .search { position: relative; width: 220px; }
+  .search .field { height: 30px; padding-left: 30px; padding-right: 28px; }
+  .search svg { position: absolute; left: 9px; top: 7px; color: var(--muted); }
+  .search kbd { position: absolute; right: 7px; top: 6px; font: 11px/16px ui-monospace, monospace; color: var(--muted);
+                border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .toggles { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+  .toggles button { height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+                    font-size: 12px; font-weight: 600; color: var(--muted); }
+  .toggles button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+  @media (max-width: 760px) { .search { width: 100%; order: 3; } }
+  .out {
+    height: clamp(320px, calc(100vh - 330px), 820px); overflow: auto; background: var(--code-bg);
+    border-radius: 0 0 12px 12px; padding: 6px 0 10px; overscroll-behavior: contain;
+    font: 12.5px/1.6 ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    --agw: 10ch;
+  }
+  .ln { display: grid; grid-template-columns: 62px var(--agw) minmax(0, 1fr); gap: 12px; padding: 0 16px; }
+  .ln:hover { background: var(--hover); }
+  .ln .t { color: var(--muted); opacity: .8; user-select: none; }
+  .ln .who { min-width: 0; overflow: hidden; }
+  .ln .tx { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .out.solo .ln { grid-template-columns: 62px minmax(0, 1fr); }
+  .out.solo .who { display: none; }
+  .out.nowrap .ln { width: max-content; min-width: 100%; }
+  .out.nowrap .tx { white-space: pre; overflow-wrap: normal; }
+  .ln.k-res .tx { color: var(--muted); }
+  .ln.k-err { background: color-mix(in srgb, var(--bad) 7%, transparent); }
+  .ln.k-err .tx { color: var(--bad); }
+  .ln.k-meta .tx { color: var(--muted); font-style: italic; }
+  .ln.k-sep { margin-top: 8px; }
+  .ln.k-sep .tx { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11.5px; }
+  .ln.k-sep .tx::after { content: ""; flex: 1; border-top: 1px dashed var(--border-strong); }
+  @media (max-width: 640px) {
+    /* phones: drop the clock, stack the agent above multi-agent lines */
+    .out { font-size: 12px; height: 65vh; }
+    .ln, .out.solo .ln { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 1px 12px; }
+    .ln .t { display: none; }
+    .ln .who { font-size: 11px; }
+    .ln.k-prose .who, .ln.k-tool .who, .ln.k-res .who, .ln.k-err .who, .ln.k-meta .who { display: none; }
+    #outCount { display: none; }
+  }
+  .mk { font-weight: 700; }
+  .k-tool .tool {
+    display: inline-block; padding: 0 6px; margin-right: 6px; border-radius: 4px; font-weight: 600;
+    color: var(--info); background: color-mix(in srgb, var(--info) 11%, transparent);
+  }
+  .k-tool .tool.hive { color: var(--tool); background: color-mix(in srgb, var(--tool) 11%, transparent); }
+  .h-url { color: var(--info); text-decoration: underline; text-underline-offset: 2px; }
+  .h-code { background: var(--surface-3); border-radius: 4px; padding: 0 3px; }
+  .h-str { color: var(--str); }
+  .h-path { color: var(--path); }
+  .h-ref { color: var(--accent); font-weight: 650; }
+  .h-sha { color: var(--sha); }
+  .h-tool { color: var(--tool); }
+  .h-bad { color: var(--bad); font-weight: 650; }
+  .h-warn { color: var(--warn); font-weight: 650; }
+  .h-good { color: var(--ok); font-weight: 650; }
+  .h-ag { --c: var(--a0); color: var(--c); font-weight: 650; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+  .jump {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 2;
+    box-shadow: var(--shadow-lg); border-radius: 999px;
+  }
+
+  /* ------------------------------------------------------------------ tasks */
+  .seg { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+  .seg button { height: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+                font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+  .seg button span { font-weight: 500; opacity: .8; margin-left: 3px; }
+  .table-wrap { overflow-x: auto; }
+  table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tasks th { text-align: left; font-size: 11.5px; font-weight: 600; color: var(--muted); padding: 8px 12px;
+              border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .tasks td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .tasks tr.row { cursor: pointer; }
+  .tasks tr.row:hover td { background: var(--hover); }
+  .tasks tr:last-child td { border-bottom: 0; }
+  .tasks .id { color: var(--muted); font-variant-numeric: tabular-nums; width: 44px; }
+  .tasks .title { font-weight: 500; overflow-wrap: anywhere; }
+  .tasks .title .tag { margin-left: 6px; }
+  .tasks td.nw { white-space: nowrap; }
+  .tasks tr.detail td { background: var(--surface-2); padding: 12px 16px 14px 56px; }
+  @media (max-width: 640px) {
+    .tasks .c-upd, .tasks .id { display: none; }
+    .tasks th, .tasks td { padding: 8px; }
+    .tasks .title { min-width: 140px; }
+    .tasks tr.detail td { padding: 10px 12px; }
+    .dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+    .dl dd { margin-bottom: 6px; }
+  }
+  .dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; font-size: 12.5px; }
+  .dl dt { color: var(--muted); }
+  .dl dd { margin: 0; min-width: 0; }
+
+  /* ------------------------------------------------------------------ right column */
+  .side { position: sticky; top: 74px; height: calc(100vh - 92px); min-height: 460px; }
+  @media (max-width: 960px) { .side { position: static; height: 75vh; } }
+  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .tabs button {
+    position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 8px 10px 10px;
+    border: 0; background: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .tabs .n { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+  .tabs .n.hot { background: var(--warn); color: #fff; }
+  .tabs .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .tabpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+
+  .chat { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 88%; display: flex; flex-direction: column; gap: 3px; }
+  .msg .meta { font-size: 11.5px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .msg .bubble { padding: 9px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--border);
+                 white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; }
+  .msg.me { align-self: flex-end; align-items: flex-end; }
+  .msg.me .bubble { background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+                    border-bottom-right-radius: 4px; }
+  .msg.me .bubble [class^="h-"] { color: inherit; }
+  .msg.me .bubble .h-code { background: rgba(255, 255, 255, .18); }
+  .msg.them .bubble { border-bottom-left-radius: 4px; }
+  .composer { border-top: 1px solid var(--border); padding: 10px; display: flex; gap: 8px; align-items: flex-end; }
+  .composer textarea { max-height: 160px; resize: none; }
+  .hint { font-size: 11.5px; color: var(--muted); padding: 0 12px 8px; }
+
+  .feed { list-style: none; margin: 0; padding: 0; }
+  .feed li { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; gap: 5px; }
+  .feed .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .feed .sum { font-weight: 600; overflow-wrap: anywhere; }
+  .feed .body { color: var(--text-2); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere;
+                max-height: 6.5em; overflow: hidden; position: relative; }
+  .feed .body.open { max-height: none; }
+  .feed .more { justify-self: start; border: 0; background: none; color: var(--accent); cursor: pointer;
+                padding: 0; font-size: 12px; font-weight: 600; }
+  .feed li.alert { background: color-mix(in srgb, var(--bad) 5%, transparent); }
+  .cmd { margin: 2px 0 0; padding: 8px 10px; background: var(--code-bg); border: 1px solid var(--border);
+         border-radius: 7px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .appr-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; margin-top: 4px; }
+  .appr-actions .field { height: 30px; padding: 4px 9px; }
+  details.out-detail summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+
+  /* ------------------------------------------------------------------ toasts and dialog */
+  .toasts { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px;
+            max-width: min(420px, calc(100vw - 32px)); }
+  .toast {
+    display: flex; gap: 10px; align-items: flex-start; padding: 11px 14px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--info);
+    box-shadow: var(--shadow-lg); font-size: 13px; animation: slidein .18s ease-out;
+  }
+  .toast.ok { border-left-color: var(--ok); } .toast.error { border-left-color: var(--bad); }
+  @keyframes slidein { from { transform: translateY(8px); opacity: 0; } }
+  dialog {
+    border: 1px solid var(--border); border-radius: 14px; padding: 0; width: min(440px, calc(100vw - 32px));
+    background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg);
+  }
+  dialog::backdrop { background: rgba(10, 12, 18, .45); }
+  dialog .d-body { padding: 20px 22px 6px; }
+  dialog h3 { margin: 0 0 8px; font-size: 16px; }
+  dialog p { margin: 0; color: var(--text-2); font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  dialog .d-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 18px 22px 20px; }
 </style>
 </head>
 <body>
-<div id="login" hidden>
-  <section>
-    <h2>Admin token</h2>
-    <input type="password" id="tok" placeholder="HIVE_ADMIN_TOKEN">
-    <div class="row"><button id="save">Open dashboard</button></div>
-  </section>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
+  <symbol id="i-hex" viewBox="0 0 32 32"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="var(--accent)" stroke="none"/><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="var(--surface)" stroke="none"/></symbol>
+</svg>
+
+<!-- ================================================================ sign in -->
+<div id="login" class="login-wrap" hidden>
+  <form class="login" id="loginForm" autocomplete="off">
+    <svg class="i" style="width:36px;height:36px"><use href="#i-hex"/></svg>
+    <h1>Hive admin</h1>
+    <p>Sign in with the server's admin token (<code>HIVE_ADMIN_TOKEN</code>).</p>
+    <label for="tok">Admin token</label>
+    <div class="pw">
+      <input class="field mono" type="password" id="tok" spellcheck="false" autocomplete="current-password" required>
+      <button class="btn ghost icon" type="button" id="showTok" title="Show token" aria-label="Show token"><svg class="i"><use href="#i-eye"/></svg></button>
+    </div>
+    <label class="check"><input type="checkbox" id="remember" checked> Remember on this device</label>
+    <button class="btn primary" style="width:100%;height:38px" id="signIn">Sign in</button>
+    <div class="error" id="loginErr" role="alert"></div>
+  </form>
 </div>
+
+<!-- ================================================================ app -->
 <div id="app" hidden>
-  <header>
-    <h1>Hive</h1>
-    <span id="state" class="pill">…</span>
-    <span id="goal" class="muted"></span>
-    <span style="flex:1"></span>
-    <button class="secondary" id="pause">Pause</button>
-    <button class="secondary" id="resume">Resume</button>
-  </header>
-  <main>
-    <div>
-      <section id="decisions-wrap" hidden><h2>Decisions needed</h2><div id="decisions"></div></section>
-      <section style="margin-top:16px"><h2>Talk to the orchestrator</h2>
-        <div id="startbox" hidden>
-          <textarea id="goalText" rows="3" placeholder="Describe the goal for the fleet"></textarea>
-          <div class="row"><button id="start">Start fleet</button></div>
+  <header class="topbar">
+    <div class="brand"><svg><use href="#i-hex"/></svg>Hive</div>
+    <div class="divider"></div>
+    <div class="fleet">
+      <span id="statePill" class="state-pill">…</span>
+      <div class="fleet-meta">
+        <span class="goal" id="goal"></span>
+        <span class="kv" id="orchKv"></span>
+        <span class="kv" id="mainKv"></span>
+      </div>
+    </div>
+    <div class="actions">
+      <span class="conn" id="conn" title=""><span>Live</span></span>
+      <button class="btn" id="pauseBtn" hidden><svg class="i"><use href="#i-pause"/></svg>Pause</button>
+      <button class="btn" id="resumeBtn" hidden><svg class="i"><use href="#i-play"/></svg>Resume</button>
+      <button class="btn icon ghost" id="themeBtn" title="Theme" aria-label="Theme"><svg class="i"><use href="#i-sun"/></svg></button>
+      <div class="menu">
+        <button class="btn icon ghost" id="menuBtn" aria-haspopup="true" aria-expanded="false" aria-label="More"><svg class="i"><use href="#i-more"/></svg></button>
+        <div class="menu-list" id="menuList" role="menu" hidden>
+          <div class="label">Theme</div>
+          <button role="menuitemradio" data-theme-set="light"><svg class="i"><use href="#i-sun"/></svg>Light</button>
+          <button role="menuitemradio" data-theme-set="dark"><svg class="i"><use href="#i-moon"/></svg>Dark</button>
+          <button role="menuitemradio" data-theme-set="system"><svg class="i"><use href="#i-monitor"/></svg>System</button>
+          <div class="sep"></div>
+          <button role="menuitem" id="resetBtn" class="danger" style="color:var(--bad)"><svg class="i"><use href="#i-reset"/></svg>Reset fleet…</button>
+          <button role="menuitem" id="signOutBtn"><svg class="i"><use href="#i-out"/></svg>Sign out</button>
         </div>
-        <div id="chat"></div>
-        <textarea id="say" rows="2" placeholder="Message #user (wakes the orchestrator)"></textarea>
-        <div class="row"><button id="send">Send</button></div>
-      </section>
-      <section style="margin-top:16px"><h2>Status feed</h2><div id="status"></div></section>
+      </div>
     </div>
-    <div>
-      <section><h2>Agents</h2><table id="agents"></table></section>
-      <section style="margin-top:16px"><h2>Tasks</h2><table id="tasks"></table></section>
-      <section style="margin-top:16px"><h2>Leases</h2><table id="leases"></table></section>
-      <section style="margin-top:16px"><h2>Live output</h2>
-        <select id="streamAgent"><option value="">all agents</option></select>
-        <pre id="stream" style="max-height:420px;overflow:auto;margin-top:8px"></pre>
-      </section>
+  </header>
+
+  <div class="page">
+    <div class="banner" id="banner"></div>
+
+    <div class="layout">
+      <!-- left: who is doing what -->
+      <div class="col left">
+        <section class="panel">
+          <div class="panel-h"><h2>Agents</h2><span class="count" id="agentsCount"></span></div>
+          <ul class="agents" id="agents"></ul>
+        </section>
+        <section class="panel">
+          <div class="panel-h"><h2>Leases</h2><span class="count" id="leasesCount"></span></div>
+          <ul class="leases" id="leases"></ul>
+        </section>
+      </div>
+
+      <!-- center: live output and tasks -->
+      <div class="col center">
+        <section class="panel out-panel">
+          <div class="panel-h">
+            <h2>Live output</h2><span class="count" id="outCount">0 lines</span>
+            <span class="spacer"></span>
+            <div class="toggles" role="group" aria-label="View options">
+              <button id="tResults" aria-pressed="true" title="Show tool results">Results</button>
+              <button id="tWrap" aria-pressed="true" title="Wrap long lines">Wrap</button>
+              <button id="tFollow" aria-pressed="true" title="Keep scrolled to the newest line">Follow</button>
+            </div>
+            <button class="btn icon ghost" id="clearOut" title="Clear the view (the server keeps the history)" aria-label="Clear view"><svg class="i"><use href="#i-trash"/></svg></button>
+          </div>
+          <div class="out-tools">
+            <div class="agent-filter" id="agentFilter"></div>
+            <label class="search">
+              <svg class="i"><use href="#i-search"/></svg>
+              <input class="field" id="search" placeholder="Filter output" spellcheck="false" aria-label="Filter output">
+              <kbd>/</kbd>
+            </label>
+          </div>
+          <div class="out" id="out" tabindex="0" aria-live="off"></div>
+          <button class="btn primary sm jump" id="jump" hidden><svg class="i"><use href="#i-down"/></svg><span></span></button>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h">
+            <h2>Tasks</h2>
+            <span class="spacer"></span>
+            <div class="seg" id="taskSeg" role="group" aria-label="Task filter">
+              <button data-f="active" aria-pressed="true">Active<span></span></button>
+              <button data-f="review" aria-pressed="false">Review<span></span></button>
+              <button data-f="finished" aria-pressed="false">Finished<span></span></button>
+              <button data-f="all" aria-pressed="false">All<span></span></button>
+            </div>
+          </div>
+          <div class="table-wrap"><table class="tasks" id="tasks"></table></div>
+        </section>
+      </div>
+
+      <!-- right: talking to the fleet -->
+      <div class="col right">
+        <section class="panel side">
+          <div class="tabs" role="tablist">
+            <button role="tab" data-tab="chat" aria-selected="true">Orchestrator<i class="dot" hidden></i></button>
+            <button role="tab" data-tab="feed" aria-selected="false">Updates<i class="dot" hidden></i></button>
+            <button role="tab" data-tab="approvals" aria-selected="false">Approvals<span class="n" hidden></span></button>
+            <button role="tab" data-tab="reports" aria-selected="false">Reports<i class="dot" hidden></i></button>
+          </div>
+          <div class="tabpanel" data-panel="chat">
+            <div class="scroll" id="chatScroll"><div class="chat" id="chat"></div></div>
+            <form class="composer" id="composer">
+              <textarea class="field" id="say" rows="1" placeholder="Message the orchestrator…" aria-label="Message the orchestrator"></textarea>
+              <button class="btn primary icon" id="sendBtn" title="Send (Enter)" aria-label="Send" disabled><svg class="i"><use href="#i-send"/></svg></button>
+            </form>
+            <div class="hint">Enter to send, Shift+Enter for a new line. Messages wake the orchestrator.</div>
+          </div>
+          <div class="tabpanel" data-panel="feed" hidden><div class="scroll"><ul class="feed" id="feed"></ul></div></div>
+          <div class="tabpanel" data-panel="approvals" hidden><div class="scroll"><ul class="feed" id="approvals"></ul></div></div>
+          <div class="tabpanel" data-panel="reports" hidden><div class="scroll"><ul class="feed" id="reports"></ul></div></div>
+        </section>
+      </div>
     </div>
-  </main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <dialog id="confirm">
+    <form method="dialog">
+      <div class="d-body"><h3 id="cTitle"></h3><p id="cText"></p></div>
+      <div class="d-actions">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn primary" value="ok" id="cOk">Confirm</button>
+      </div>
+    </form>
+  </dialog>
 </div>
+
 <script>
-const $ = (id) => document.getElementById(id);
-let token = "";
-try { token = localStorage.getItem("hiveToken") || ""; } catch (e) {}
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const ago = (t) => { const s = Math.round(Date.now()/1000 - t); return s < 60 ? s+"s" : s < 3600 ? Math.round(s/60)+"m" : Math.round(s/3600)+"h"; };
-async function api(path, method="GET", body) {
-  const r = await fetch("/api/v1" + path, { method, headers: { "Authorization": "Bearer " + token,
-    "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+"use strict";
+/* =================================================================== helpers */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ESC[c]);
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const store = {
+  get(k) { try { return localStorage.getItem(k) ?? sessionStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v, persist = true) { try { (persist ? localStorage : sessionStorage).setItem(k, v); } catch (e) {} },
+  del(k) { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch (e) {} },
+};
+const now = () => Date.now() / 1000;
+function ago(ts) {
+  if (!ts) return "never";
+  const s = Math.max(0, Math.round(now() - ts));
+  if (s < 10) return "just now";
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+const absTime = (ts) => new Date(ts * 1000).toLocaleString();
+const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+const timeEl = (ts) => `<time data-ts="${ts || 0}" title="${ts ? esc(absTime(ts)) : ""}">${ago(ts)}</time>`;
+
+/* Agent colours match the terminal: crc32(name) % 10, like ui.agent() in Python. */
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const ENC = new TextEncoder();
+const colorCache = new Map();
+function agentColor(name) {
+  if (!colorCache.has(name)) {
+    let c = 0xFFFFFFFF;
+    for (const b of ENC.encode(name)) c = CRC[(c ^ b) & 0xFF] ^ (c >>> 8);
+    colorCache.set(name, `var(--a${((c ^ 0xFFFFFFFF) >>> 0) % 10})`);
+  }
+  return colorCache.get(name);
+}
+const agentChip = (name, cls = "") => name
+  ? `<span class="ag ${cls}" style="--c:${agentColor(name)}">${esc(name)}</span>`
+  : `<span class="muted">—</span>`;
+
+/* =================================================================== keyword highlighting */
+let agentNames = [];
+let HL = null;
+function buildHighlighter() {
+  const parts = [
+    String.raw`(?<url>https?:\/\/[^\s<>"'\])]+)`,
+    "(?<code>`[^`\\n]+`)",
+    String.raw`(?<str>"(?:[^"\\\n]|\\.){0,300}")`,
+    String.raw`(?<path>(?:\.{1,2}\/|\/)?(?:[\w@.-]+\/)+[\w@.*-]+|\b[\w-]+\.(?:py|js|mjs|cjs|ts|tsx|jsx|json|toml|md|html|css|scss|yml|yaml|txt|sh|bat|ps1|go|rs|java|kt|c|h|cpp|hpp|cs|rb|php|sql|lock|cfg|ini|env|vue|svelte)\b)`,
+    String.raw`(?<ref>(?<![\w&])#\d+\b)`,
+    String.raw`(?<sha>\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b)`,
+    String.raw`(?<tool>\b(?:lease|task|message|decision|report|approval|status|await|run|request)_[a-z_]+\b)`,
+    String.raw`(?<bad>\b(?:errors?|failed|failures?|failing|exceptions?|traceback|fatal|denied|refused|conflicts?|panic|timed out|timeout|forbidden|rejected|crash(?:ed)?)\b)`,
+    String.raw`(?<warn>\b(?:warnings?|deprecated|retry(?:ing)?|skipped|blocked|frozen|stuck|pending|todo|fixme)\b)`,
+    String.raw`(?<good>\b(?:passed|success(?:ful(?:ly)?)?|succeeded|ok|done|merged|integrated|approved|fixed|completed?)\b)`,
+  ];
+  if (agentNames.length) {
+    parts.push(`(?<agent>(?<![\\w-])(?:${agentNames.map(reEsc).sort((a, b) => b.length - a.length).join("|")})(?![\\w-]))`);
+  }
+  HL = new RegExp(parts.join("|"), "gi");
+}
+buildHighlighter();
+function hl(text) {
+  text = String(text ?? "");
+  let out = "", last = 0, m;
+  HL.lastIndex = 0;
+  while ((m = HL.exec(text))) {
+    if (m[0] === "") { HL.lastIndex++; continue; }
+    out += esc(text.slice(last, m.index));
+    const g = m.groups, v = esc(m[0]);
+    if (g.url) out += `<a class="h-url" href="${v}" target="_blank" rel="noopener noreferrer">${v}</a>`;
+    else if (g.code) out += `<span class="h-code">${v}</span>`;
+    else if (g.str) out += `<span class="h-str">${v}</span>`;
+    else if (g.path) out += `<span class="h-path">${v}</span>`;
+    else if (g.ref) out += `<span class="h-ref">${v}</span>`;
+    else if (g.sha) out += `<span class="h-sha">${v}</span>`;
+    else if (g.tool) out += `<span class="h-tool">${v}</span>`;
+    else if (g.bad) out += `<span class="h-bad">${v}</span>`;
+    else if (g.warn) out += `<span class="h-warn">${v}</span>`;
+    else if (g.good) out += `<span class="h-good">${v}</span>`;
+    else if (g.agent) out += `<span class="h-ag" style="--c:${agentColor(agentNames.find((n) => n.toLowerCase() === m[0].toLowerCase()) || m[0])}">${v}</span>`;
+    else out += v;
+    last = m.index + m[0].length;
+  }
+  return out + esc(text.slice(last));
+}
+/* Highlight with the search query marked on top. */
+function hlq(text, q) {
+  if (!q) return hl(text);
+  const low = text.toLowerCase();
+  let out = "", i = 0, j;
+  while ((j = low.indexOf(q, i)) !== -1) {
+    out += hl(text.slice(i, j)) + `<mark>${hl(text.slice(j, j + q.length))}</mark>`;
+    i = j + q.length;
+  }
+  return out + hl(text.slice(i));
+}
+
+/* =================================================================== UI primitives */
+function toast(msg, kind = "info", ms = 5000) {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}
+function confirmDialog(title, text, okLabel = "Confirm", danger = false) {
+  const d = $("#confirm");
+  $("#cTitle").textContent = title; $("#cText").textContent = text;
+  $("#cOk").textContent = okLabel;
+  $("#cOk").className = danger ? "btn danger solid" : "btn primary";
+  d.returnValue = "";
+  d.showModal();
+  return new Promise((res) => d.addEventListener("close", () => res(d.returnValue === "ok"), { once: true }));
+}
+function setBusy(btn, on) { if (!btn) return; btn.disabled = on; btn.classList.toggle("busy", on); }
+
+/* =================================================================== theme */
+const THEME_ICONS = { light: "#i-sun", dark: "#i-moon", system: "#i-monitor" };
+let theme = store.get("hiveTheme") || "light";
+function applyTheme(t) {
+  theme = t;
+  if (t === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  store.set("hiveTheme", t);
+  $("#themeBtn use").setAttribute("href", THEME_ICONS[t]);
+  $("#themeBtn").title = `Theme: ${t} (click to change)`;
+  $$("[data-theme-set]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.themeSet === t)));
+}
+$("#themeBtn").onclick = () => applyTheme({ light: "dark", dark: "system", system: "light" }[theme]);
+$$("[data-theme-set]").forEach((b) => b.onclick = () => { applyTheme(b.dataset.themeSet); closeMenu(); });
+applyTheme(theme);
+
+function closeMenu() { $("#menuList").hidden = true; $("#menuBtn").setAttribute("aria-expanded", "false"); }
+$("#menuBtn").onclick = (e) => {
+  e.stopPropagation();
+  const open = $("#menuList").hidden;
+  $("#menuList").hidden = !open; $("#menuBtn").setAttribute("aria-expanded", String(open));
+};
+document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) closeMenu(); });
+
+/* =================================================================== API */
+let token = store.get("hiveToken") || "";
+class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+async function api(path, method = "GET", body) {
+  let r;
+  try {
+    r = await fetch("/api/v1" + path, {
+      method, cache: "no-store",
+      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) { throw new ApiError("Can't reach the Hive server.", 0); }
   const data = await r.json().catch(() => ({}));
-  if (r.status === 401 || r.status === 403) { showLogin(); throw new Error("auth"); }
-  if (!r.ok) { alert(data.message || r.status); throw new Error(data.message); }
+  if (r.status === 401) { signOut("The server rejected this token. Sign in again."); throw new ApiError("auth", 401); }
+  if (!r.ok) throw new ApiError(data.message || `Request failed (${r.status}).`, r.status);
   return data;
 }
-function showLogin() { $("login").hidden = false; $("app").hidden = true; }
-$("save").onclick = () => { token = $("tok").value.trim(); try { localStorage.setItem("hiveToken", token); } catch (e) {} boot(); };
+/* Run a user action: busy button, error toast, then refresh. */
+async function act(btn, fn, okMsg) {
+  setBusy(btn, true);
+  try { const r = await fn(); if (okMsg) toast(okMsg, "ok", 3000); refreshSoon(); return r; }
+  catch (e) { if (e.status !== 401) toast(e.message, "error"); return null; }
+  finally { setBusy(btn, false); }
+}
+
+/* =================================================================== sign in / out */
+function showLogin(msg = "") {
+  stopLoops();
+  $("#app").hidden = true; $("#login").hidden = false;
+  $("#loginErr").textContent = msg;
+  $("#tok").value = ""; setTimeout(() => $("#tok").focus(), 0);
+}
+function signOut(msg = "") { token = ""; store.del("hiveToken"); showLogin(msg); }
+$("#showTok").onclick = () => { const t = $("#tok"); t.type = t.type === "password" ? "text" : "password"; };
+$("#loginForm").onsubmit = async (e) => {
+  e.preventDefault();
+  token = $("#tok").value.trim();
+  if (!token) return;
+  setBusy($("#signIn"), true); $("#loginErr").textContent = "";
+  try {
+    await api("/fleet");
+    store.del("hiveToken"); store.set("hiveToken", token, $("#remember").checked);
+    start();
+  } catch (err) {
+    if (err.status !== 401) $("#loginErr").textContent = err.message;
+  } finally { setBusy($("#signIn"), false); }
+};
+$("#signOutBtn").onclick = () => { closeMenu(); signOut(); };
+
+/* =================================================================== state & polling */
+const S = { fleet: {}, decisions: [], agents: [], tasks: [], leases: [], feed: [], chat: [], approvals: [], reports: [] };
+const sigs = {};
+const changed = (key, data) => { const s = JSON.stringify(data); if (sigs[key] === s) return false; sigs[key] = s; return true; };
+let coreTimer = null, outTimer = null, coreFails = 0, outFails = 0, running = false, lastOk = 0;
+
 async function refresh() {
-  const [fleet, decisions, status, agents, tasks, leases, chat] = await Promise.all([
-    api("/fleet"), api("/decisions?state=open"), api("/status?limit=30"), api("/agents"),
-    api("/tasks"), api("/leases"), api("/messages?channel=%23user&limit=30")]);
-  $("state").textContent = fleet.state; $("state").className = "pill " + fleet.state;
-  $("goal").textContent = fleet.goal ? "Goal: " + fleet.goal.slice(0, 120) : "";
-  $("startbox").hidden = fleet.state !== "setup";
-  $("decisions-wrap").hidden = decisions.length === 0;
-  $("decisions").innerHTML = decisions.map(d => `<div class="decision">
-    <b>#${d.id} · ${esc(d.kind)}</b> <span class="muted">from ${esc(d.raised_by)} · ${ago(d.created)} ago</span>
-    <pre>${esc(d.question)}</pre>${d.context ? `<details><summary class="muted">context</summary><pre>${esc(d.context)}</pre></details>` : ""}
-    <input type="text" id="note${d.id}" placeholder="Note / instructions (optional)">
-    <div class="row">${(d.options.length ? d.options : ["approve", "reject"]).map(o =>
-      `<button data-d="${d.id}" data-a="${esc(o)}">${esc(o)}</button>`).join("")}</div></div>`).join("");
-  document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
-    await api(`/decisions/${b.dataset.d}/answer`, "POST", { answer: b.dataset.a, note: $("note" + b.dataset.d).value });
-    refresh(); });
-  $("status").innerHTML = status.slice().reverse().map(s => `<div class="item ${s.level === "alert" ? "alert" : ""}">
-    <b>${esc(s.summary)}</b> <span class="muted">${esc(s.level)} · ${esc(s.author)} · ${ago(s.ts)} ago</span>
-    ${s.body ? `<pre>${esc(s.body)}</pre>` : ""}</div>`).join("") || '<span class="muted">No updates yet.</span>';
-  $("chat").innerHTML = chat.map(m => `<div class="item"><b>${esc(m.author)}</b> <span class="muted">${ago(m.ts)} ago</span><pre>${esc(m.body)}</pre></div>`).join("");
-  $("agents").innerHTML = "<tr><th>Agent</th><th>Roles</th><th>State</th></tr>" + agents.map(a =>
-    `<tr><td>${esc(a.name)} <span class="muted">${esc(a.vendor)}</span></td><td>${esc(a.roles.join(", "))}</td>
-     <td>${a.exhausted ? "out of quota" : a.online ? esc(a.status) : "offline"}</td></tr>`).join("");
-  $("tasks").innerHTML = "<tr><th>#</th><th>Task</th><th>State</th><th>Assignee</th></tr>" + tasks.map(t =>
-    `<tr><td>${t.id}</td><td>${esc(t.title)} <span class="muted">${esc(t.kind)}</span></td><td>${esc(t.state)}</td><td>${esc(t.assignee || "")}</td></tr>`).join("");
-  $("leases").innerHTML = "<tr><th>#</th><th>Holder</th><th>Paths</th><th>Expires</th></tr>" + leases.map(l =>
-    `<tr><td>${l.id}</td><td>${esc(l.holder)}</td><td>${esc(l.globs.join(", "))}</td><td>${Math.round((l.expires_at - Date.now()/1000)/60)}m</td></tr>`).join("");
+  const [fleet, decisions, agents, tasks, leases, feed, chat, approvals, reports] = await Promise.all([
+    api("/fleet"), api("/decisions?state=open,queued"), api("/agents"), api("/tasks"), api("/leases"),
+    api("/status?limit=60"), api("/messages?channel=%23user&limit=100"), api("/approvals?limit=50"),
+    api("/reports?limit=50"),
+  ]);
+  Object.assign(S, { fleet, decisions, agents, tasks, leases, feed, chat, approvals, reports });
+  renderAll();
 }
-let streamLast = 0, streamAgent = "", streamLines = [];
-$("streamAgent").onchange = () => { streamAgent = $("streamAgent").value; streamLast = 0; streamLines = []; pollStream(); };
-async function pollStream() {
-  const q = `/streams?since_id=${streamLast}&limit=${streamLast ? 1000 : 300}` + (streamAgent ? `&agent=${encodeURIComponent(streamAgent)}` : "");
-  const r = await api(q);
+function setConn(ok) {
+  const c = $("#conn");
+  c.classList.toggle("down", !ok);
+  c.firstElementChild.textContent = ok ? "Live" : "Reconnecting…";
+  c.title = ok ? "Connected; updates every few seconds" : `Can't reach the server. Last update ${ago(lastOk / 1000)}.`;
+}
+async function coreLoop() {
+  try { await refresh(); coreFails = 0; lastOk = Date.now(); setConn(true); }
+  catch (e) { if (e.status === 401) return; coreFails++; setConn(false); }
+  if (!running) return;
+  const base = document.hidden ? 30000 : 4000;
+  coreTimer = setTimeout(coreLoop, coreFails ? Math.min(30000, 2000 * 2 ** Math.min(coreFails, 4)) : base);
+}
+async function outLoop() {
+  try { await pollOutput(); outFails = 0; }
+  catch (e) { if (e.status === 401) return; outFails++; }
+  if (!running) return;
+  const base = document.hidden ? 10000 : 1500;
+  outTimer = setTimeout(outLoop, outFails ? Math.min(30000, 2000 * 2 ** Math.min(outFails, 4)) : base);
+}
+function refreshSoon() { clearTimeout(coreTimer); if (running) coreTimer = setTimeout(coreLoop, 150); }
+function stopLoops() { running = false; clearTimeout(coreTimer); clearTimeout(outTimer); }
+document.addEventListener("visibilitychange", () => {
+  if (!running || document.hidden) return;
+  clearTimeout(coreTimer); clearTimeout(outTimer); coreLoop(); outLoop();
+});
+/* Relative times and lease countdowns tick without re-rendering. */
+setInterval(() => {
+  $$("time[data-ts]").forEach((t) => { const ts = +t.dataset.ts; if (ts) t.textContent = ago(ts); });
+  $$("[data-exp]").forEach((el) => {
+    const m = Math.round((+el.dataset.exp - now()) / 60);
+    el.textContent = m <= 0 ? "expiring" : `${m}m left`; el.classList.toggle("soon", m < 2);
+  });
+}, 10000);
+
+/* =================================================================== rendering */
+const STATE_LABEL = { setup: "Setup", planning: "Planning", awaiting_approval: "Awaiting approval",
+                      running: "Running", frozen: "Frozen", paused: "Paused" };
+const TASK_BADGE = { draft: "dim", open: "", claimed: "info", in_progress: "accent", review: "warn",
+                     blocked: "bad", failed: "bad", done: "ok", cancelled: "dim" };
+const TASK_ORDER = ["blocked", "failed", "review", "in_progress", "claimed", "open", "draft", "done", "cancelled"];
+const label = (s) => String(s || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+
+function renderAll() {
+  const names = S.agents.map((a) => a.name);
+  if (changed("names", names)) { agentNames = names; buildHighlighter(); renderFilter(); }
+  renderHeader(); renderBanner(); renderAgents(); renderLeases(); renderTasks();
+  renderChat(); renderFeed(); renderApprovals(); renderReports();
+}
+
+function renderHeader() {
+  const f = S.fleet, st = f.state || "setup";
+  const pill = $("#statePill");
+  pill.className = "state-pill " + st; pill.textContent = STATE_LABEL[st] || label(st);
+  pill.title = f.since ? `Since ${absTime(f.since)}` : "";
+  $("#goal").textContent = f.goal || "No goal yet"; $("#goal").title = f.goal || "";
+  $("#orchKv").innerHTML = f.orchestrator ? `Orchestrator ${agentChip(f.orchestrator, "plain")}` : "";
+  $("#mainKv").innerHTML = f.main_sha ? `main <b class="mono">${esc(f.main_sha.slice(0, 8))}</b>` : "";
+  $("#pauseBtn").hidden = !["running", "frozen", "planning", "awaiting_approval"].includes(st);
+  $("#resumeBtn").hidden = st !== "paused";
+  const open = S.decisions.filter((d) => d.state === "open").length;
+  const appr = S.approvals.filter((a) => a.state === "requested").length;
+  const n = open + appr;
+  document.title = (n ? `(${n}) ` : "") + `Hive · ${STATE_LABEL[st] || st}`;
+}
+
+function renderBanner() {
+  const f = S.fleet;
+  if (f.state === "setup") {
+    if (!changed("banner", "setup")) return;
+    $("#banner").innerHTML = `<div class="start">
+      <h3>Start the fleet</h3>
+      <p>Describe what the fleet should build. The orchestrator plans the work and asks you to approve
+         the plan before any worker starts.</p>
+      <textarea class="field" id="goalText" rows="3" placeholder="e.g. Add a signup page with email verification, with tests"></textarea>
+      <div class="row"><button class="btn primary" id="startBtn">Start fleet</button></div></div>`;
+    $("#startBtn").onclick = () => {
+      const goal = $("#goalText").value.trim();
+      if (!goal) { $("#goalText").focus(); return toast("Describe the goal first.", "error", 3000); }
+      act($("#startBtn"), () => api("/fleet/start", "POST", { goal }), "Fleet started; the orchestrator is planning.");
+    };
+    return;
+  }
+  if (!changed("banner", S.decisions)) return;
+  // Keep what the user is typing across re-renders.
+  const kept = {};
+  $$("#banner input, #banner textarea").forEach((el) => { if (el.id) kept[el.id] = el.value; });
+  const focused = document.activeElement && document.activeElement.id;
+  $("#banner").innerHTML = S.decisions.map((d) => {
+    const queued = d.state !== "open";
+    const opts = d.options && d.options.length ? d.options : ["approve", "reject"];
+    return `<article class="decision ${queued ? "queued" : ""}">
+      <div class="dec-head">
+        <span class="title">Decision #${d.id}</span>
+        <span class="tag">${esc(label(d.kind))}</span>
+        ${d.blocking && !queued ? '<span class="badge bad">Fleet frozen until you answer</span>' : ""}
+        ${queued ? '<span class="badge dim">Up next</span>' : ""}
+        <span class="muted small">from ${agentChip(d.raised_by, "plain")} · ${timeEl(d.created)}</span>
+      </div>
+      <div class="dec-q">${hl(d.question)}</div>
+      ${d.context ? `<details class="dec-ctx"><summary>Context</summary><div class="pre">${hl(d.context)}</div></details>` : ""}
+      ${queued ? '<div class="muted small" style="margin-top:8px">You can answer this once the decision before it is settled.</div>' : `
+      <div class="dec-options">${opts.map((o, i) =>
+        `<button class="btn ${i === 0 ? "primary" : ""}" data-answer="${esc(o)}" data-did="${d.id}">${esc(o)}</button>`).join("")}</div>
+      <div class="dec-custom">
+        <input class="field" id="dAns${d.id}" placeholder="Or type another answer">
+        <input class="field" id="dNote${d.id}" placeholder="Note for the orchestrator (optional)">
+        <button class="btn" data-custom="${d.id}">Send answer</button>
+      </div>`}
+    </article>`;
+  }).join("");
+  for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el) el.value = v; }
+  if (focused && document.getElementById(focused)) document.getElementById(focused).focus();
+}
+$("#banner").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-answer],[data-custom]");
+  if (!b) return;
+  const id = b.dataset.did || b.dataset.custom;
+  const answer = b.dataset.answer ?? $(`#dAns${id}`).value.trim();
+  if (!answer) { $(`#dAns${id}`).focus(); return toast("Type an answer first.", "error", 3000); }
+  const note = ($(`#dNote${id}`) || {}).value || "";
+  act(b, () => api(`/decisions/${id}/answer`, "POST", { answer, note }), `Decision #${id} answered: ${answer}`);
+});
+$("#banner").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.id && /^dAns|^dNote/.test(e.target.id)) {
+    e.preventDefault(); $(`[data-custom="${e.target.id.replace(/\D/g, "")}"]`).click();
+  }
+});
+
+function agentState(a) {
+  if (a.exhausted) return ["Out of quota", "bad"];
+  if (!a.online) return ["Offline", "dim"];
+  if (a.attached) return ["Interactive", "info"];
+  if (a.status === "busy") return ["Working", "accent"];
+  return ["Idle", "ok"];
+}
+function renderAgents() {
+  const active = {};
+  for (const t of S.tasks) if (t.assignee && ["claimed", "in_progress", "blocked", "review"].includes(t.state)) active[t.assignee] = t;
+  const data = { a: S.agents, t: active, o: S.fleet.orchestrator, sel: [...OUT.agents] };
+  if (!changed("agents", data)) return;
+  const list = [...S.agents].sort((x, y) =>
+    (y.name === S.fleet.orchestrator) - (x.name === S.fleet.orchestrator) || y.online - x.online || x.name.localeCompare(y.name));
+  $("#agentsCount").textContent = `${S.agents.filter((a) => a.online).length}/${S.agents.length} online`;
+  $("#agents").innerHTML = list.map((a) => {
+    const [lab, cls] = agentState(a), t = active[a.name];
+    return `<li class="agent ${a.online ? "" : "off"} ${OUT.agents.size === 1 && OUT.agents.has(a.name) ? "selected" : ""}"
+               data-solo="${esc(a.name)}" title="Show only ${esc(a.name)}'s output">
+      <div class="name">${agentChip(a.name)}<span class="vendor">${esc(a.vendor)}</span></div>
+      <span class="badge ${cls}">${lab}</span>
+      <div class="sub">${a.roles.map((r) => `<span class="tag">${esc(r)}</span>`).join("")}
+        <span>· seen ${timeEl(a.last_seen)}</span></div>
+      ${t ? `<div class="task" title="${esc(t.title)}">#${t.id} ${esc(t.title)}</div>` : ""}
+    </li>`;
+  }).join("") || '<div class="empty">No agents enrolled yet.<br>Use <code>hive admin enroll</code>.</div>';
+}
+$("#agents").addEventListener("click", (e) => {
+  const li = e.target.closest("[data-solo]");
+  if (!li) return;
+  const n = li.dataset.solo;
+  const solo = OUT.agents.size === 1 && OUT.agents.has(n);
+  OUT.agents = solo ? new Set() : new Set([n]);
+  renderFilter(); rerenderOutput(); sigs.agents = null; renderAgents();
+});
+
+function renderLeases() {
+  if (!changed("leases", S.leases)) return;
+  $("#leasesCount").textContent = S.leases.length;
+  $("#leases").innerHTML = S.leases.map((l) => {
+    const m = Math.round((l.expires_at - now()) / 60);
+    return `<li class="lease">
+      <div class="top">${agentChip(l.holder)}
+        <span class="small muted">${l.task_id ? `#${l.task_id} · ` : ""}<span class="exp ${m < 2 ? "soon" : ""}" data-exp="${l.expires_at}">${m <= 0 ? "expiring" : m + "m left"}</span></span></div>
+      <div class="globs">${l.globs.map((g) => `<code class="glob">${esc(g)}</code>`).join("")}</div>
+    </li>`;
+  }).join("") || '<div class="empty">No files are leased.</div>';
+}
+
+let taskFilter = "active";
+const expanded = new Set();
+const TASK_FILTERS = {
+  active: (t) => !["done", "cancelled", "review"].includes(t.state),
+  review: (t) => t.state === "review",
+  finished: (t) => ["done", "cancelled"].includes(t.state),
+  all: () => true,
+};
+function renderTasks() {
+  if (!changed("tasks", { t: S.tasks, f: taskFilter, x: [...expanded] })) return;
+  $$("#taskSeg button").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.f === taskFilter));
+    b.querySelector("span").textContent = S.tasks.filter(TASK_FILTERS[b.dataset.f]).length;
+  });
+  const rows = S.tasks.filter(TASK_FILTERS[taskFilter]).sort((a, b) =>
+    TASK_ORDER.indexOf(a.state) - TASK_ORDER.indexOf(b.state) || b.id - a.id);
+  if (!rows.length) {
+    $("#tasks").innerHTML = `<tr><td><div class="empty">${S.tasks.length ? "No tasks in this view." :
+      "No tasks yet. The orchestrator creates them while planning."}</div></td></tr>`;
+    return;
+  }
+  $("#tasks").innerHTML = `<thead><tr><th class="id">#</th><th>Task</th><th>State</th><th>Assignee</th><th class="c-upd">Updated</th></tr></thead><tbody>` +
+    rows.map((t) => {
+      const open = expanded.has(t.id);
+      const det = [
+        ["Spec", t.spec && `<div class="pre">${hl(t.spec)}</div>`],
+        ["Notes", t.notes && `<div class="pre">${hl(t.notes)}</div>`],
+        ["Result", t.result && `<div class="pre">${hl(t.result)}</div>`],
+        ["Paths", t.path_hints && t.path_hints.length && t.path_hints.map((g) => `<code class="glob">${esc(g)}</code>`).join(" ")],
+        ["Depends on", t.deps && t.deps.length && t.deps.map((d) => `#${d}`).join(", ")],
+        ["Branch", t.branch && `<span class="mono">${esc(t.branch)}</span>`],
+        ["Reviewer", t.reviewer && agentChip(t.reviewer)],
+        ["Created", `${timeEl(t.created)} by ${agentChip(t.created_by, "plain")}`],
+      ].filter(([, v]) => v);
+      return `<tr class="row" data-task="${t.id}" aria-expanded="${open}">
+          <td class="id">#${t.id}</td>
+          <td class="title">${esc(t.title)}${t.kind && t.kind !== "code" ? `<span class="tag">${esc(t.kind)}</span>` : ""}</td>
+          <td class="nw"><span class="badge ${TASK_BADGE[t.state] ?? ""}">${esc(label(t.state))}</span></td>
+          <td class="nw">${agentChip(t.assignee)}</td>
+          <td class="nw muted small c-upd">${timeEl(t.updated)}</td></tr>` +
+        (open ? `<tr class="detail"><td colspan="5"><dl class="dl">${det.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></td></tr>` : "");
+    }).join("") + "</tbody>";
+}
+$("#taskSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  taskFilter = b.dataset.f; renderTasks();
+});
+$("#tasks").addEventListener("click", (e) => {
+  if (e.target.closest("a")) return;
+  const tr = e.target.closest("tr[data-task]"); if (!tr) return;
+  const id = +tr.dataset.task;
+  expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+  renderTasks();
+});
+
+/* ----------------------------------------------------------------- right column */
+let tab = "chat";
+const seen = { chat: 0, feed: 0, reports: 0 };
+function selectTab(name) {
+  tab = name;
+  $$(".tabs [data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+  $$(".tabpanel").forEach((p) => p.hidden = p.dataset.panel !== name);
+  markSeen();
+  if (name === "chat") scrollChat(true);
+}
+$$(".tabs [data-tab]").forEach((b) => b.onclick = () => selectTab(b.dataset.tab));
+function maxId(list) { return list.reduce((m, x) => Math.max(m, x.id || 0), 0); }
+function markSeen() {
+  const lists = { chat: S.chat, feed: S.feed, reports: S.reports };
+  if (lists[tab]) seen[tab] = maxId(lists[tab]);
+  for (const k of Object.keys(seen)) {
+    $(`.tabs [data-tab="${k}"] .dot`).hidden = !(seen[k] && maxId(lists[k]) > seen[k]) || k === tab;
+  }
+}
+let firstRender = true;
+function initSeen() {
+  if (!firstRender) return;
+  firstRender = false;
+  seen.chat = maxId(S.chat); seen.feed = maxId(S.feed); seen.reports = maxId(S.reports);
+}
+
+function scrollChat(force) {
+  const sc = $("#chatScroll");
+  if (force || sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 60) sc.scrollTop = sc.scrollHeight;
+}
+function renderChat() {
+  initSeen(); markSeen();
+  if (!changed("chat", S.chat)) return;
+  const sc = $("#chatScroll"), atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 60;
+  $("#chat").innerHTML = S.chat.map((m) => {
+    const me = m.author === "user";
+    return `<div class="msg ${me ? "me" : "them"}">
+      <div class="meta">${me ? "You" : agentChip(m.author)} · ${timeEl(m.ts)}</div>
+      <div class="bubble">${hl(m.body)}</div>
+    </div>`;
+  }).join("") || `<div class="empty">No messages yet. Write to the orchestrator below; it answers here.</div>`;
+  if (atBottom) sc.scrollTop = sc.scrollHeight;
+}
+const say = $("#say");
+function autosize() { say.style.height = "auto"; say.style.height = Math.min(say.scrollHeight + 2, 160) + "px";
+                      $("#sendBtn").disabled = !say.value.trim(); }
+say.addEventListener("input", autosize);
+say.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
+});
+$("#composer").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = say.value.trim(); if (!body) return;
+  const r = await act($("#sendBtn"), () => api("/messages", "POST", { channel: "#user", body, priority: "high" }));
+  if (r !== null) { say.value = ""; autosize(); scrollChat(true); }
+};
+
+const LEVEL = { fyi: ["FYI", "info"], "decision-needed": ["Decision needed", "warn"], alert: ["Alert", "bad"] };
+function renderFeed() {
+  if (!changed("feed", S.feed)) return;
+  $("#feed").innerHTML = [...S.feed].reverse().map((s) => {
+    const [lab, cls] = LEVEL[s.level] || [s.level, ""];
+    return `<li class="${s.level === "alert" ? "alert" : ""}">
+      <div class="top"><span class="badge ${cls}">${esc(lab)}</span>${agentChip(s.author)}<span>· ${timeEl(s.ts)}</span></div>
+      <div class="sum">${hl(s.summary)}</div>
+      ${s.body ? `<div class="body">${hl(s.body)}</div><button class="more" hidden>Show more</button>` : ""}
+    </li>`;
+  }).join("") || '<div class="empty">No updates yet. The orchestrator posts progress here.</div>';
+  fitBodies($("#feed"));
+}
+/* "Show more" only where a body is actually clipped. */
+function fitBodies(root) {
+  requestAnimationFrame(() => $$(".body", root).forEach((b) => {
+    const more = b.nextElementSibling;
+    if (more && more.classList.contains("more")) more.hidden = b.scrollHeight <= b.clientHeight + 2;
+  }));
+}
+document.addEventListener("click", (e) => {
+  const m = e.target.closest(".more"); if (!m) return;
+  const b = m.previousElementSibling, open = b.classList.toggle("open");
+  m.textContent = open ? "Show less" : "Show more";
+});
+
+const APPR = { requested: ["Waiting", "warn"], approved: ["Approved", "info"], denied: ["Denied", "bad"],
+               executed: ["Ran", "ok"], expired: ["Expired", "dim"] };
+function renderApprovals() {
+  const pending = S.approvals.filter((a) => a.state === "requested").length;
+  const n = $('.tabs [data-tab="approvals"] .n');
+  n.hidden = !pending; n.textContent = pending; n.classList.toggle("hot", pending > 0);
+  if (!changed("approvals", S.approvals)) return;
+  const kept = {};
+  $$("#approvals input").forEach((el) => kept[el.id] = el.value);
+  const list = [...S.approvals].sort((a, b) => (b.state === "requested") - (a.state === "requested") || b.id - a.id);
+  $("#approvals").innerHTML = list.map((a) => {
+    const [lab, cls] = APPR[a.state] || [a.state, ""];
+    return `<li>
+      <div class="top"><span class="badge ${cls}">${lab}</span><span class="muted">#${a.id}</span>${agentChip(a.agent)}
+        <span>· ${timeEl(a.created)}</span>${a.task_id ? `<span class="tag">task #${a.task_id}</span>` : ""}<span class="tag">${esc(a.shell)}</span></div>
+      <pre class="cmd">${hl(a.command)}</pre>
+      ${a.reason ? `<div class="small">${hl(a.reason)}</div>` : ""}
+      ${a.decided_by ? `<div class="small muted">${lab} by ${agentChip(a.decided_by, "plain")}${a.note ? `: ${esc(a.note)}` : ""}</div>` : ""}
+      ${a.exit_code !== null && a.exit_code !== undefined ? `<div class="small">Exit code <b class="${a.exit_code === 0 ? "h-good" : "h-bad"}">${a.exit_code}</b></div>` : ""}
+      ${a.output ? `<details class="out-detail"><summary>Output</summary><pre class="cmd">${hl(a.output)}</pre></details>` : ""}
+      ${a.state === "requested" ? `<div class="appr-actions">
+        <input class="field" id="aNote${a.id}" placeholder="Note (optional)">
+        <button class="btn sm primary" data-appr="${a.id}" data-ok="1">Approve</button>
+        <button class="btn sm danger" data-appr="${a.id}" data-ok="0">Deny</button></div>` : ""}
+    </li>`;
+  }).join("") || '<div class="empty">No command approvals. Workers ask here before running risky commands; the orchestrator usually decides, and you can too.</div>';
+  for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el) el.value = v; }
+}
+$("#approvals").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-appr]"); if (!b) return;
+  const id = b.dataset.appr, approve = b.dataset.ok === "1";
+  const a = S.approvals.find((x) => String(x.id) === id);
+  if (approve && !(await confirmDialog(`Approve command #${id}?`,
+      `${a ? a.agent : "The agent"} will run it once, exactly as shown:\n\n${a ? a.command : ""}`, "Approve and run"))) return;
+  act(b, () => api(`/approvals/${id}/decide`, "POST", { approve, note: $(`#aNote${id}`).value }),
+      approve ? `Approved #${id}.` : `Denied #${id}.`);
+});
+
+function renderReports() {
+  markSeen();
+  if (!changed("reports", S.reports)) return;
+  $("#reports").innerHTML = [...S.reports].reverse().map((r) => {
+    const req = r.kind === "request";
+    return `<li>
+      <div class="top"><span class="badge ${req ? (r.state === "open" ? "warn" : "dim") : "ok"}">${req ? (r.state === "open" ? "Requested" : "Answered") : "Report"}</span>
+        ${agentChip(r.author)}${req && r.target ? `<span>→</span>${agentChip(r.target)}` : ""}
+        <span>· ${timeEl(r.created)}</span>${r.task_id ? `<span class="tag">task #${r.task_id}</span>` : ""}</div>
+      <div class="sum">${hl(r.summary)}</div>
+      ${r.body ? `<div class="body">${hl(r.body)}</div><button class="more" hidden>Show more</button>` : ""}
+    </li>`;
+  }).join("") || '<div class="empty">No reports yet. Workers file them when they finish work, or when the orchestrator asks.</div>';
+  fitBodies($("#reports"));
+}
+
+/* =================================================================== live output */
+const MAX_LINES = 5000;
+const OUT = { lines: [], lastId: 0, agents: new Set(), q: "", results: true, wrap: true, follow: true,
+              clearedAt: 0, pending: 0, rendered: 0, known: new Set() };
+const outEl = $("#out");
+
+function kindOf(text) {
+  const c = text.charAt(0);
+  if (c === "→") return "tool";
+  if (c === "←") return "res";
+  if (c === "×" || c === "✗") return "err";
+  if (c === "·") return /^·\s*wake\b/.test(text) ? "sep" : "meta";
+  return "prose";
+}
+function visible(L) {
+  return L.id > OUT.clearedAt && (!OUT.agents.size || OUT.agents.has(L.agent)) &&
+    (OUT.results || L.kind !== "res") && (!OUT.q || L.low.includes(OUT.q));
+}
+function lineHTML(L) {
+  const q = OUT.q, t = L.text;
+  let body;
+  if (L.kind === "tool") {
+    const m = t.match(/^→\s*(\S+)\s?([\s\S]*)$/);
+    const full = m ? m[1] : "", short = full.replace(/^mcp__(?:plugin_hive_)?hive__|^mcp_hive_/, "");
+    body = `<span class="tool ${short !== full ? "hive" : ""}" title="${esc(full)}">${hlq(short, q)}</span>${hlq(m ? m[2] : t, q)}`;
+  } else if (L.kind === "res" || L.kind === "err") {
+    body = `<span class="mk">${L.kind === "res" ? "←" : "×"}</span> ${hlq(t.slice(1).trimStart(), q)}`;
+  } else if (L.kind === "meta" || L.kind === "sep") {
+    body = hlq(t.slice(1).trim(), q);
+  } else {
+    body = hlq(t.replace(/^ {2}/, ""), q);
+  }
+  return `<div class="ln k-${L.kind}"><span class="t" title="${esc(absTime(L.ts))}">${clock(L.ts)}</span>` +
+    `<span class="who">${agentChip(L.agent, "plain")}</span><div class="tx">${body}</div></div>`;
+}
+function outAtBottom() { return outEl.scrollTop + outEl.clientHeight >= outEl.scrollHeight - 24; }
+function updateCount() {
+  const shown = OUT.lines.filter(visible).length;
+  $("#outCount").textContent = shown === OUT.lines.length ? `${shown} lines` : `${shown} of ${OUT.lines.length} lines`;
+}
+function emptyOut() {
+  return `<div class="empty" style="padding:48px 16px">${OUT.lines.length ? "No lines match the current filters." :
+    "No output yet. Workers' live output appears here while they run a turn."}</div>`;
+}
+function rerenderOutput() {
+  const vis = OUT.lines.filter(visible);
+  outEl.classList.toggle("solo", OUT.agents.size === 1);
+  outEl.classList.toggle("nowrap", !OUT.wrap);
+  const w = Math.max(6, ...[...OUT.known].map((n) => n.length));
+  outEl.style.setProperty("--agw", w + 2 + "ch");
+  outEl.innerHTML = vis.length ? vis.map(lineHTML).join("") : emptyOut();
+  OUT.rendered = vis.length;
+  OUT.pending = 0; $("#jump").hidden = true;
+  if (OUT.follow) outEl.scrollTop = outEl.scrollHeight;
+  updateCount();
+}
+function appendLines(add) {
+  const vis = add.filter(visible);
+  if (vis.length) {
+    const wasBottom = outAtBottom();
+    if (!OUT.rendered) outEl.innerHTML = "";
+    outEl.insertAdjacentHTML("beforeend", vis.map(lineHTML).join(""));
+    OUT.rendered += vis.length;
+    while (OUT.rendered > MAX_LINES && outEl.firstElementChild) { outEl.firstElementChild.remove(); OUT.rendered--; }
+    if (OUT.follow || wasBottom) outEl.scrollTop = outEl.scrollHeight;
+    else { OUT.pending += vis.length; showJump(); }
+  }
+  updateCount();
+}
+function showJump() {
+  $("#jump").hidden = !OUT.pending;
+  $("#jump span").textContent = `${OUT.pending} new line${OUT.pending === 1 ? "" : "s"}`;
+}
+async function pollOutput() {
+  const r = await api(`/streams?since_id=${OUT.lastId}&limit=${OUT.lastId ? 1000 : 600}`);
   if (!r.lines.length) return;
-  streamLast = r.last_id;
-  streamLines = streamLines.concat(r.lines.map(l => (streamAgent ? "" : `[${l.agent}] `) + l.text)).slice(-2000);
-  const el = $("stream"), atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-  el.textContent = streamLines.join("\n");
-  if (atBottom) el.scrollTop = el.scrollHeight;
+  OUT.lastId = r.last_id;
+  const add = r.lines.map((l) => ({ id: l.id, agent: l.agent, ts: l.ts, text: l.text, low: l.text.toLowerCase(), kind: kindOf(l.text) }));
+  let newAgent = false;
+  for (const l of add) if (!OUT.known.has(l.agent)) { OUT.known.add(l.agent); newAgent = true; }
+  OUT.lines.push(...add);
+  if (OUT.lines.length > MAX_LINES) OUT.lines.splice(0, OUT.lines.length - MAX_LINES);
+  if (newAgent) { renderFilter(); rerenderOutput(); } else appendLines(add);
 }
-async function fillAgents() {
-  const agents = await api("/agents");
-  $("streamAgent").innerHTML = '<option value="">all agents</option>' + agents.map(a =>
-    `<option value="${esc(a.name)}">${esc(a.name)}</option>`).join("");
-  $("streamAgent").value = streamAgent;
+function renderFilter() {
+  const names = [...new Set([...agentNames, ...OUT.known])].sort();
+  for (const n of [...OUT.agents]) if (!names.includes(n)) OUT.agents.delete(n);
+  $("#agentFilter").innerHTML = `<button class="fchip all" data-ag="" aria-pressed="${!OUT.agents.size}">All agents</button>` +
+    names.map((n) => `<button class="fchip" data-ag="${esc(n)}" style="--c:${agentColor(n)}" aria-pressed="${OUT.agents.has(n)}"><i></i>${esc(n)}</button>`).join("");
 }
-$("send").onclick = async () => { const body = $("say").value.trim(); if (!body) return;
-  await api("/messages", "POST", { channel: "#user", body, priority: "high" }); $("say").value = ""; refresh(); };
-$("start").onclick = async () => { await api("/fleet/start", "POST", { goal: $("goalText").value }); refresh(); };
-$("pause").onclick = async () => { await api("/fleet/pause", "POST", {}); refresh(); };
-$("resume").onclick = async () => { await api("/fleet/resume", "POST", {}); refresh(); };
-async function boot() {
-  if (!token) return showLogin();
-  $("login").hidden = true; $("app").hidden = false;
-  try { await refresh(); await fillAgents(); } catch (e) { return; }
-  setInterval(() => refresh().catch(() => {}), 5000);
-  setInterval(() => pollStream().catch(() => {}), 1500);
+$("#agentFilter").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-ag]"); if (!b) return;
+  const n = b.dataset.ag;
+  if (!n) OUT.agents.clear();
+  else if (e.ctrlKey || e.metaKey || e.shiftKey) OUT.agents.has(n) ? OUT.agents.delete(n) : OUT.agents.add(n);
+  else OUT.agents = OUT.agents.size === 1 && OUT.agents.has(n) ? new Set() : new Set([n]);
+  renderFilter(); rerenderOutput(); sigs.agents = null; renderAgents();
+});
+$("#agentFilter").title = "Click to show one agent; Ctrl/Shift+click to combine several.";
+let searchTimer = null;
+$("#search").addEventListener("input", (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { OUT.q = e.target.value.trim().toLowerCase(); rerenderOutput(); }, 120);
+});
+$("#search").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.target.value = ""; OUT.q = ""; rerenderOutput(); e.target.blur(); } });
+function toggle(btn, key, after) {
+  btn.onclick = () => { OUT[key] = !OUT[key]; btn.setAttribute("aria-pressed", String(OUT[key]));
+                        store.set("hiveOut." + key, OUT[key] ? "1" : "0"); after(); };
+  const saved = store.get("hiveOut." + key);
+  if (saved !== null) { OUT[key] = saved === "1"; btn.setAttribute("aria-pressed", String(OUT[key])); }
 }
-boot();
+toggle($("#tResults"), "results", rerenderOutput);
+toggle($("#tWrap"), "wrap", () => outEl.classList.toggle("nowrap", !OUT.wrap));
+toggle($("#tFollow"), "follow", () => { if (OUT.follow) { outEl.scrollTop = outEl.scrollHeight; OUT.pending = 0; showJump(); } });
+outEl.classList.toggle("nowrap", !OUT.wrap);
+outEl.addEventListener("scroll", () => {
+  const bottom = outAtBottom();
+  if (bottom && OUT.pending) { OUT.pending = 0; showJump(); }
+  // Scrolling up pauses following; scrolling back to the bottom resumes it.
+  if (OUT.follow !== bottom) { OUT.follow = bottom; $("#tFollow").setAttribute("aria-pressed", String(bottom)); }
+});
+$("#jump").onclick = () => {
+  OUT.follow = true; $("#tFollow").setAttribute("aria-pressed", "true");
+  outEl.scrollTop = outEl.scrollHeight; OUT.pending = 0; showJump();
+};
+$("#clearOut").onclick = () => { OUT.clearedAt = OUT.lastId; rerenderOutput(); toast("View cleared. The server still has the full history.", "info", 3000); };
+
+/* =================================================================== fleet controls */
+$("#pauseBtn").onclick = (e) => act(e.currentTarget, () => api("/fleet/pause", "POST", {}), "Fleet paused. Running turns finish; nothing new starts.");
+$("#resumeBtn").onclick = (e) => act(e.currentTarget, () => api("/fleet/resume", "POST", {}), "Fleet resumed.");
+$("#resetBtn").onclick = async () => {
+  closeMenu();
+  if (!(await confirmDialog("Reset the fleet?",
+      "The fleet returns to setup and must be started again with a goal. Agents, tasks and history are kept; open decisions stop blocking.",
+      "Reset fleet", true))) return;
+  act(null, () => api("/fleet/reset", "POST", {}), "Fleet reset to setup.");
+};
+
+/* =================================================================== keyboard */
+document.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if (e.key === "/" && !typing && !e.ctrlKey && !e.metaKey) { e.preventDefault(); $("#search").focus(); }
+  if (e.key === "Escape") closeMenu();
+});
+
+/* =================================================================== start */
+function start() {
+  $("#login").hidden = true; $("#app").hidden = false;
+  running = true;
+  coreLoop(); outLoop();
+}
+if (token) start(); else showLogin();
 </script>
 </body>
 </html>
