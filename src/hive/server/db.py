@@ -216,12 +216,16 @@ def sqlite_journal_mode(explicit: str | None = None) -> str:
     return mode
 
 
-def make_engine(url: str, sqlite_journal: str | None = None):
+def make_engine(url: str, sqlite_journal: str | None = None, small_pool: bool = False):
+    """`small_pool`: for a project database, one of many on the server and often idle."""
+    pool = {"pool_size": 2, "max_overflow": 4} if small_pool else {}
     if url.startswith("sqlite"):
         kwargs = {"connect_args": {"check_same_thread": False, "timeout": 30}}
         memory = url in ("sqlite://", "sqlite:///:memory:")
         if memory:
             kwargs["poolclass"] = StaticPool
+        else:
+            kwargs.update(pool)
         engine = create_engine(url, **kwargs)
         if not memory and engine.url.database:
             Path(engine.url.database).expanduser().resolve().parent.mkdir(parents=True,
@@ -252,6 +256,6 @@ def make_engine(url: str, sqlite_journal: str | None = None):
         def _isolation(dbapi_conn, _):
             dbapi_conn.isolation_level = None
     else:
-        engine = create_engine(url, pool_pre_ping=True, pool_recycle=280)
+        engine = create_engine(url, pool_pre_ping=True, pool_recycle=280, **pool)
     metadata.create_all(engine)
     return engine

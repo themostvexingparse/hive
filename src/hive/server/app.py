@@ -13,10 +13,15 @@ from importlib import resources
 from flask import Flask, Response, g, jsonify, request
 from sqlalchemy.exc import OperationalError
 
+from .projects import DEFAULT, ProjectError
 from .service import ADMIN, Actor, ApiError, Hive, create_hive
 
 
-def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flask:
+def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
+               project: str = DEFAULT, check_project_admin=None, server=None) -> Flask:
+    """One project's API and dashboard. `admin_token` is the server owner's and works in every
+    project; `check_project_admin(token)` also accepts that project's own admin token. The
+    default project's app gets `server` (the router) and manages the other projects."""
     admin_token = admin_token if admin_token is not None else os.environ.get("HIVE_ADMIN_TOKEN", "")
     if not admin_token:
         raise RuntimeError("HIVE_ADMIN_TOKEN must be set")
@@ -29,6 +34,10 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @app.errorhandler(ApiError)
     def _api_error(e: ApiError):
         return jsonify({"error": e.code, "message": e.message, **e.extra}), e.status
+
+    @app.errorhandler(ProjectError)
+    def _project_error(e: ProjectError):
+        return jsonify({"error": e.code, "message": e.message}), e.status
 
     @app.errorhandler(OperationalError)
     def _db_busy(e: OperationalError):
@@ -53,7 +62,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
                 token = header[7:] if header.startswith("Bearer ") else ""
                 if not token:
                     raise ApiError(401, "no_token", "Authorization: Bearer <token> required")
-                if hmac.compare_digest(token.encode("utf-8"), admin_token.encode("utf-8")):
+                g.owner = hmac.compare_digest(token.encode("utf-8"), admin_token.encode("utf-8"))
+                if g.owner or (check_project_admin and check_project_admin(token)):
                     g.actor = ADMIN
                 elif admin:
                     raise ApiError(403, "forbidden", "admin token required")
@@ -451,7 +461,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
     @auth(admin=True)
     def admin_check():
         """Lets the dashboard tell the admin token from an agent's at sign-in."""
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "project": project, "owner": g.owner})
 
     @app.get(f"{api}/admin/archives")
     @auth(admin=True)
@@ -485,10 +495,52 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
 
     @app.get(f"{api}/health")
     def health():
-        out = {"ok": True}
+        out = {"ok": True, "project": project}
         if hive.is_sqlite:
             out["sqlite_journal"] = getattr(hive.engine, "hive_sqlite_journal", None)
         return jsonify(out)
+
+    # ---------------------------------------------------------------- projects (owner only)
+    if server is not None:
+        def owner():
+            if not g.owner:
+                raise ApiError(403, "forbidden", "only the server's admin token manages projects")
+
+        @app.get(f"{api}/admin/projects")
+        @auth(admin=True)
+        def list_projects():
+            owner()
+            return jsonify([{"slug": DEFAULT, "name": DEFAULT, "path": "", "archived": False,
+                             "default": True}]
+                           + [p.public() for p in server.registry.list()])
+
+        @app.post(f"{api}/admin/projects")
+        @auth(admin=True)
+        def create_project():
+            owner()
+            b = body()
+            p, token = server.create_project(str(b.get("slug", "")), str(b.get("name") or ""),
+                                             str(b.get("db_url") or ""),
+                                             str(b.get("github_token_env") or ""))
+            return jsonify({"project": p, "admin_token": token}), 201
+
+        @app.patch(f"{api}/admin/projects/<slug>")
+        @auth(admin=True)
+        def update_project(slug):
+            owner()
+            b = body()
+            p = server.registry.update(slug, name=b.get("name"),
+                                       github_token_env=b.get("github_token_env"),
+                                       archived=None if b.get("archived") is None
+                                       else bool(b["archived"]))
+            server.forget(slug)  # reload with the new settings (or stop serving it)
+            return jsonify(p.public())
+
+        @app.post(f"{api}/admin/projects/<slug>/token")
+        @auth(admin=True)
+        def rotate_project_token(slug):
+            owner()
+            return jsonify({"slug": slug, "admin_token": server.registry.rotate(slug)})
 
     # ---------------------------------------------------------------- dashboard
     @app.get("/")

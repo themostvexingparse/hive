@@ -97,7 +97,7 @@ def test_backup_endpoint_returns_consistent_copy(tmp_path):
     finally:
         con.close()
     health = client.get("/api/v1/health").get_json()
-    assert health == {"ok": True, "sqlite_journal": "delete"}
+    assert health == {"ok": True, "project": "default", "sqlite_journal": "delete"}
 
 
 def test_busy_database_maps_to_503_and_client_retries(tmp_path, monkeypatch):

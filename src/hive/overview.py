@@ -212,7 +212,7 @@ def _machine(root: Path, offline: bool, problems: list) -> dict:
                if wt.is_dir() else "", "account": s.config_dir,
                "account_used": bool(account and account.is_dir() and any(account.iterdir())),
                "permission_mode": s.permission_mode or "default", "token": s.token,
-               "live": live.get(s.name)}
+               "server_url": mcfg.url_for(s), "live": live.get(s.name)}
         info["slots"].append(row)
         if not row["worktree_ok"]:
             _problem(problems, f"Slot {s.name}'s worktree {s.worktree} doesn't exist.",
@@ -223,6 +223,13 @@ def _machine(root: Path, offline: bool, problems: list) -> dict:
         if not row["account_used"]:
             _problem(problems, f"Slot {s.name}'s account folder is empty: its CLI has probably "
                                "never been logged in.", f"hive chat {s.name}")
+    urls = list(dict.fromkeys(r["server_url"].rstrip("/") for r in info["slots"]))
+    if urls:
+        info["server_url"] = urls[0]
+    if len(urls) > 1:
+        _problem(problems, "This project's slots on this machine use different servers or "
+                           f"projects ({', '.join(urls)}); they won't see each other.",
+                 f"hive join <slot> --replace --server {urls[0]} --token <token> ...")
     seen = {}
     for row in info["slots"]:
         if row["worktree"] in seen:
@@ -239,34 +246,36 @@ def _same(a: str, b: str) -> bool:
 def _server(root: Path, cfg: dict, machine: dict, roles: dict, offline: bool,
             problems: list) -> dict:
     from .daemon.client import HiveError, ServerClient
-    # Which server is really in use. hive.toml's [server] url is informational only: agents
-    # connect with machine.toml's address (`hive join --server`), admin commands with
-    # admin.toml's (`hive admin login`); nothing connects with hive.toml's.
+    # Which server (and project on it) is really in use. Agents connect with their slot's
+    # address in machine.toml (`hive join --server`). Admin commands use admin.toml's
+    # (`hive admin login`), or the project hive.toml's [server] url names (…/p/<project>).
     admin = load_admin_config()
+    admin_url, admin_token = admin.target(start=root)
     toml_url = cfg["server"].get("url", "")
     agents_url = machine["server_url"] if machine["slots"] else ""
     if agents_url:
         url, source = agents_url, "this project's slots on this machine (machine.toml)"
-    elif admin.server_url:
-        url, source = admin.server_url, "your admin login (admin.toml)"
+    elif admin_url:
+        url, source = admin_url, "your admin login (admin.toml)"
     else:
         url, source = toml_url, "hive.toml (no slots or admin login on this machine)"
     info = {"url": url, "source": source, "toml_url": toml_url, "agents_url": agents_url,
-            "admin_url": admin.server_url, "reachable": None, "auth": None, "fleet": None,
+            "admin_url": admin_url, "reachable": None, "auth": None, "fleet": None,
             "agents": [], "tasks": {}, "leases": 0, "error": ""}
-    if agents_url and admin.server_url and not _same(agents_url, admin.server_url):
+    if agents_url and admin_url and not _same(agents_url, admin_url):
         _problem(problems, f"This project's agents here use {agents_url}, but your admin "
-                           f"commands use {admin.server_url}: they manage different fleets.",
+                           f"commands use {admin_url}: they manage different fleets.",
                  f"hive admin login --server {agents_url} --token <admin token>")
     if toml_url and url and not _same(toml_url, url):
         _problem(problems, f"hive.toml's [server] url ({toml_url}) is out of date; this project "
-                           f"uses {url}. Nothing connects with it, but it tells people setting "
-                           "up new machines where the server is.",
+                           f"uses {url}. It tells people setting up new machines where the "
+                           "server is, and admin commands run here use it when it names a "
+                           "project.",
                  f'set [server] url = "{url}" in hive.toml, then commit')
     if offline or not url:
         return info
-    if admin.token and (not admin.server_url or _same(admin.server_url, url)):
-        token, info["auth"] = admin.token, "admin login"
+    if admin_token and _same(admin_url, url):
+        token, info["auth"] = admin_token, "admin login"
     elif agents_url:
         token, info["auth"] = machine["slots"][0]["token"], f"slot {machine['slots'][0]['name']}"
     else:

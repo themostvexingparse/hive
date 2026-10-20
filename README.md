@@ -23,7 +23,7 @@ or proxies account credentials. Each account is used only by its own CLI. Check 
 terms for your own situation, for example how many accounts one person may run.
 
 The design rationale and full specification are in [SPEC.md](SPEC.md). This README is the
-operating manual.
+operating manual; [docs/CLI.md](docs/CLI.md) shows every `hive` command with examples.
 
 ---
 
@@ -32,7 +32,8 @@ operating manual.
 1. [How it works](#1-how-it-works)
 2. [Requirements](#2-requirements)
 3. [Installation](#3-installation)
-4. [Running the server](#4-running-the-server) (full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md))
+4. [Running the server](#4-running-the-server) (full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md));
+   [several projects on one server](#44-several-projects-on-one-server)
 5. [Preparing the repository (`hive init`)](#5-preparing-the-repository-hive-init)
 6. [Enrolling agents and setting up machines](#6-enrolling-agents-and-setting-up-machines)
 7. [Running the fleet (`hive up`)](#7-running-the-fleet-hive-up)
@@ -47,7 +48,7 @@ operating manual.
 16. [Reports](#16-reports)
 17. [What the agents see: MCP tools, hooks, skills, permissions](#17-what-the-agents-see-mcp-tools-hooks-skills)
 18. [Web dashboard](#18-web-dashboard)
-19. [Command reference](#19-command-reference)
+19. [Command reference](#19-command-reference) (usage guide with examples: [docs/CLI.md](docs/CLI.md))
 20. [Configuration reference](#20-configuration-reference)
 21. [Files and directories](#21-files-and-directories)
 22. [Timings and limits](#22-timings-and-limits)
@@ -188,6 +189,8 @@ The server needs three things:
 | `HIVE_ADMIN_TOKEN` | yes | Admin (your) token. Anyone holding it controls the fleet. |
 | `HIVE_DATABASE_URL` | no (default `sqlite:///hive.db`) | SQLAlchemy URL: SQLite, MySQL (`mysql+pymysql://…`), or Postgres. |
 | `HIVE_GITHUB_TOKEN` | no | Lets the server move `main` itself through the GitHub API (§14.4). |
+| `HIVE_PROJECT_DATABASE_URL` | no | Where new projects' databases go, with a `{slug}` placeholder (§4.4). |
+| `HIVE_DATA_DIR` | no | Folder for project databases and archives (default: next to a SQLite database). |
 
 ### 4.1 Locally (trials, single machine)
 
@@ -229,6 +232,67 @@ hive admin login --server https://USER.pythonanywhere.com --token <admin token>
 
 This saves `~/.hive/admin.toml` (user-only permissions). Every user-side command uses it.
 `HIVE_SERVER_URL` and `HIVE_ADMIN_TOKEN` environment variables override the file.
+
+You can also log in to a single project with its own admin token (§4.4):
+`hive admin login --server https://…/p/acme --token <project admin token>`. That login is
+kept beside the server's, and used only for that project.
+
+### 4.4 Several projects on one server
+
+One server can run several projects at once. Each project is a separate repository with its
+own fleet, agents, tasks, decisions, config and archives.
+
+| | The default project | Any other project |
+|---|---|---|
+| URL (API and dashboard) | `https://host/` | `https://host/p/<project>/` |
+| Database | `HIVE_DATABASE_URL` | its own (see below) |
+| Admin token | the server's `HIVE_ADMIN_TOKEN` | its own, or the server's |
+
+**Projects are fully separate.** An agent's token works only in its own project, so the same
+agent name can exist in two projects. A project's admin token is admin there and nowhere
+else. The server's admin token works in every project and is the only one that can create
+or change projects. An existing single-project server keeps working unchanged as the
+`default` project.
+
+**Create a project** (with the server's admin token):
+
+```sh
+hive admin project create acme --name "Acme Corp"
+```
+
+This prints the project's URL and its admin token (shown once). Then use the project's URL
+wherever you'd use the server's:
+
+```sh
+cd acme-repo
+hive init --server https://host/p/acme      # hive.toml now names the project
+hive admin push-config                      # inside the repo: acts on the project it names
+hive admin enroll dev --vendor claude --roles programmer   # prints `hive join … --server https://host/p/acme`
+```
+
+**Which project an admin command acts on:**
+1. `--project NAME` anywhere on the command line (or `HIVE_PROJECT`), on your admin server.
+2. Otherwise, the project the current repository's `hive.toml` names (`[server] url = "…/p/NAME"`).
+3. Otherwise, the server you logged in to (`default`).
+
+**Where a project's database lives:**
+- On a server whose database is SQLite, each project gets a SQLite file:
+  `projects/<project>/hive.db` next to the server's (or under `HIVE_DATA_DIR`).
+- On MySQL or Postgres, create the project's database first. Then pass
+  `--db-url mysql+pymysql://…`, or set `HIVE_PROJECT_DATABASE_URL` on the server with a
+  `{slug}` placeholder (e.g. `mysql+pymysql://user:pw@host/user$hive_{slug}`), so that only the
+  database has to be created. On PythonAnywhere, databases are created on the *Databases* tab.
+- If the database can't be opened, the project isn't created.
+
+**Other project commands** (server admin only): `hive admin project list`;
+`hive admin project rotate NAME` (new admin token, old one stops working); `hive admin project
+set NAME [--name …] [--github-token-env VAR] [--archive | --unarchive]`. Archiving stops
+serving a project and keeps its data.
+
+**Machines:** a machine can run slots of several projects. Each slot remembers its own
+server or project URL (§6.2), and `hive up` runs them all. Slot names must be unique on a
+machine: if two projects both have a `dev`, run them on different machines or enroll one
+under another name.
 
 ---
 
@@ -384,7 +448,8 @@ What `hive join` does:
 | `--config-dir PATH` | The account's CLI config folder (default `~/.hive/accounts/<name>`). |
 | `--permission-mode MODE` | Claude: `acceptEdits` (default for workers), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default for workers), `read-only`, `danger-full-access`, `yolo`. See §23. |
 | `--model MODEL` | The model the slot's CLI uses, e.g. `--model <model-name>`. Default: the account's default model. |
-| `--server URL` | Server URL, saved for the whole machine. |
+| `--server URL` | Server or project URL (`https://host/p/<project>`), saved for this slot only. Default: the slot's current one if re-joining, else the machine's default (set by the first `hive join`). |
+| `--replace` | Move an existing slot of the same name to another server or project. Its local state (event cursor, inbox, session) is reset. Without it, `hive join` refuses, so another project's agent of the same name can't silently take over the slot. |
 | `--hive-cmd CMD` | How the git hook calls `hive` (default `hive`). |
 
 ### 6.3 Log each slot's account in once
@@ -962,6 +1027,11 @@ The server then advances `main` with a fast-forward-only ref update, so `main` i
 force-moved. Combine this with branch protection so only that token can push `main`, and give
 the machines push rights for `hive/*` branches only.
 
+With several projects (§4.4), `HIVE_GITHUB_TOKEN` applies to the default project only. Give
+each other project its own token: put it in an environment variable on the server, then
+`hive admin project set NAME --github-token-env HIVE_GITHUB_TOKEN_ACME`. Hive stores only the
+variable's name.
+
 This mode is implemented but not yet tested against GitHub (§25).
 
 ---
@@ -1341,7 +1411,10 @@ describe it.
 
 ## 18. Web dashboard
 
-Open the server's root URL (`https://…/`) and sign in with the admin token. If you tick
+Open the server's root URL (`https://…/`) and sign in with the admin token. For another
+project, open its URL, `https://…/p/<project>/`, and sign in with that project's admin token
+or the server's. Signed in with the server's token, the ⋯ menu lists every project to switch
+between. If you tick
 *Remember on this device*, the token stays in the browser's local storage until you sign out
 (⋯ menu); otherwise it's forgotten when the tab closes.
 
@@ -1409,13 +1482,21 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
 
 ## 19. Command reference
 
+This is the one-table summary. **[docs/CLI.md](docs/CLI.md)** explains every command with
+examples: a first run start to finish, choosing a project, common recipes, and what each
+error message means.
+
 ### User / admin
 
 | Command | Description |
 |---|---|
 | `hive server [--host H] [--port P] [--db URL] [--sqlite-journal wal\|delete\|truncate] [--admin-token T]` | Run the server (development). |
-| `hive admin backup [-o FILE]` | Download a consistent copy of the server's SQLite database. |
-| `hive admin login --server URL --token T` | Save admin credentials to `~/.hive/admin.toml`. |
+| `hive admin backup [-o FILE]` | Download a consistent copy of the project's SQLite database. |
+| `hive admin login --server URL --token T` | Save admin credentials to `~/.hive/admin.toml`. `URL` may be a project's (`…/p/NAME`), with that project's admin token. |
+| `hive admin project create NAME [--name TEXT] [--db-url URL] [--github-token-env VAR]` | Add a project (server admin only); prints its URL and admin token (§4.4). |
+| `hive admin project list` | List the server's projects. |
+| `hive admin project set NAME [--name TEXT] [--github-token-env VAR] [--archive\|--unarchive]` | Rename, archive or change a project's GitHub token variable. |
+| `hive admin project rotate NAME` | Replace a project's admin token. |
 | `hive admin enroll NAME --vendor claude\|gemini\|codex --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
 | `hive admin roles NAME r1,r2` | Change an agent's roles. |
 | `hive admin push-config` | Upload `hive.toml` from the current repository. |
@@ -1430,11 +1511,15 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
 | `hive watch [AGENT] [-n N] [--no-follow]` | Follow live output (§9). |
 | `hive pause` / `hive resume` / `hive reset` | Fleet control (§10.4). |
 
+Every admin command takes `--project NAME` (anywhere on the line; also `HIVE_PROJECT`) to act
+on that project; inside a repository whose `hive.toml` names a project, that project is the
+default (§4.4).
+
 ### Machine
 
 | Command | Description |
 |---|---|
-| `hive join NAME --vendor V --token T [--server URL] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--model MODEL] [--hive-cmd CMD]` | Add a slot to this machine (§6.2). |
+| `hive join NAME --vendor V --token T [--server URL] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--model MODEL] [--hive-cmd CMD] [--replace]` | Add a slot to this machine (§6.2). |
 | `hive up [-v] [--headless]` | Run this machine's slots (§7). |
 | `hive chat SLOT [--fresh]` | Attach interactively to a slot (§7.4). |
 
@@ -1513,7 +1598,7 @@ task_kinds = ["docs"]
 ### 20.2 `~/.hive/machine.toml` (per machine, private, written by `hive join`)
 
 ```toml
-server_url = "https://USER.pythonanywhere.com"
+server_url = "https://USER.pythonanywhere.com"   # default for slots that name none
 local_port = 8766            # daemon's local API (127.0.0.1 only)
 local_secret = "…"           # generated; protects the local API
 poll_interval = 3.0          # seconds between server polls
@@ -1527,6 +1612,7 @@ config_dir = "/home/you/.hive/accounts/claude-2"
 permission_mode = ""         # empty = default (claude: acceptEdits, gemini: auto_edit,
                              # codex: workspace-write)
 model = ""                   # empty = the account's default model
+server_url = "https://USER.pythonanywhere.com/p/acme"   # this slot's server or project
 command = []                 # optional custom headless command, see below
 ```
 
@@ -1553,8 +1639,11 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `HIVE_DATABASE_URL` | server | Database URL. |
 | `HIVE_GITHUB_TOKEN` | server | Enables GitHub mode. |
 | `HIVE_SQLITE_JOURNAL` | server | SQLite journal mode: `wal` (default) or `delete`/`truncate` for network filesystems; auto-`delete` on PythonAnywhere. |
-| `HIVE_ARCHIVE_DIR` | server | Folder for dashboard archives (§18). Default: `hive-archives/` next to a SQLite database file, otherwise `~/hive-archives`. |
+| `HIVE_ARCHIVE_DIR` | server | Folder for the default project's dashboard archives (§18). Default: `hive-archives/` next to a SQLite database file, otherwise `~/hive-archives`. Other projects keep theirs in `projects/<project>/hive-archives/` under the data folder. |
+| `HIVE_PROJECT_DATABASE_URL` | server | Database URL for new projects, with a `{slug}` placeholder (§4.4). |
+| `HIVE_DATA_DIR` | server | Folder for project databases and archives. Default: next to a SQLite database file, otherwise `~/hive-data`. |
 | `HIVE_SERVER_URL` | admin CLI | Overrides the server URL in `admin.toml`. |
+| `HIVE_PROJECT` | admin CLI | The project admin commands act on, like `--project` (§4.4). |
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
 | `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off (§19, "Coloured output"). |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |
@@ -1569,8 +1658,8 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 
 | Path | Contents |
 |---|---|
-| `machine.toml` | server URL, local API port and secret, slots with tokens (keep private) |
-| `admin.toml` | admin server URL and token (only where you ran `hive admin login`) |
+| `machine.toml` | default server URL, local API port and secret, slots with their tokens and server URLs (keep private) |
+| `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive admin login`) |
 | `state.db` | daemon state: event cursors, inbox cache, pending wake reasons, session ids |
 | `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login |
 | `logs/daemon.log` | daemon log |
@@ -1583,8 +1672,10 @@ git-ignored).
 **Next to your clone:** one worktree per slot, `<clone>-<slot>/`, on branch `hive/<slot>`.
 
 **On the server:** the database: agents, events, messages, tasks, leases, decisions, status
-feed, reports, live-output lines. Dashboard archives are files in `$HIVE_ARCHIVE_DIR`: one
-`<id>.json.gz` and a small `<id>.meta.json` each.
+feed, reports, live-output lines, and the list of projects. Dashboard archives are files in
+`$HIVE_ARCHIVE_DIR`: one `<id>.json.gz` and a small `<id>.meta.json` each. Each other project
+(§4.4) has its own database, by default `projects/<project>/hive.db`, and archives in
+`projects/<project>/hive-archives/`, under the data folder.
 
 ---
 
@@ -1614,8 +1705,10 @@ feed, reports, live-output lines. Dashboard archives are files in `$HIVE_ARCHIVE
 ## 23. Security model
 
 - **Tokens:**
-  - The admin token controls everything; keep it off agent machines unless you also work
-    there.
+  - The server's admin token controls everything, in every project; keep it off agent
+    machines unless you also work there.
+  - A project's admin token (§4.4) controls that project only, and can't create or change
+    projects. Like agent tokens, it is stored only as a hash.
   - Agent tokens are per agent and stored only as hashes on the server.
   - The local API binds to `127.0.0.1` and needs the per-machine secret.
 - **Who sees what:**

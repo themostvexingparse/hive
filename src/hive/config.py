@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -57,6 +58,7 @@ class Slot:
     config_dir: str = ""
     permission_mode: str = ""
     model: str = ""  # passed to the CLI's model flag; empty = the account's default
+    server_url: str = ""  # this slot's Hive server (project); empty = the machine's server_url
     command: list[str] = field(default_factory=list)  # optional override template
     session_id: str = ""
     session_started: bool = False
@@ -65,7 +67,7 @@ class Slot:
 
 @dataclass
 class MachineConfig:
-    server_url: str = "http://127.0.0.1:8765"
+    server_url: str = "http://127.0.0.1:8765"  # default for slots that name no server
     local_port: int = 8766
     local_secret: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     poll_interval: float = 3.0
@@ -74,6 +76,14 @@ class MachineConfig:
     @property
     def local_url(self) -> str:
         return f"http://127.0.0.1:{self.local_port}"
+
+    def url_for(self, slot: Slot) -> str:
+        """The server (project) this slot belongs to."""
+        return slot.server_url or self.server_url
+
+    def server_urls(self) -> list[str]:
+        """Every server this machine's slots talk to, in slot order."""
+        return list(dict.fromkeys(self.url_for(s) for s in self.slots)) or [self.server_url]
 
     def slot(self, name: str) -> Slot:
         for s in self.slots:
@@ -110,22 +120,77 @@ def save_machine_config(cfg: MachineConfig) -> None:
         pass
 
 
+# A project on a Hive server: https://host/p/<project>. The server's own URL is its default project.
+_PROJECT_URL = re.compile(r"^(.*?)/p/([a-z][a-z0-9-]{1,31})/?$")
+
+
+def split_project_url(url: str) -> tuple[str, str]:
+    """("https://host", "acme") for "https://host/p/acme"; (url, "") for a server's own URL."""
+    u = (url or "").rstrip("/")
+    m = _PROJECT_URL.match(u)
+    return (m.group(1), m.group(2)) if m else (u, "")
+
+
+def project_url(server: str, project: str) -> str:
+    """The URL of `project` on the server `server` (itself a server or project URL)."""
+    base = split_project_url(server)[0]
+    return f"{base}/p/{project}" if project and project != "default" else base
+
+
+def repo_server_url(root: Path | None) -> str:
+    """hive.toml's own [server] url, without the built-in default ("" if it names none)."""
+    if not root or not (root / "hive.toml").exists():
+        return ""
+    try:
+        with open(root / "hive.toml", "rb") as f:
+            return str((tomllib.load(f).get("server") or {}).get("url") or "").rstrip("/")
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+
+
 @dataclass
 class AdminConfig:
-    server_url: str = ""
+    server_url: str = ""  # the default target of admin commands
     token: str = ""
+    servers: dict[str, str] = field(default_factory=dict)  # more URLs (projects) -> admin token
+
+    def token_for(self, url: str) -> str:
+        url = (url or "").rstrip("/")
+        if url in self.servers:
+            return self.servers[url]
+        own = self.server_url.rstrip("/")
+        if url == own:
+            return self.token
+        # The server's own admin token (the owner's) works in each of its projects.
+        base, project = split_project_url(own)
+        if own and not project and split_project_url(url)[0] == base:
+            return self.token
+        return ""
+
+    def target(self, project: str | None = None, start: Path | None = None) -> tuple[str, str]:
+        """(url, token) an admin command acts on: `project` (or $HIVE_PROJECT) on the default
+        server; else the project the current repository's hive.toml names; else the default."""
+        project = project or os.environ.get("HIVE_PROJECT", "")
+        if project:
+            url = project_url(self.server_url, project) if self.server_url else ""
+        else:
+            repo_url = repo_server_url(find_repo_root(start))
+            url = repo_url if split_project_url(repo_url)[1] else self.server_url.rstrip("/")
+        return url, os.environ.get("HIVE_ADMIN_TOKEN", "") or self.token_for(url)
 
 
 def load_admin_config() -> AdminConfig:
     url = os.environ.get("HIVE_SERVER_URL", "")
     token = os.environ.get("HIVE_ADMIN_TOKEN", "")
+    servers: dict[str, str] = {}
     path = hive_home() / "admin.toml"
     if path.exists():
         with open(path, "rb") as f:
             data = tomllib.load(f)
         url = url or data.get("server_url", "")
         token = token or data.get("token", "")
-    return AdminConfig(url, token)
+        servers = {str(k).rstrip("/"): str(v) for k, v in (data.get("servers") or {}).items()}
+    return AdminConfig(url, token, servers)
 
 
 def save_admin_config(cfg: AdminConfig) -> None:

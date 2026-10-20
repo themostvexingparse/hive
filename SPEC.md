@@ -69,6 +69,8 @@ with its own subscription, driven through documented features (headless mode, MC
   process supervision.
 - Transport is pluggable (`poll` in v1; `sse`/`ws` later). Polling: one `GET /events?since=`
   per slot every `poll_interval` (default 3 s).
+- One server can host several projects, each a separate fleet with its own database, at
+  `/p/<project>/api/v1` (§22). Everything in §§4–20 describes one project.
 
 ---
 
@@ -80,6 +82,9 @@ with its own subscription, driven through documented features (headless mode, MC
   SHA-256. Daemon stores it in the machine config (`~/.hive/machine.toml`, user-only perms).
 - Every agent request: `Authorization: Bearer <agent-token>`. Server resolves the agent and its roles.
 - Agent names: `^[a-z][a-z0-9-]{1,31}$`. `user` and `system` are reserved author names.
+  Names are unique per project (§22), not per server.
+- **Project admin token** (§22): admin inside one project only; stored as SHA-256. The
+  server's admin token works in every project and alone manages projects.
 
 ---
 
@@ -422,7 +427,7 @@ prompt = "Review diffs for correctness and tests."
 - **PythonAnywhere** (recommended paid tier): WSGI file imports `hive.server.wsgi:application`;
   set `HIVE_ADMIN_TOKEN`, `HIVE_DATABASE_URL` (MySQL), optional `HIVE_GITHUB_TOKEN`. No
   background workers required: lease expiry, scheduler and failover are evaluated lazily on
-  requests.
+  requests, per project, on that project's requests (§22).
 - Any WSGI host / VPS / Fly.io works identically (gunicorn).
 
 ---
@@ -491,6 +496,7 @@ state-specific hint, events and unread messages.
 | 3 | Daemon, local API, MCP stdio, hooks, wakes | done, e2e-tested with a fake CLI |
 | 4 | Git release transaction, integration, sync | done (local push mode e2e-tested; GitHub CAS mode untested) |
 | 5 | Dashboard, `hive init`, failover | first version; loop detection and push notifications pending |
+| 6 | Several projects on one server (§22) | done, tested |
 
 ### Implementation notes (v0.1)
 
@@ -504,3 +510,39 @@ state-specific hint, events and unread messages.
   the release transaction automatically.
 - Plans written to `.hive/plans/` are not shared automatically across machines in v0.1; the plan
   reaches the user via the start-approval decision context and the programmers via task specs.
+
+---
+
+## 22. Several projects on one server (v0.3)
+
+- **Model:** one `Hive` instance per project, each with its own database (SQLite file, or a
+  MySQL/Postgres database). Nothing in a project's database refers to another project, so
+  isolation doesn't depend on query filters. The server's own database (`HIVE_DATABASE_URL`)
+  is the `default` project and also holds the project registry (`projects` table: slug, name,
+  database URL, admin token hash, GitHub token variable name, archived).
+- **Routing** (`hive.server.router`, the WSGI entry): `/p/<slug>/…` goes to that project's
+  Flask app with `SCRIPT_NAME` = `/p/<slug>`. Anything else goes to the default project.
+  `/p/<slug>` redirects to `/p/<slug>/`, and an unknown or archived slug gets `404
+  no_such_project`. Apps are built on first use and kept; an idle project's connection pool
+  is closed after 10 minutes and reopens on demand.
+- **Clients** need no routing logic: a project's URL (`https://host/p/<slug>`) is used wherever
+  a server URL is. `ServerClient` appends `/api/v1`. Each slot in `machine.toml` stores its
+  own `server_url`, and `admin.toml` keeps admin tokens per URL (`[servers]`).
+- **Slugs:** `^[a-z][a-z0-9-]{1,31}$`, except `default`, `api`, `admin`, `static`.
+- **New project databases:** `HIVE_PROJECT_DATABASE_URL` with `{slug}`, else a SQLite file
+  `projects/<slug>/hive.db` under the data folder (`HIVE_DATA_DIR`, default: next to a SQLite
+  server database). A MySQL/Postgres server with no template needs an explicit `db_url`. The
+  database is opened (tables created) at creation; on failure nothing is registered.
+- **GitHub mode:** a project names the server environment variable holding its token
+  (`github_token_env`); `HIVE_GITHUB_TOKEN` applies to the default project only.
+- **Archives** of a project live in `projects/<slug>/hive-archives/`. `/admin/backup` copies
+  that project's database only.
+
+| Method & path (on the server's own URL) | Auth | Purpose |
+|---|---|---|
+| `GET /admin/projects` | server admin | list: `default` first, then `{slug, name, path, database, github_token_env, archived, created}` |
+| `POST /admin/projects` | server admin | `{slug, name?, db_url?, github_token_env?}` → `{project, admin_token}` (token shown once) |
+| `PATCH /admin/projects/<slug>` | server admin | `{name?, github_token_env?, archived?}`; the project reloads on its next request |
+| `POST /admin/projects/<slug>/token` | server admin | rotate the project's admin token |
+
+`GET /admin/check` returns `{ok, project, owner}`; `GET /health` also names the project.

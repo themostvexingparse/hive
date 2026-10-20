@@ -165,6 +165,8 @@
   }
   .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; letter-spacing: -.01em; }
   .brand svg { width: 24px; height: 24px; }
+  .brand .proj { font-weight: 500; color: var(--muted); }
+  .brand .proj::before { content: "/"; margin-right: 9px; color: var(--border); }
   .divider { width: 1px; align-self: stretch; margin: 6px 0; background: var(--border); }
   .fleet { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
   .state-pill {
@@ -547,8 +549,8 @@
 <div id="login" class="login-wrap" hidden>
   <form class="login" id="loginForm" autocomplete="off">
     <svg class="i" style="width:36px;height:36px"><use href="#i-hex"/></svg>
-    <h1>Hive admin</h1>
-    <p>Sign in with the server's admin token (<code>HIVE_ADMIN_TOKEN</code>).</p>
+    <h1>Hive admin<span id="loginProj"></span></h1>
+    <p id="loginHint">Sign in with the server's admin token (<code>HIVE_ADMIN_TOKEN</code>).</p>
     <label for="tok">Admin token</label>
     <div class="pw">
       <input class="field mono" type="password" id="tok" spellcheck="false" autocomplete="current-password" required>
@@ -565,7 +567,7 @@
 <!-- ================================================================ app -->
 <div id="app" hidden>
   <header class="topbar">
-    <div class="brand"><svg><use href="#i-hex"/></svg>Hive</div>
+    <div class="brand"><svg><use href="#i-hex"/></svg>Hive<span class="proj" id="projName" hidden></span></div>
     <div class="divider"></div>
     <div class="fleet">
       <span id="statePill" class="state-pill">…</span>
@@ -587,6 +589,7 @@
           <button role="menuitemradio" data-theme-set="light"><svg class="i"><use href="#i-sun"/></svg>Light</button>
           <button role="menuitemradio" data-theme-set="dark"><svg class="i"><use href="#i-moon"/></svg>Dark</button>
           <button role="menuitemradio" data-theme-set="system"><svg class="i"><use href="#i-monitor"/></svg>System</button>
+          <div id="projMenu" hidden><div class="sep"></div><div class="label">Projects</div><div id="projList"></div></div>
           <div class="sep"></div>
           <button role="menuitem" id="archivesBtn"><svg class="i"><use href="#i-archive"/></svg>Archives…</button>
           <button role="menuitem" id="resetBtn" class="danger live-only" style="color:var(--bad)"><svg class="i"><use href="#i-reset"/></svg>Reset fleet…</button>
@@ -856,13 +859,29 @@ $("#menuBtn").onclick = (e) => {
 };
 document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) closeMenu(); });
 
+/* =================================================================== project */
+/* Each project on the server has its own fleet, served under /p/<project>/; the server's own
+   address is its default project. The API is the one under this page's own address. */
+const PROJECT_BASE = (location.pathname.match(/^\/p\/[a-z][a-z0-9-]{1,31}(?=\/|$)/) || [""])[0];
+const PROJECT = PROJECT_BASE ? PROJECT_BASE.slice(3) : "";
+/* A project's admin token is kept per project; the server's admin token (it opens every
+   project) also under OWNER_KEY, so the project switcher needs no new sign-in. */
+const TOKEN_KEY = PROJECT ? "hiveToken:" + PROJECT : "hiveToken";
+const OWNER_KEY = "hiveOwnerToken";
+if (PROJECT) {
+  document.title = "Hive · " + PROJECT;
+  $("#projName").textContent = PROJECT; $("#projName").hidden = false;
+  $("#loginProj").textContent = " · " + PROJECT;
+  $("#loginHint").innerHTML = `Sign in with project <b>${esc(PROJECT)}</b>'s admin token, or the server's (<code>HIVE_ADMIN_TOKEN</code>).`;
+}
+
 /* =================================================================== API */
-let token = store.get("hiveToken") || "";
+let token = store.get(TOKEN_KEY) || store.get(OWNER_KEY) || "";
 class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
 async function api(path, method = "GET", body) {
   let r;
   try {
-    r = await fetch("/api/v1" + path, {
+    r = await fetch(PROJECT_BASE + "/api/v1" + path, {
       method, cache: "no-store",
       headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -888,7 +907,7 @@ function showLogin(msg = "") {
   $("#loginErr").textContent = msg;
   $("#tok").value = ""; setTimeout(() => $("#tok").focus(), 0);
 }
-function signOut(msg = "") { token = ""; store.del("hiveToken"); showLogin(msg); }
+function signOut(msg = "") { token = ""; store.del(TOKEN_KEY); store.del(OWNER_KEY); showLogin(msg); }
 $("#showTok").onclick = () => { const t = $("#tok"); t.type = t.type === "password" ? "text" : "password"; };
 $("#loginForm").onsubmit = async (e) => {
   e.preventDefault();
@@ -896,8 +915,9 @@ $("#loginForm").onsubmit = async (e) => {
   if (!token) return;
   setBusy($("#signIn"), true); $("#loginErr").textContent = "";
   try {
-    await checkAdmin();
-    store.del("hiveToken"); store.set("hiveToken", token, $("#remember").checked);
+    const who = await checkAdmin();
+    store.del(TOKEN_KEY); store.set(TOKEN_KEY, token, $("#remember").checked);
+    if (who.owner) { store.del(OWNER_KEY); store.set(OWNER_KEY, token, $("#remember").checked); }
     start();
   } catch (err) {
     if (err.status !== 401) $("#loginErr").textContent = err.message;
@@ -906,11 +926,32 @@ $("#loginForm").onsubmit = async (e) => {
 $("#signOutBtn").onclick = () => { closeMenu(); signOut(); };
 /* Agents' tokens can read the fleet too, so signing in checks an admin-only endpoint: the
    admin panel needs the server's admin token for live output, decisions and archives. */
-const NOT_ADMIN = "That isn't this server's admin token (HIVE_ADMIN_TOKEN). An agent's token " +
-                  "can't open the admin panel.";
+const NOT_ADMIN = (PROJECT ? `That isn't an admin token for project ${PROJECT} or this server. `
+                           : "That isn't this server's admin token (HIVE_ADMIN_TOKEN). ") +
+                  "An agent's token can't open the admin panel.";
 async function checkAdmin() {
-  try { await api("/admin/check"); }
+  let who;
+  try { who = await api("/admin/check"); }
   catch (e) { throw e.status === 403 ? new ApiError(NOT_ADMIN, 403) : e; }
+  if (who.owner) loadProjects();
+  return who;
+}
+/* The server's admin sees every project in the menu (always listed by the server's own API). */
+async function loadProjects() {
+  let list;
+  try {
+    const r = await fetch("/api/v1/admin/projects", { cache: "no-store", headers: { Authorization: "Bearer " + token } });
+    if (!r.ok) return;
+    list = (await r.json()).filter((p) => !p.archived);
+  } catch (e) { return; }
+  if (list.length < 2) return;
+  $("#projList").innerHTML = list.map((p) => {
+    const slug = p.default ? "" : p.slug;
+    return `<button role="menuitemradio" aria-checked="${slug === PROJECT}" data-proj-path="${esc(p.path || "")}/">` +
+           `<svg class="i"><use href="#i-hex"/></svg>${esc(p.default ? "default" : p.name || p.slug)}</button>`;
+  }).join("");
+  $$("#projList button").forEach((b) => { b.onclick = () => { location.href = b.dataset.projPath; }; });
+  $("#projMenu").hidden = false;
 }
 
 /* =================================================================== state & polling */
@@ -1514,7 +1555,7 @@ $("#archList").addEventListener("click", async (e) => {
 });
 async function downloadArchive(id) {
   let r;
-  try { r = await fetch(`/api/v1/admin/archives/${encodeURIComponent(id)}?download=1`, { headers: { Authorization: "Bearer " + token } }); }
+  try { r = await fetch(`${PROJECT_BASE}/api/v1/admin/archives/${encodeURIComponent(id)}?download=1`, { headers: { Authorization: "Bearer " + token } }); }
   catch (e) { throw new ApiError("Can't reach the Hive server.", 0); }
   if (!r.ok) throw new ApiError(`Download failed (${r.status}).`, r.status);
   const url = URL.createObjectURL(await r.blob());

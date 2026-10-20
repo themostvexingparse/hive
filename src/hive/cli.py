@@ -15,8 +15,8 @@ from pathlib import Path
 
 from . import __version__, ui
 from .config import (VENDORS, AdminConfig, Slot, find_repo_root, hive_home, load_admin_config,
-                     load_machine_config, load_repo_config, machine_config_path,
-                     save_admin_config, save_machine_config)
+                     load_machine_config, load_repo_config, machine_config_path, project_url,
+                     save_admin_config, save_machine_config, split_project_url)
 from .daemon.client import HiveError, ServerClient
 
 
@@ -25,11 +25,34 @@ def die(msg: str) -> None:
     raise SystemExit(1)
 
 
-def admin_client() -> ServerClient:
-    cfg = load_admin_config()
-    if not cfg.server_url or not cfg.token:
+PROJECT: str | None = None  # --project: the project admin commands act on
+
+
+def admin_target() -> tuple[str, str]:
+    url, token = load_admin_config().target(PROJECT)
+    if not url:
         die("not logged in as admin; run `hive admin login --server URL --token TOKEN`")
-    return ServerClient(cfg.server_url, cfg.token)
+    if not token:
+        die(f"no admin token for {url}; run "
+            f"`hive admin login --server {url} --token <its admin token>`")
+    return url, token
+
+
+def admin_client() -> ServerClient:
+    return ServerClient(*admin_target())
+
+
+def owner_client() -> ServerClient:
+    """The server's own admin (the owner), who manages its projects."""
+    cfg = load_admin_config()
+    base = split_project_url(cfg.server_url)[0]
+    if not base:
+        die("not logged in as admin; run `hive admin login --server URL --token TOKEN`")
+    token = os.environ.get("HIVE_ADMIN_TOKEN", "") or cfg.token_for(base)
+    if not token:
+        die(f"managing projects needs the server's own admin token; run "
+            f"`hive admin login --server {base} --token <HIVE_ADMIN_TOKEN>`")
+    return ServerClient(base, token)
 
 
 def call(fn, *a, **kw):
@@ -59,21 +82,82 @@ def cmd_server(a):
         os.environ["HIVE_ADMIN_TOKEN"] = a.admin_token
     if not os.environ.get("HIVE_ADMIN_TOKEN"):
         die("set HIVE_ADMIN_TOKEN (or pass --admin-token)")
-    from .server.app import create_app
-    app = create_app()
+    from werkzeug.serving import run_simple
+    from .server.router import create_server
+    server = create_server()
+    projects = [p.slug for p in server.registry.list() if not p.archived]
     ui.banner(f"Hive server {__version__}", "development server; see docs/DEPLOYMENT.md")
     ui.kv([("listening", ui.path(f"http://{a.host}:{a.port}")),
            ("dashboard", ui.path(f"http://{a.host}:{a.port}/")),
-           ("database", os.environ["HIVE_DATABASE_URL"])])
+           ("database", os.environ["HIVE_DATABASE_URL"]),
+           ("projects", ", ".join(["default"] + projects))])
     ui.out(ui.dim("  Ctrl+C to stop.") + "\n")
-    app.run(host=a.host, port=a.port, threaded=True)
+    run_simple(a.host, a.port, server, threaded=True)
 
 
 def cmd_admin_login(a):
-    c = ServerClient(a.server, a.token)
-    call(c.get, "/fleet")
-    save_admin_config(AdminConfig(a.server, a.token))
-    ui.ok(f"Logged in to {ui.path(a.server)} as admin.")
+    url = a.server.rstrip("/")
+    if PROJECT:
+        url = project_url(url, PROJECT)
+    who = call(ServerClient(url, a.token).get, "/admin/check")
+    cfg = load_admin_config() if (hive_home() / "admin.toml").exists() else AdminConfig()
+    if not split_project_url(url)[1] or not cfg.server_url:
+        # A server's own URL (or a first login) becomes the default target.
+        if cfg.server_url and cfg.server_url.rstrip("/") != url and cfg.token:
+            cfg.servers[cfg.server_url.rstrip("/")] = cfg.token  # keep the previous login
+        cfg.server_url, cfg.token = url, a.token
+        cfg.servers.pop(url, None)
+    else:
+        cfg.servers[url] = a.token
+    save_admin_config(cfg)
+    project = who.get("project", "default")
+    role = ("the server's admin (all projects)" if who.get("owner")
+            else f"admin of project {project}")
+    ui.ok(f"Logged in to {ui.path(url)} as {role}.")
+
+
+def cmd_project_create(a):
+    c = owner_client()
+    r = call(c.post, "/admin/projects", {"slug": a.slug, "name": a.name or "",
+                                         "db_url": a.db_url or "",
+                                         "github_token_env": a.github_token_env or ""})
+    url = project_url(c.base.removesuffix("/api/v1"), a.slug)
+    ui.ok(f"Created project {ui.agent(a.slug)} at {ui.path(url)}.")
+    ui.kv([("admin token", ui.paint(r["admin_token"], "bold", "bright_yellow")),
+           ("", ui.dim("shown only once; it is admin of this project only")),
+           ("dashboard", ui.path(url + "/"))])
+    ui.section("Next")
+    for i, t in enumerate([
+            "In the project's repository: " + ui.cmd(f"hive init --server {url}"),
+            "Its admin logs in once: " + ui.cmd(f"hive admin login --server {url} --token "
+                                                "<admin token>"),
+            "Upload its config: " + ui.cmd("hive admin push-config") + ui.dim(
+                " (run inside the repository; it targets the project hive.toml names)")], 1):
+        ui.out(f"  {ui.num(f'{i}.')} {t}")
+
+
+def cmd_project_list(a):
+    rows = call(owner_client().get, "/admin/projects")
+    ui.table(["project", "name", "path", "database", "github token", "state"],
+             [[ui.agent(p["slug"]), p.get("name", ""), p.get("path") or "/",
+               p.get("database", "(server's)"), p.get("github_token_env") or "",
+               "archived" if p.get("archived") else "active"] for p in rows])
+
+
+def cmd_project_set(a):
+    body = {"name": a.name, "github_token_env": a.github_token_env}
+    if a.archive or a.unarchive:
+        body["archived"] = bool(a.archive)
+    p = call(owner_client().patch, f"/admin/projects/{a.slug}",
+             {k: v for k, v in body.items() if v is not None})
+    ui.ok(f"Project {ui.agent(p['slug'])}: " + ("archived (no longer served; its data is kept)"
+                                                if p["archived"] else "active") + ".")
+
+
+def cmd_project_rotate(a):
+    r = call(owner_client().post, f"/admin/projects/{a.slug}/token")
+    ui.ok(f"New admin token for project {ui.agent(a.slug)}; the old one no longer works.")
+    ui.kv([("admin token", ui.paint(r["admin_token"], "bold", "bright_yellow"))])
 
 
 def cmd_admin_enroll(a):
@@ -102,13 +186,11 @@ def cmd_admin_roles(a):
 
 def cmd_admin_backup(a):
     import requests
-    cfg = load_admin_config()
-    if not cfg.server_url or not cfg.token:
-        die("not logged in as admin; run `hive admin login --server URL --token TOKEN`")
+    url, token = admin_target()
     out = Path(a.output or time.strftime("hive-backup-%Y%m%d-%H%M%S.db"))
     try:
-        with requests.get(cfg.server_url.rstrip("/") + "/api/v1/admin/backup", stream=True,
-                          headers={"Authorization": f"Bearer {cfg.token}"}, timeout=300) as r:
+        with requests.get(url + "/api/v1/admin/backup", stream=True,
+                          headers={"Authorization": f"Bearer {token}"}, timeout=300) as r:
             if r.status_code != 200:
                 try:
                     detail = r.json().get("message", r.text)
@@ -145,6 +227,8 @@ def cmd_init(a):
     mcfg = load_machine_config() if machine_config_path().exists() else None
     server = (a.server or load_admin_config().server_url or (mcfg.server_url if mcfg else "")
               or "http://127.0.0.1:8765")
+    if PROJECT:
+        server = project_url(server, PROJECT)
     try:
         written, cleaned = init_repo(root, server, a.main, a.hive_cmd)
     except PromptError as e:
@@ -243,9 +327,17 @@ def cmd_join(a):
     from .daemon import gitops
     from .init import install_git_hook
     cfg = load_machine_config()
-    if a.server:
-        cfg.server_url = a.server
-    c = ServerClient(cfg.server_url, a.token)
+    old = next((s for s in cfg.slots if s.name == a.name), None)
+    # The server belongs to this slot alone: other slots on the machine may be in other
+    # projects, or on other servers, and must keep theirs.
+    server = (a.server or (cfg.url_for(old) if old else "") or cfg.server_url).rstrip("/")
+    if old and cfg.url_for(old).rstrip("/") != server and not a.replace:
+        # Agent names are unique per project, not per machine: this may be another project's
+        # agent of the same name, whose slot (worktree, account, session) must not be lost.
+        die(f"this machine already has a slot named {a.name!r}, for {cfg.url_for(old)}. Slot "
+            "names must be unique on a machine: enroll the agent under another name, or pass "
+            "--replace to move this slot to " + server)
+    c = ServerClient(server, a.token)
     me = call(c.get, "/agents/me")
     if me["name"] != a.name:
         die(f"token belongs to {me['name']!r}, not {a.name!r}")
@@ -272,9 +364,18 @@ def cmd_join(a):
             ui.ok(f"Installed the git pre-commit hook at {ui.path(hook)}")
     config_dir = a.config_dir or str(hive_home() / "accounts" / a.name)
     Path(config_dir).mkdir(parents=True, exist_ok=True)
+    if old and cfg.url_for(old).rstrip("/") != server:
+        # Event cursors, message ids and sessions were the old server's; keeping them would
+        # skip or replay the new one's events.
+        from .daemon.store import Store
+        Store(hive_home() / "state.db").forget(a.name)
+        ui.info(f"Slot {ui.agent(a.name)} moved from {ui.path(cfg.url_for(old))} to "
+                f"{ui.path(server)}; its local state was reset.")
+    if not cfg.slots:
+        cfg.server_url = server  # the first slot's server is the default for later joins
     cfg.slots = [s for s in cfg.slots if s.name != a.name] + [Slot(
         name=a.name, vendor=a.vendor, token=a.token, worktree=str(wt), config_dir=config_dir,
-        permission_mode=a.permission_mode or "", model=a.model or "")]
+        permission_mode=a.permission_mode or "", model=a.model or "", server_url=server)]
     save_machine_config(cfg)
     var = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}.get(a.vendor, "GEMINI_CLI_HOME")
     ui.ok(f"Slot {ui.agent(a.name)} ready.")
@@ -362,10 +463,12 @@ def cmd_up(a):
     refresh_git_hooks(cfg)
     d = Daemon(cfg)
     # Each slot's roles decide how it runs, so they must be known before anything starts.
-    ui.step(f"Connecting to {ui.path(cfg.server_url)} ...")
+    servers = cfg.server_urls()
+    ui.step(f"Connecting to {', '.join(ui.path(u) for u in servers)} ...")
     missing = d.wait_for_identity(timeout=30)
     if missing:
-        die(f"could not reach the Hive server at {cfg.server_url} for {', '.join(missing)} "
+        where = ", ".join(f"{n} ({cfg.url_for(cfg.slot(n))})" for n in missing)
+        die(f"could not reach the Hive server for {where} "
             "(is it running, and are the tokens in ~/.hive/machine.toml valid?)")
     orch = None if a.headless else next(
         (rt for rt in d.slots.values() if rt.is_orchestrator), None)
@@ -382,11 +485,13 @@ def cmd_up(a):
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, handlers=handlers)
     srv = serve(d)
     ui.banner(f"Hive daemon {__version__}", "orchestrator mode" if orch else "worker mode")
-    ui.kv([("server", ui.path(cfg.server_url)),
+    ui.kv([("server" if len(servers) == 1 else "servers",
+            ", ".join(ui.path(u) for u in servers)),
            ("log", ui.path(hive_home() / "logs" / "daemon.log"))])
     ui.out()
-    ui.table(["slot", "vendor", "roles"],
+    ui.table(["slot", "vendor", "roles"] + (["server"] if len(servers) > 1 else []),
              [[ui.agent(s.name), s.cfg.vendor, ", ".join(s.roles) or "?"]
+              + ([cfg.url_for(s.cfg)] if len(servers) > 1 else [])
               for s in d.slots.values()])
     if not orch:
         ui.out()
@@ -641,6 +746,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                    help="colour the output (default: auto = only on a terminal; also "
                         "HIVE_COLOR, NO_COLOR)")
+    p.add_argument("--project", help="the project admin commands act on, on your admin "
+                                     "server (default: the one this repository's hive.toml "
+                                     "names, else the server's default project; also "
+                                     "HIVE_PROJECT)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("server", help="run the hive server (development)")
@@ -654,10 +763,32 @@ def main(argv: list[str] | None = None) -> None:
 
     adm = sub.add_parser("admin", help="user/admin operations").add_subparsers(dest="sub",
                                                                                required=True)
-    s = adm.add_parser("login")
-    s.add_argument("--server", required=True)
+    s = adm.add_parser("login", help="save an admin token (the server's, or a project's)")
+    s.add_argument("--server", required=True, help="server URL, or a project's (…/p/NAME)")
     s.add_argument("--token", required=True)
     s.set_defaults(fn=cmd_admin_login)
+    prj = adm.add_parser("project", help="manage the server's projects (server admin only)")         .add_subparsers(dest="psub", required=True)
+    s = prj.add_parser("create", help="add a project and print its admin token")
+    s.add_argument("slug", help="lowercase name, used in its URL: /p/<slug>")
+    s.add_argument("--name", help="display name")
+    s.add_argument("--db-url", help="its database (default: a SQLite file next to the "
+                                    "server's, or HIVE_PROJECT_DATABASE_URL on the server)")
+    s.add_argument("--github-token-env", help="server environment variable holding the "
+                                              "GitHub token that may move this repo's main")
+    s.set_defaults(fn=cmd_project_create)
+    s = prj.add_parser("list", help="list the projects")
+    s.set_defaults(fn=cmd_project_list)
+    s = prj.add_parser("set", help="rename, archive or change a project's GitHub token")
+    s.add_argument("slug")
+    s.add_argument("--name")
+    s.add_argument("--github-token-env")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--archive", action="store_true", help="stop serving it (data is kept)")
+    g.add_argument("--unarchive", action="store_true")
+    s.set_defaults(fn=cmd_project_set)
+    s = prj.add_parser("rotate", help="replace a project's admin token")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_project_rotate)
     s = adm.add_parser("enroll", help="create an agent and print its token")
     s.add_argument("name")
     s.add_argument("--vendor", choices=VENDORS, required=True)
@@ -709,6 +840,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--model", help="model for this slot's CLI (default: the "
                                    "account's default model)")
     s.add_argument("--hive-cmd", default="hive")
+    s.add_argument("--replace", action="store_true",
+                   help="move an existing slot of this name to another server or project")
     s.set_defaults(fn=cmd_join)
 
     s = sub.add_parser("up", help="run this machine's slots (orchestrator: native interactive "
@@ -761,7 +894,19 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--vendor", help=f"{', '.join(VENDORS)}; others get Claude Code's format")
     s.set_defaults(fn=cmd_hook)
 
-    a = p.parse_args(argv)
+    # --project may come anywhere (`hive status --project acme`); the root parser owns it.
+    rest, project = [], None
+    it = iter(args)
+    for arg in it:
+        if arg == "--project":
+            project = next(it, None)
+        elif arg.startswith("--project="):
+            project = arg.split("=", 1)[1]
+        else:
+            rest.append(arg)
+    a = p.parse_args((["--project", project] if project is not None else []) + rest)
+    global PROJECT
+    PROJECT = a.project
     a.fn(a)
 
 

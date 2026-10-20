@@ -152,7 +152,7 @@ class Daemon:
     def __init__(self, mcfg: MachineConfig, store: Store | None = None, echo: bool = True):
         self.mcfg = mcfg
         self.store = store or Store(hive_home() / "state.db")
-        self.slots = {s.name: SlotRuntime(s, mcfg.server_url) for s in mcfg.slots}
+        self.slots = {s.name: SlotRuntime(s, mcfg.url_for(s)) for s in mcfg.slots}
         StreamSink.name_width = max((len(n) for n in self.slots), default=0)
         for rt in self.slots.values():
             rt.sink = StreamSink(rt, echo)

@@ -26,6 +26,7 @@ For setting up the agent machines afterwards, see the [README](../README.md#5-pr
 12. [Monitoring](#12-monitoring)
 13. [Security hardening](#13-security-hardening)
 14. [Troubleshooting](#14-troubleshooting)
+15. [Hosting several projects](#15-hosting-several-projects)
 
 ---
 
@@ -534,6 +535,8 @@ Cloudflare Tunnel) in front of it works.
 | `HIVE_DATABASE_URL` | no | `sqlite:///hive.db` (relative to the working directory) | SQLAlchemy database URL. |
 | `HIVE_GITHUB_TOKEN` | no | – | Enables GitHub mode: the server fast-forwards `main` through the GitHub API. Also requires `[repo] github = "owner/repo"` in the uploaded `hive.toml`. Needs a fine-grained token with *Contents: read and write* on that repository. |
 | `HIVE_ARCHIVE_DIR` | no | `hive-archives/` next to a SQLite database file, else `~/hive-archives` | Where the dashboard's archives are written (README §18). The server process must be able to write there. On PythonAnywhere the files count toward your disk quota. |
+| `HIVE_PROJECT_DATABASE_URL` | no | – | Database URL for new projects, with a `{slug}` placeholder, e.g. `mysql+pymysql://USER:PW@HOST/USER$hive_{slug}` (§15). Without it, projects on a SQLite server get their own SQLite file, and on MySQL/Postgres each `project create` needs `--db-url`. |
+| `HIVE_DATA_DIR` | no | next to a SQLite database file, else `~/hive-data` | Where project SQLite databases and project archives go: `projects/<project>/` (§15). |
 | `HIVE_SQLITE_JOURNAL` | no | `wal`; `delete` when PythonAnywhere is detected | SQLite only. `wal` for local disks (fastest; readers and the writer don't block each other). `delete` (or `truncate`) for network filesystems such as PythonAnywhere's, where WAL doesn't work. `GET /api/v1/health` reports the active mode. |
 
 **How Hive uses SQLite:**
@@ -587,7 +590,11 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
      stay held until it's upgraded.
    - **Git hooks refresh themselves.** `hive up` refreshes the pre-commit hook in each slot's
      repository, so your own commits no longer need `hive` on PATH.
-3. **Database changes:** on start-up the server creates any **missing tables**, but it does
+3. **Several projects (this release):** the server adds a `projects` table on start-up. An
+   existing deployment becomes the `default` project, unchanged, so agents and admin logins
+   keep working. Slots in an existing `machine.toml` keep using its `server_url`. Nothing to
+   do unless you add projects (§15).
+4. **Database changes:** on start-up the server creates any **missing tables**, but it does
    **not** alter existing ones.
    - Every version so far only adds tables, so upgrades need no manual steps.
    - Release notes will state when a version changes existing columns and give the SQL to run.
@@ -618,6 +625,10 @@ read-only history, not a way to restore the database.
 | SQLite (any host) | `hive admin backup -o hive-$(date +%F).db` from your computer. The server makes a consistent copy inside its own process and streams it to you. This is the **only** safe way on PythonAnywhere. | Stop the server, copy the file over the live database, start it again. |
 | SQLite (local disk, VPS) | Alternatively `sqlite3 /srv/hive/data/hive.db ".backup '/srv/hive/backups/hive-$(date +%F).db'"` on the server. Safe while running on a local disk. | Same as above. |
 | Postgres | `pg_dump -Fc hive > hive-$(date +%F).dump` | `pg_restore -d hive --clean hive-….dump` |
+
+**Several projects (§15):** each project has its own database, so back each one up. For SQLite,
+`hive admin backup --project NAME -o NAME-$(date +%F).db` copies that project's database only.
+For MySQL/Postgres, dump each project's database the same way as the default one.
 
 **Scheduling backups:**
 - **PythonAnywhere:** a daily **Scheduled task** on the Tasks tab running the `mysqldump`
@@ -740,3 +751,63 @@ well. Keep the window longer than any plan the orchestrator might still be refer
 | Dashboard loads but stays empty / asks for the token again | The admin token was mistyped; clear it via the browser's site data and re-enter it. |
 | Requests slow down over months | The maintenance tick reads all tasks (§3.4); prune finished tasks (§11). |
 | Disk quota warnings on PythonAnywhere | Database growth (§3), old `mysqldump` files, or rotated access logs. Prune (§11) and delete old archives. |
+
+---
+
+## 15. Hosting several projects
+
+One server can run several projects. Each one is a separate repository and fleet with its own
+database, served at `https://<server>/p/<project>/`. README §4.4 covers using them; this
+section covers the server side.
+
+**What changes on the server:**
+- **Nothing to deploy.** The same WSGI app (`hive.server.wsgi:application`) serves every
+  project. The existing database is the `default` project and holds the list of projects.
+- **No background workers.** Each project's lease expiry, scheduling and failover run on its
+  own requests, as before.
+- **Connections:** each project that has had a request in the last 10 minutes keeps a small
+  pool, at most 6 database connections. An idle project's pool is closed and reopens on
+  demand. If your host limits connections per user, budget about 6 per active project, plus
+  the default project's.
+
+**Adding a project on SQLite** (local, VPS, or the PythonAnywhere free plan): nothing to
+prepare. The project's database is created at `projects/<project>/hive.db` next to the
+server's database, or under `HIVE_DATA_DIR`. It uses the same journal mode as the server's.
+
+```sh
+hive admin project create acme --name "Acme Corp"
+```
+
+**Adding a project on MySQL (PythonAnywhere):**
+1. **Create the database** on the *Databases* tab, named for example `hive_acme`.
+   PythonAnywhere names it `USER$hive_acme`.
+2. **Tell the server** where projects' databases are. Do this once, in the WSGI file next
+   to `HIVE_DATABASE_URL`:
+   ```python
+   os.environ["HIVE_PROJECT_DATABASE_URL"] = \
+       "mysql+pymysql://USER:PASSWORD@USER.mysql.pythonanywhere-services.com/USER$hive_{slug}"
+   ```
+   Then reload the web app. Hive fills in `{slug}` with the project's name.
+3. **Create the project** from your computer:
+   `hive admin project create acme`. Hive opens the database and creates its tables. If the
+   database doesn't exist or can't be reached, the project is not created and the error says
+   why.
+
+Without the template, pass the URL each time:
+`hive admin project create acme --db-url "mysql+pymysql://…/USER$hive_acme"`. Postgres works
+the same way, with one database per project.
+
+**GitHub mode per project:** `HIVE_GITHUB_TOKEN` is for the default project only. Give each
+other project a fine-grained token limited to its own repository:
+1. Add it to the server's environment (the WSGI file, or the systemd `EnvironmentFile`), e.g.
+   `HIVE_GITHUB_TOKEN_ACME`.
+2. Reload the server.
+3. Run `hive admin project set acme --github-token-env HIVE_GITHUB_TOKEN_ACME`.
+
+**Admin tokens:** `project create` prints the project's own admin token once. Give it to
+whoever runs that project; it can't reach other projects or manage projects.
+`hive admin project rotate acme` replaces it. Your `HIVE_ADMIN_TOKEN` keeps working in every
+project.
+
+**Archiving:** `hive admin project set acme --archive` stops serving the project (its URLs
+answer `404`) but keeps its database and archives. `--unarchive` brings it back.

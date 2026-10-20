@@ -141,7 +141,8 @@ def test_admin_check_tells_the_admin_token_from_an_agents(env):
     """The dashboard signs in through this: an agent's token can read /fleet, but must not
     get into the admin panel (archives, live output and decisions are admin-only)."""
     hive, admin, ag = env
-    assert admin.get("/admin/check", expect=200) == {"ok": True}
+    assert admin.get("/admin/check", expect=200) == {"ok": True, "project": "default",
+                                                     "owner": True}
     assert ag["orch"].get("/fleet", expect=200)["state"] == "setup"   # what sign-in used to test
     assert ag["orch"].get("/admin/check", expect=403)["message"] == "admin token required"
     fc = create_app(hive, admin_token=ADMIN).test_client()

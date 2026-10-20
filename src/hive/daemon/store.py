@@ -55,6 +55,13 @@ class Store:
         self._q("INSERT INTO kv(slot,key,value) VALUES(?,?,?) "
                 "ON CONFLICT(slot,key) DO UPDATE SET value=?", (slot, key, v, v))
 
+    def forget(self, slot: str) -> None:
+        """Drop everything kept for a slot (cursor, inbox, triggers, session): its events and
+        message ids belong to the server it was joined to, and mean nothing to another."""
+        with self.lock:
+            for table in ("cursor", "inbox", "triggers", "kv"):
+                self.db.execute(f"DELETE FROM {table} WHERE slot=?", (slot,))
+
     # inbox
     def add_message(self, slot: str, m: dict, relevant: bool) -> None:
         self._q("INSERT OR IGNORE INTO inbox(slot,msg_id,ts,author,channel,recipient,priority,body,"
