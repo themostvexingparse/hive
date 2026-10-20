@@ -4,3 +4,4 @@ __pycache__/
 *.db-wal
 *.db-shm
 .pytest_cache/
+ideas/

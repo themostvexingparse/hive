@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import globs as G
 from .. import permissions as P
+from .. import prompts
 from .. import ui
 from ..permissions import role_class
 from ..config import MachineConfig, Slot, find_repo_root, hive_home, load_repo_config
@@ -473,7 +474,8 @@ class Daemon:
                 resume = True
             msgs = self.store.undelivered(rt.name, "normal")
             prompt = wake.build_prompt(rt.name, rt.me, rt.fleet, trig, msgs,
-                                       self.my_open_tasks(rt), first_in_session=not resume)
+                                       self.my_open_tasks(rt), first_in_session=not resume,
+                                       project_prompt=self.project_prompt(rt))
             cmd = wake.build_command(rt.cfg, session, resume, role_class(rt.roles))
             env = wake.slot_env(rt.cfg, self.mcfg.local_url, self.mcfg.local_secret)
             err = wake.ensure_gemini_extension(rt.cfg, env)
@@ -545,6 +547,9 @@ class Daemon:
                              "skill.")
                 if rt.me.get("role_prompt"):
                     parts.append(rt.me["role_prompt"])
+                extra = self.project_prompt(rt)
+                if extra:
+                    parts.append(extra)
             trig = self.store.pending_triggers(slot) if rt.attached else []
             if trig:  # interactive session: deliver queued events with the user's prompt
                 self.store.consume_triggers(slot, max(t["id"] for t in trig))
@@ -640,6 +645,9 @@ class Daemon:
                 return {"deny": f"{raw} is inside another checkout of this repository (another "
                                 "agent's worktree or the user's own clone). Only edit files "
                                 "in your own worktree."}
+            if prompts.is_protected(rel):
+                return {"deny": f"{rel} is one of the project's prompt files, which only the "
+                                "user maintains. Agents may not edit .hive/prompts/."}
             allowed = list(rt.me.get("write_globs", []))
             if rt.me.get("can_code"):
                 allowed += [g for l in rt.leases for g in l["globs"]]
@@ -651,6 +659,12 @@ class Daemon:
                 return {"deny": f"No lease covers {rel}. Call lease_acquire(globs=[...]) for all "
                                 "paths you need first (e.g. the file or its directory/**)."}
         return {}
+
+    @staticmethod
+    def project_prompt(rt: SlotRuntime) -> str:
+        """The project's role files, read from the agent's own checkout (.hive/prompts/)."""
+        return prompts.session_addition(rt.repo_root, rt.roles, rt.repo_cfg, slot=rt.name,
+                                        vendor=rt.cfg.vendor)
 
     def _relpath(self, rt: SlotRuntime, raw: str):
         """Repo-relative path in the agent's own worktree; None if outside every checkout of

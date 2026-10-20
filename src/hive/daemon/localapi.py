@@ -9,6 +9,7 @@ from flask import Flask, abort, jsonify, request
 from werkzeug.serving import make_server
 
 from .. import globs as G
+from .. import prompts
 from .client import HiveError
 from .core import Daemon
 
@@ -68,7 +69,9 @@ def create_local_app(daemon: Daemon) -> Flask:
         allowed = list(rt.me.get("write_globs", []))
         if rt.me.get("can_code"):
             allowed += [g for l in rt.leases for g in l["globs"]]
-        return jsonify({"uncovered": [p for p in paths if not G.covered(p, allowed)]})
+        # The project's prompt files (.hive/prompts/) are the user's; never an agent's commit.
+        return jsonify({"uncovered": [p for p in paths if not G.covered(p, allowed)
+                                      or prompts.is_protected(p)]})
 
     return app
 

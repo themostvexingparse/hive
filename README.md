@@ -248,6 +248,7 @@ It creates or updates:
 | `.hive/agent/claude/` | **Claude Code plugin**: `.claude-plugin/plugin.json`, `.mcp.json` (hive MCP server), `hooks/hooks.json`, `skills/hive-orchestrator/SKILL.md`, `skills/hive-worker/SKILL.md`, plus per-role permission files `settings/{orchestrator,worker}.json` (§17.4). | yes |
 | `.hive/agent/gemini/` | **Gemini CLI extension**: `gemini-extension.json` (MCP server, `HIVE.md` context), `hooks/hooks.json`, the same skills, plus per-role policy files `policies/{orchestrator,worker}.toml` (§17.4). | yes |
 | `.hive/plans/` | Place for written plans. | yes |
+| `.hive/prompts/` | **Your additions to the agents' instructions** (§17.5): `README.md`, plus commented-out starters `orchestrator.md`, `worker.md` and `roles/<role>.md` for every role. Each is created only if missing; your files are never overwritten. Until you write something outside the comments, they add nothing. | yes |
 | `.hive/README.md` | Explains the folder. | yes |
 | `.gitignore` | Adds `.hive/orchestrator/` (the orchestrator's private memory). | yes |
 
@@ -262,8 +263,8 @@ the CLIs load automatically: `.mcp.json`, `.claude/settings.json`, `.gemini/sett
 and the `<!-- hive:begin -->` blocks in `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`. Your own
 entries in those files are kept. A file is deleted only if Hive's content was all it had.
 
-Re-run `hive init` after upgrading Hive to refresh the bundles. Then commit and push, and
-upload the configuration:
+Re-run `hive init` after upgrading Hive, or after changing `.hive/prompts/orchestrator.md`
+or `worker.md`, to refresh the bundles. Then commit and push, and upload the configuration:
 
 ```sh
 git add -A
@@ -273,6 +274,59 @@ hive admin push-config        # uploads hive.toml to the server (run inside the 
 ```
 
 `hive start` (§10) also uploads `hive.toml` automatically when run inside the repository.
+
+### Checking a project's setup (`hive overview`)
+
+Run `hive overview` anywhere inside the project (or `hive overview PATH`) for a full report on
+its Hive setup, ending with a list of problems and the command that fixes each one:
+
+| Section | What it shows |
+|---|---|
+| **Repository** | Branch, `origin`, the integration branch and whether it's fetched, GitHub mode, whether Hive's commit hook is installed, and whether `.hive/agent/` matches what `hive init` would write now. Changes to Hive's version, `[permissions]` or `.hive/prompts/` all make it stale. |
+| **Configuration** | Server URL, review policy, checks and their shell, standby orchestrators, pacing (`hive.toml`). |
+| **Shell-command permissions** | The preset and how many command prefixes are allowed, need approval, or are never allowed, for the orchestrator and for workers; your extra lists. |
+| **Roles** | Every role: built-in, built-in but changed in `hive.toml`, or custom; required or optional; how many holders; what it may write; task kinds; where its prompt comes from (built-in, `hive.toml`, `.hive/prompts/roles/`). |
+| **Project prompts** | Each file in `.hive/prompts/`: active (with line count), comments only, or too large; and where it goes. |
+| **This machine** | The machine config, whether `hive up` is running, whether you're logged in as admin, and this repository's slots: CLI, what each is doing now, its branch, whether its account has been logged in, and its worktree. |
+| **Fleet** | Asked from the server: state, goal, orchestrator, `main`, agents (online, and which run on this machine), open tasks and active leases. |
+| **Problems** | Everything above that needs attention. |
+
+**Problems it reports include:**
+- no `origin` remote, or the integration branch not fetched;
+- stale agent bundles, with the reason;
+- `.hive/orchestrator/` not git-ignored;
+- errors in `hive.toml` (`[roles]`, `[permissions]`);
+- prompt-file warnings (§17.5);
+- slots with a missing worktree, the wrong branch, a never-logged-in account, or a worktree
+  shared with another slot;
+- a server URL that differs between `hive.toml` and this machine;
+- an unreachable server, or credentials it refuses;
+- a server whose review policy differs from `hive.toml`, meaning the uploaded config is stale;
+- slots set up here but not enrolled on the server;
+- required roles nobody holds.
+
+**Which server it asks:** the one this project really uses. `hive.toml`'s `[server] url` is
+informational only (§20.1), so the overview picks, in this order:
+1. the server this project's slots on this machine connect to (`~/.hive/machine.toml`, set by
+   `hive join --server`);
+2. the server your admin login points at (`~/.hive/admin.toml`, set by `hive admin login`);
+3. `hive.toml`'s value, only if neither exists.
+
+The Fleet section names the source. It also lists the other addresses whenever they differ,
+and reports:
+- agents and admin commands pointing at different servers, which means two different fleets;
+- an out-of-date `hive.toml` value, which is harmless for connecting but misleading for
+  anyone setting up a new machine.
+
+`hive init` records this machine's server in a new `hive.toml` when you don't pass `--server`
+and aren't logged in as admin.
+
+**How it gets the fleet data:** it uses your admin login if it points at that server.
+Otherwise it uses the token of one of this machine's slots for the repository, which can read
+the fleet but nothing admin-only. It asks the local daemon whether `hive up` is running.
+
+**Offline:** `--offline` skips both the server and the daemon, so it works with no network.
+Without it, each check gives up after a few seconds. Nothing is ever changed.
 
 ---
 
@@ -695,7 +749,10 @@ tools = ["lease_acquire", "lease_extend", "lease_release"]
 prompt = "You write and maintain user documentation under docs/."
 ```
 
-Built-in roles can be overridden the same way, e.g. `[roles.reviewer] prompt = "…"`.
+Built-in roles can be overridden the same way, e.g. `[roles.reviewer] prompt = "…"`. A
+`prompt` given here **replaces** the role's built-in prompt. To **add** to it instead, or to
+write longer instructions than fit in `hive.toml`, use `.hive/prompts/roles/<role>.md`
+(§17.5).
 
 ### 11.3 Changing roles
 
@@ -997,8 +1054,8 @@ The hooks ship inside the bundles and call `hive hook <event> --vendor <cli>`.
   - being stuck or frozen;
   - reviewing.
 
-Both are plain Markdown in `.hive/agent/*/skills/`. Edit them to tune behaviour; `hive init`
-overwrites the bundles, so keep your own copy of any edits.
+Both are plain Markdown in `.hive/agent/*/skills/`. Don't edit them there: `hive init`
+rewrites those folders. Add your own rules in `.hive/prompts/` instead (§17.5).
 
 ### 17.4 Shell-command permissions
 
@@ -1133,6 +1190,103 @@ deny = ["kubectl delete"]                       # extra commands agents may neve
 
   Keep the admin token off machines that host worker agents.
 
+### 17.5 Customising what agents are told
+
+Hive's built-in instructions stay as they are, and you add your own after them. Use this for
+**preferences and conventions**:
+- how the orchestrator plans, how finely it splits tasks, and how and when it reports to you;
+- testing expectations, commit style, coding conventions;
+- how a particular role should work.
+
+Rules that must hold no matter what an agent decides belong in `hive.toml` instead
+(`[permissions]`, roles). Hive enforces those in code; prompts only ask.
+
+**The files** live in `.hive/prompts/` in the repository and are committed:
+
+| File | Added to | When it takes effect |
+|---|---|---|
+| `orchestrator.md` | The end of the orchestrator's skill (`hive-orchestrator`), under **Project rules** | After `hive init`; commit the refreshed `.hive/agent/` |
+| `worker.md` | The end of every other agent's skill (`hive-worker`), under **Project rules** | After `hive init`; commit the refreshed `.hive/agent/` |
+| `roles/<role>.md` | The start of every session of an agent holding that role, after the role's `prompt` from `hive.toml`. Works for built-in roles (`orchestrator`, `programmer`, `reviewer`, …) and your own. | Once the file is on `main`; each agent reads it from its own checkout when a session starts |
+
+**Starter files.** `hive init` creates each of these files that doesn't exist yet: both skill
+files, and a role file for every role, built-in or defined in `hive.toml`. Files that already
+exist are never touched, even if you emptied them. A file you delete comes back as a starter
+on the next `hive init`; leave it in place, commented out, instead. Each starter is one
+`<!-- … -->` comment explaining the file, with examples for that role, its placeholders and
+the preview command.
+
+**Comments and empty files.** `<!-- … -->` comments are removed before anything is sent, and
+runs of blank lines left behind are collapsed. A file with nothing left after that (only
+comments and whitespace) adds **nothing**:
+- no "Project rules" heading in the skill, which stays byte-for-byte the built-in one;
+- no text at the start of sessions.
+
+Unused starters therefore cost the agents no context. To use one, write below the comment, or
+replace it. Example `orchestrator.md`:
+
+```markdown
+<!-- (the starter comment can stay; it isn't sent) -->
+- Report to me in at most five bullets, and say first whether anything needs my decision.
+- Keep tasks to half a day or less; split anything bigger.
+- Ask before adding a new dependency.
+```
+
+An unclosed `<!--` hides everything after it, as in HTML; `hive init` and `hive prompts`
+warn about it. Comments are removed anywhere in the file, including inside code blocks.
+
+**The "Project rules" section** starts with a note telling the agent the rules come from the
+project, and that Hive's protocol wins where the two conflict: leases, `lease_release`,
+decisions, approvals, never pushing to `main`. Hive enforces those regardless of what any
+prompt says.
+
+**Placeholders.** Write `{{name}}` and Hive fills it in:
+
+| Placeholder | Value | Where |
+|---|---|---|
+| `{{main}}` | Integration branch (`[repo] main`) | all files |
+| `{{review}}` | Review policy (`[integration] review`) | all files |
+| `{{checks}}` | The integration checks, joined with `; `, or `(none)` | all files |
+| `{{project}}` | The repository folder's name | all files |
+| `{{slot}}`, `{{roles}}`, `{{vendor}}` | The agent's name, roles and CLI | `roles/<role>.md` only |
+
+Unknown names are left exactly as written, so code samples with braces (`${{ github.ref }}`,
+`{key}`) are safe. `hive init` and `hive prompts` warn about placeholders that won't be
+filled (placeholders inside comments are ignored), and about role files with real content
+whose name isn't a role. A comment-only role file left over from a removed role is ignored
+silently.
+
+**Checking the result.** `hive prompts` shows what an agent with the given roles receives:
+its skill's project rules, the role prompts from `hive.toml` and your role files, with
+comments removed and placeholders filled. Files with only comments are reported as adding
+nothing. It also warns when the committed bundles are older than your files.
+
+```sh
+hive prompts --role orchestrator                   # --full also prints the built-in skill
+hive prompts --role programmer,tester --slot claude-2 --vendor gemini
+```
+
+**Agents can't change these files.** A file that tells agents how to behave mustn't be
+editable by them:
+- Write and edit tools are refused under `.hive/prompts/`, even with a lease covering it and
+  even for the orchestrator, which may otherwise write anywhere in `.hive/`.
+- `lease_release` never commits files there, and an agent's commit touching them can't be
+  integrated (`uncovered_commits`).
+- The pre-commit hook refuses them in agents' own commits.
+
+You change them in your own clone and push to `main` like any other change.
+
+**Limits:** the text left after removing comments may be at most 32 KB per file, since every
+byte of it is sent to the agent; comments don't count, up to a 1 MB file. `hive init` refuses
+a larger file and leaves the existing bundles untouched. Windows line endings and a UTF-8
+byte-order mark are handled.
+
+**What stays fixed:** the built-in skill text, the MCP tool descriptions, the messages Hive's
+hooks send (refusals, approvals, end-of-turn reminders) and the formats of messages and event
+digests. They describe exactly what the code does, so changing them would break the fleet
+rather than change its behaviour. `hive prompts --full` shows the built-in text; §17.1–17.4
+describe it.
+
 ---
 
 ## 18. Web dashboard
@@ -1216,6 +1370,8 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
 | `hive admin roles NAME r1,r2` | Change an agent's roles. |
 | `hive admin push-config` | Upload `hive.toml` from the current repository. |
 | `hive init [PATH] [--server URL] [--main BRANCH] [--hive-cmd CMD]` | Prepare a repository (§5). |
+| `hive overview [PATH] [--offline]` | Describe this project's Hive setup: repository, configuration, permissions, roles, prompts, this machine's slots, the fleet, and problems with their fixes (§5). |
+| `hive prompts [--role R1,R2] [--slot NAME] [--vendor claude\|gemini] [--full] [--path DIR]` | Show what Hive tells an agent with those roles, including your additions (§17.5). |
 | `hive start "GOAL"` | Start the fleet; uploads `hive.toml` if run in the repo. |
 | `hive status [--all] [-n N] [-v]` | Fleet state, waiting decision, agents, tasks (`--all` includes finished ones), leases, last N status entries (`-v` with bodies). |
 | `hive decisions [--all]` | Open and queued decisions with context (`--all`: also answered ones). |
@@ -1369,7 +1525,7 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `logs/<slot>.log` | raw output of every headless turn of that slot |
 
 **In the repository:** `hive.toml`, `.hive/agent/{claude,gemini}/`, `.hive/plans/`,
-`.hive/README.md`, and `.hive/orchestrator/state.md` (orchestrator worktree only,
+`.hive/prompts/` (yours; §17.5), `.hive/README.md`, and `.hive/orchestrator/state.md` (orchestrator worktree only,
 git-ignored).
 
 **Next to your clone:** one worktree per slot, `<clone>-<slot>/`, on branch `hive/<slot>`.
@@ -1425,6 +1581,8 @@ feed, reports, live-output lines. Dashboard archives are files in `$HIVE_ARCHIVE
   `[permissions]` rather than joining with `--permission-mode bypassPermissions` / `yolo`.
   That flag lets the agent run any command on that machine and skips the approval step;
   Hive's hook still blocks the never-allowed commands.
+- **Your prompt files:** agents can't edit `.hive/prompts/` or get changes to it into `main`
+  (§17.5), so an agent can't rewrite its own instructions or another agent's.
 - **Prompt injection:** other agents' messages are marked as untrusted information, and the
   skills say so explicitly. Hive's hard limits (leases, roles, freeze, decisions) are enforced
   by the server and hooks, not by the model's goodwill.
@@ -1432,6 +1590,9 @@ feed, reports, live-output lines. Dashboard archives are files in `$HIVE_ARCHIVE
 ---
 
 ## 24. Troubleshooting
+
+Start with `hive overview` in the project (§5). It checks most of the causes below and prints
+the fix for each problem it finds.
 
 | Symptom | Check |
 |---|---|

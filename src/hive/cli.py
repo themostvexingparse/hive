@@ -15,8 +15,8 @@ from pathlib import Path
 
 from . import __version__, ui
 from .config import (AdminConfig, Slot, find_repo_root, hive_home, load_admin_config,
-                     load_machine_config, load_repo_config, save_admin_config,
-                     save_machine_config)
+                     load_machine_config, load_repo_config, machine_config_path,
+                     save_admin_config, save_machine_config)
 from .daemon.client import HiveError, ServerClient
 
 
@@ -137,11 +137,18 @@ def cmd_admin_push_config(a):
 
 def cmd_init(a):
     from .init import init_repo
+    from .prompts import PromptError
     root = Path(a.path).resolve()
     if not (root / ".git").exists():
         die(f"{root} is not a git repository")
-    server = a.server or load_admin_config().server_url or "http://127.0.0.1:8765"
-    written, cleaned = init_repo(root, server, a.main, a.hive_cmd)
+    # hive.toml's [server] url is informational: record the server this machine really uses.
+    mcfg = load_machine_config() if machine_config_path().exists() else None
+    server = (a.server or load_admin_config().server_url or (mcfg.server_url if mcfg else "")
+              or "http://127.0.0.1:8765")
+    try:
+        written, cleaned = init_repo(root, server, a.main, a.hive_cmd)
+    except PromptError as e:
+        die(f"{e}. Nothing in .hive/agent/ was changed.")
     ui.section("Wired for Hive", ui.dim(str(root)))
     for f in written:
         ui.out(f"  {ui.paint('+', 'green', 'bold')} {f}")
@@ -149,11 +156,87 @@ def cmd_init(a):
         ui.out(f"  {ui.paint('-', 'yellow', 'bold')} {f} {ui.dim('(old hive wiring removed)')}")
     ui.out()
     ui.info("The agent bundles in .hive/agent/ load only in sessions launched by `hive`.")
+    _prompt_problems(root)
     ui.section("Next")
     for i, t in enumerate(["Review " + ui.path("hive.toml") + " (roles, checks, permissions).",
                            "Commit these files and push.",
                            "Upload the config: " + ui.cmd("hive admin push-config")], 1):
         ui.out(f"  {ui.num(f'{i}.')} {t}")
+
+
+def _prompt_problems(root: Path) -> None:
+    from . import prompts
+    from .roles import load_roles
+    cfg = load_repo_config(root)
+    try:
+        roles = load_roles(cfg.get("roles"))
+    except ValueError:
+        return  # hive.toml's own problems are reported where it is used
+    for p in prompts.check(root, cfg, roles):
+        ui.warn(p)
+
+
+def cmd_prompts(a):
+    """Show what Hive tells an agent with the given roles: its skill (built-in text plus the
+    project's rules) and the text added at the start of each of its sessions."""
+    from . import prompts
+    from .init import ORCHESTRATOR_SKILL, WORKER_SKILL
+    from .roles import load_roles
+    root = find_repo_root(Path(a.path).resolve())
+    if not root:
+        die(f"no hive.toml in {Path(a.path).resolve()} or above; run `hive init` first")
+    cfg = load_repo_config(root)
+    try:
+        catalog = load_roles(cfg.get("roles"))
+    except ValueError as e:
+        die(f"hive.toml: {e}")
+    roles = [r.strip() for r in (a.role or "programmer").split(",") if r.strip()]
+    missing = [r for r in roles if r not in catalog]
+    if missing:
+        die(f"unknown role(s) {', '.join(missing)}; roles: {', '.join(sorted(catalog))}")
+    skill = "hive-orchestrator" if "orchestrator" in roles else "hive-worker"
+    builtin = ORCHESTRATOR_SKILL if skill == "hive-orchestrator" else WORKER_SKILL
+    try:
+        addition = prompts.skill_addition(root, skill, cfg)
+    except prompts.PromptError as e:
+        die(str(e))
+    pfile = f"{prompts.PROMPTS_DIR.as_posix()}/{prompts.SKILL_FILES[skill]}"
+
+    ui.section(f"Skill: {skill}", ui.dim(f"roles {', '.join(roles)}"))
+    if a.full:
+        ui.out(builtin.rstrip())
+    else:
+        ui.out(ui.dim(f"  (built-in text, {len(builtin.splitlines())} lines; --full shows it)"))
+    ui.out(addition.rstrip() if addition else
+           ui.dim(f"  No project rules: {pfile} is missing or has only comments."))
+    on_disk = root / ".hive" / "agent" / "claude" / "skills" / skill / "SKILL.md"
+    if on_disk.exists() and on_disk.read_text("utf-8") != builtin + addition:
+        ui.warn(f"{on_disk.relative_to(root).as_posix()} differs from this. Run "
+                + ui.cmd("hive init") + " and commit .hive/agent/ to update it.")
+
+    ui.section("Added at the start of each session")
+    role_text = "\n\n".join(catalog[r].prompt for r in roles if catalog[r].prompt)
+    extra = prompts.session_addition(root, roles, cfg, slot=a.slot or "<slot>",
+                                     vendor=a.vendor)
+    if role_text:
+        ui.out(ui.dim("  From hive.toml (role prompts; agents get them from the server after "
+                      "`hive admin push-config`):"))
+        ui.out(role_text)
+    if extra:
+        files = ", ".join(f"{prompts.PROMPTS_DIR.as_posix()}/roles/{r}.md"
+                          for r, path in prompts.role_files(root, roles)
+                          if prompts.has_content(path))
+        ui.out(ui.dim(f"  From {files} (read from each agent's checkout of main):"))
+        ui.out(extra)
+    if not role_text and not extra:
+        ui.out(ui.dim("  Nothing beyond Hive's built-in session header."))
+    for p in prompts.check(root, cfg, catalog):
+        ui.warn(p)
+
+
+def cmd_overview(a):
+    from . import overview
+    overview.render(overview.collect(Path(a.path), offline=a.offline))
 
 
 def cmd_join(a):
@@ -581,6 +664,21 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--main", default="main")
     s.add_argument("--hive-cmd", default="hive")
     s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("overview", help="describe this project's Hive setup in detail")
+    s.add_argument("path", nargs="?", default=".", help="project folder (default: here)")
+    s.add_argument("--offline", action="store_true",
+                   help="don't contact the server or the local daemon")
+    s.set_defaults(fn=cmd_overview)
+
+    s = sub.add_parser("prompts", help="show what Hive tells agents with given roles")
+    s.add_argument("--role", help="comma-separated roles (default: programmer)")
+    s.add_argument("--vendor", default="claude", choices=["claude", "gemini"],
+                   help="fills {{vendor}} in role files")
+    s.add_argument("--slot", help="agent name used for {{slot}} (default: <slot>)")
+    s.add_argument("--full", action="store_true", help="also print the built-in skill text")
+    s.add_argument("--path", default=".", help="repository (default: current directory)")
+    s.set_defaults(fn=cmd_prompts)
 
     s = sub.add_parser("join", help="add an agent slot to this machine")
     s.add_argument("name")

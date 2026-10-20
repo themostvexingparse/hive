@@ -410,11 +410,16 @@
   /* ------------------------------------------------------------------ right column */
   .side { position: sticky; top: 74px; height: calc(100vh - 92px); min-height: 460px; }
   @media (max-width: 960px) { .side { position: static; height: 75vh; } }
-  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  /* Scrolls sideways (without a scrollbar) on narrow screens. The bottom line is an inset shadow
+     so the active tab's underline can cover it without a negative margin, which would overflow
+     the bar and show a vertical scrollbar. */
+  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; box-shadow: inset 0 -1px var(--border);
+          overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
   .tabs button {
     position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 8px 10px 10px;
     border: 0; background: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted);
-    border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap;
+    border-bottom: 2px solid transparent; white-space: nowrap;
   }
   .tabs button:hover { color: var(--text); }
   .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }

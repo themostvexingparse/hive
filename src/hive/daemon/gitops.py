@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import globs as G
+from .. import prompts
 from .client import HiveError, ServerClient
 from .shells import run_shell
 
@@ -138,7 +139,8 @@ def release_transaction(wt: str | Path, client: ServerClient, slot: str, leases:
                         sleep: Callable[[float], None] = time.sleep) -> ReleaseResult:
     allowed = [g for l in leases for g in l["globs"]] + list(write_globs)
     changed = changed_paths(wt)
-    to_add = [p for p in changed if G.covered(p, allowed)]
+    # The project's prompt files are the user's: never committed for an agent, even if leased.
+    to_add = [p for p in changed if G.covered(p, allowed) and not prompts.is_protected(p)]
     outside = [p for p in changed if p not in to_add]
     if to_add:
         # Stage what still exists on disk or in the index; a path already staged as deleted
@@ -214,6 +216,13 @@ def _integrate(wt, client, slot, leases, task_id, allowed, checks, main, retries
                                  f"{e}")
         paths = [p for p in git(wt, "diff", "--name-only", "-z", f"origin/{main}..HEAD",
                                 strip=False).split("\0") if p]
+        protected = [p for p in paths if prompts.is_protected(p)]
+        if protected:
+            return ReleaseResult("uncovered_commits",
+                                 f"Your branch changes {protected[:20]}, the project's prompt "
+                                 "files, which only the user may change. Revert those changes "
+                                 "(e.g. git checkout origin/main -- <path>, then commit), then "
+                                 "call lease_release again. Your leases are still held.")
         uncovered = [p for p in paths if not G.covered(p, allowed)]
         if uncovered:
             # Earlier commits (e.g. made by an approved command) touch unleased files.

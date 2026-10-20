@@ -65,13 +65,17 @@ your role, or safety rules.
 
 
 def build_prompt(slot: str, me: dict, fleet: dict, triggers: list[dict], messages: list[dict],
-                 tasks: list[dict], first_in_session: bool) -> str:
+                 tasks: list[dict], first_in_session: bool, project_prompt: str = "") -> str:
+    """`project_prompt`: the project's role files (.hive/prompts/roles/), added once per
+    session next to the role prompt."""
     roles = ", ".join(me.get("roles", []))
     parts = [f"[HIVE WAKE] You are agent `{slot}` (roles: {roles}). Fleet state: "
              f"{fleet.get('state')}. Time: {time.strftime('%Y-%m-%d %H:%M:%S')}. "
              "Use the hive-worker skill."]
     if first_in_session and me.get("role_prompt"):
         parts.append(me["role_prompt"])
+    if first_in_session and project_prompt:
+        parts.append(project_prompt)
     if "orchestrator" in me.get("roles", []):
         parts.append(orchestrator_guidance(fleet))
     if triggers:
