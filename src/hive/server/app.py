@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hmac
 import os
 import tempfile
@@ -445,6 +446,36 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
         return Response(stream(), mimetype="application/vnd.sqlite3",
                         headers={"Content-Disposition": f'attachment; filename="{name}"',
                                  "Content-Length": str(os.path.getsize(path))})
+
+    @app.get(f"{api}/admin/archives")
+    @auth(admin=True)
+    def list_archives():
+        return jsonify(hive.list_archives(me()))
+
+    @app.post(f"{api}/admin/archives")
+    @auth(admin=True)
+    def create_archive():
+        b = body()
+        return jsonify(hive.create_archive(me(), b.get("label", ""), bool(b.get("flush")))), 201
+
+    @app.get(f"{api}/admin/archives/<aid>")
+    @auth(admin=True)
+    def get_archive(aid):
+        """The archive's JSON. Stored gzipped, so it is sent as-is to clients that accept gzip
+        (browsers), unpacked for the rest, and as the .json.gz file with ?download=1."""
+        path = hive.archive_file(me(), aid)
+        if request.args.get("download"):
+            return Response(path.read_bytes(), mimetype="application/gzip", headers={
+                "Content-Disposition": f'attachment; filename="hive-archive-{aid}.json.gz"'})
+        if "gzip" in request.headers.get("Accept-Encoding", ""):
+            return Response(path.read_bytes(), mimetype="application/json",
+                            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+        return Response(gzip.decompress(path.read_bytes()), mimetype="application/json")
+
+    @app.delete(f"{api}/admin/archives/<aid>")
+    @auth(admin=True)
+    def delete_archive(aid):
+        return jsonify(hive.delete_archive(me(), aid))
 
     @app.get(f"{api}/health")
     def health():

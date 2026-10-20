@@ -139,19 +139,33 @@ uv tool install /path/to/hive          # puts the `hive` command on PATH
 hive --version
 ```
 
-**On Windows, run `install.bat` from the project folder instead** (double-clicking it works
-too). It installs or re-installs Hive cleanly:
-- checks for uv (offering to install it) and git;
-- stops running `hive.exe` processes after asking, since Windows can't replace a running
-  executable;
-- rebuilds even when the version number hasn't changed, so stale builds never survive;
-- verifies the installed command and that it's the one on your PATH.
+**Or use the installer script in the project folder:**
 
-| Option | Effect |
-|---|---|
-| `/test` | Run the test suite first; install only if it passes. |
-| `/yes` | Answer every question with yes (unattended). |
-| `/nopath` | Leave your PATH alone. |
+| System | Run | Double-click |
+|---|---|---|
+| Windows | `install.bat` | `install.bat` |
+| macOS | `./install.sh` (or `sh install.sh`) | `install.command`. It opens Terminal and keeps the window open at the end. If macOS says it's from an unidentified developer, right-click it → *Open* → *Open*. |
+| Linux | `./install.sh` (or `sh install.sh`) | – |
+
+They all install or re-install Hive cleanly:
+- check for uv (offering to install it with its official installer) and git;
+- deal with running Hive processes, after asking:
+  - **Windows:** stops `hive.exe`, since Windows can't replace a running executable;
+  - **macOS and Linux:** offers to stop them, because running processes keep the old version
+    until restarted. If you say no, the install goes ahead and the final steps remind you to
+    restart them;
+- rebuild even when the version number hasn't changed, so stale builds never survive;
+- verify the installed command and that it's the one on your PATH.
+
+| Option (`install.bat`) | Option (`install.sh`) | Effect |
+|---|---|---|
+| `/test` | `--test` | Run the test suite first; install only if it passes. |
+| `/yes` | `--yes`, `-y` | Answer every question with yes (unattended). |
+| `/nopath` | `--no-path` | Leave your PATH alone. |
+
+**Unattended runs:** `install.sh` asks its questions on the terminal even when its input is
+redirected. With no terminal at all (e.g. over `ssh host 'sh install.sh'`), every question
+is answered no unless you pass `--yes`.
 
 `hive` **must be on PATH**: the agent CLIs launch `hive mcp` and `hive hook …` by name. If it
 can't be, run `hive init --hive-cmd /full/path/to/hive` (see §5) so the bundles use an
@@ -624,6 +638,7 @@ questions (`kind="question"`) never freeze anything.
 | `hive pause` | Stops all agents, including the orchestrator. Lease timers pause. |
 | `hive resume` | Returns to the previous state. |
 | `hive reset` | Emergency: back to `setup`. Keeps agents, tasks and history; clears any blocking decision. |
+| Dashboard ⋯ → *Archives…* → *Archive & clear…* | Ends a run: saves its history to an archive, clears it, and returns to `setup` for a new goal (§18). |
 
 ### 10.5 What each role may do in each state
 
@@ -1128,10 +1143,10 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
 
 | Area | Contents |
 |---|---|
-| Top bar | Fleet state, goal, orchestrator, `main` commit, and a *Live* / *Reconnecting…* indicator. *Pause* or *Resume*, whichever applies. A theme button that cycles light → dark → system. The ⋯ menu has the theme, *Reset fleet…* (asks for confirmation) and *Sign out*. |
+| Top bar | Fleet state, goal, orchestrator, `main` commit, and a *Live* / *Reconnecting…* indicator. *Pause* or *Resume*, whichever applies. A theme button that cycles light → dark → system. The ⋯ menu has the theme, *Archives…* (below), *Reset fleet…* (asks for confirmation) and *Sign out*. |
 | Decisions | Shown across the top while one is open. Each has its context, one button per option, a free-text answer and a note. A queued decision is shown as *Up next*. In `setup`, this area holds the goal box and *Start fleet* instead. |
 | Agents | One card per agent: colour, vendor, roles, state (idle, working, interactive, offline, out of quota), last seen and current task. Click a card to show only that agent's output. |
-| Leases | Holder, path globs and time left (amber when under 2 minutes). |
+| Leases | Holder, path globs and time left (amber when under 2 minutes). *Revoke* takes the files away from the holder after a confirmation; its next merge of them is refused. |
 | Live output | All agents' formatted output in one scrolling panel; see below. |
 | Tasks | Filter by *Active*, *Review*, *Finished* or *All* (with counts). Click a row for its spec, notes, result, paths, dependencies, branch and reviewer. |
 | Orchestrator | The `#user` conversation. Enter sends; Shift+Enter starts a new line. |
@@ -1152,6 +1167,29 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
   Scrolling up pauses *Follow*, and a *N new lines* button takes you back down.
 - **Clear:** the bin button empties the view without deleting the server's history.
 - **Limit:** up to 5,000 lines stay in the page.
+
+**Archives (⋯ → *Archives…*):** keep a run's history without letting it pile up in the live view.
+- **Save snapshot** writes everything the dashboard shows to an archive file on the server:
+  fleet and goal, agents (without their tokens), tasks, decisions, all messages (including
+  agent-to-agent ones), updates, reports, command approvals with their output, leases and the
+  recorded agent output. Nothing is removed.
+- **Archive & clear…** does the same, then removes all of that from the database and puts the
+  fleet back in `setup`, ready for a new goal. Agents, their tokens, the uploaded `hive.toml`,
+  the orchestrator assignment and `main`'s commit are kept, so machines keep running without
+  re-joining. It's refused unless the fleet is paused (or in `setup`) and nothing is in flight:
+  no leased files, no waiting or approved commands, no merge into `main` in progress. The
+  dialog says which of these is in the way; revoke leases from the Leases panel.
+- **Open** shows an archive in the normal layout, read-only: an *Archive* banner with its
+  decisions and their answers, the agents, tasks (all of them), the recorded output (with the
+  usual filters and search), every message with where it went, updates, approvals and
+  reports. *Back to live* returns to the live view. Archives with more than 5,000 output lines
+  show the newest 5,000; picking an agent or searching works on all of them.
+- **Download** saves the archive as `hive-archive-<id>.json.gz` (gzip-compressed JSON).
+  *Open a file…*, or *Open an archive file* on the sign-in page, opens such a file (or a plain
+  `.json`) in the browser without signing in; nothing is uploaded.
+- **Delete** removes an archive from the server for good.
+- **Where the files are:** see `HIVE_ARCHIVE_DIR` in §20.3. Archives are history, not
+  backups: they can't be loaded back into the live database.
 
 **Other behaviour:**
 - **Theme:** light by default; the choice is remembered in the browser.
@@ -1228,7 +1266,8 @@ these settings are checked in order and the first one set wins:
 4. `FORCE_COLOR=1` (on).
 
 Git Bash's default terminal (mintty) doesn't present itself as a console to Windows programs,
-so set `HIVE_COLOR=always` there. `install.bat` is coloured too and respects `NO_COLOR`.
+so set `HIVE_COLOR=always` there. The installers (`install.bat`, `install.sh`) are coloured
+too and respect `NO_COLOR`; `install.sh` uses no colour when its output isn't a terminal.
 
 ---
 
@@ -1306,6 +1345,7 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `HIVE_DATABASE_URL` | server | Database URL. |
 | `HIVE_GITHUB_TOKEN` | server | Enables GitHub mode. |
 | `HIVE_SQLITE_JOURNAL` | server | SQLite journal mode: `wal` (default) or `delete`/`truncate` for network filesystems; auto-`delete` on PythonAnywhere. |
+| `HIVE_ARCHIVE_DIR` | server | Folder for dashboard archives (§18). Default: `hive-archives/` next to a SQLite database file, otherwise `~/hive-archives`. |
 | `HIVE_SERVER_URL` | admin CLI | Overrides the server URL in `admin.toml`. |
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
 | `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off (§19, "Coloured output"). |
@@ -1335,7 +1375,8 @@ git-ignored).
 **Next to your clone:** one worktree per slot, `<clone>-<slot>/`, on branch `hive/<slot>`.
 
 **On the server:** the database: agents, events, messages, tasks, leases, decisions, status
-feed, reports, live-output lines.
+feed, reports, live-output lines. Dashboard archives are files in `$HIVE_ARCHIVE_DIR`: one
+`<id>.json.gz` and a small `<id>.meta.json` each.
 
 ---
 

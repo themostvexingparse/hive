@@ -474,6 +474,47 @@
   dialog h3 { margin: 0 0 8px; font-size: 16px; }
   dialog p { margin: 0; color: var(--text-2); font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
   dialog .d-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 18px 22px 20px; }
+
+  /* ------------------------------------------------------------------ archives */
+  body.archive .live-only { display: none !important; }
+  .btn.sm.icon { width: 26px; }
+  .linkbtn { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font-weight: 600; }
+  .login-alt { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); text-align: center;
+               font-size: 13px; color: var(--muted); }
+  dialog.wide { width: min(720px, calc(100vw - 32px)); }
+  dialog p.lead { white-space: normal; color: var(--muted); font-size: 13px; }
+  .arch-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; margin-top: 14px; }
+  @media (max-width: 640px) {
+    .arch-tools { grid-template-columns: 1fr 1fr; }
+    .arch-tools .field { grid-column: 1 / -1; }
+  }
+  .arch-err { color: var(--bad); font-size: 13px; margin-top: 8px; }
+  .arch-err:empty { display: none; }
+  .arch-list { list-style: none; margin: 14px 0 0; padding: 0; border: 1px solid var(--border); border-radius: 10px;
+               max-height: min(50vh, 440px); overflow: auto; }
+  .arch-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: center;
+                  padding: 10px 14px; border-top: 1px solid var(--border); }
+  .arch-list li:first-child { border-top: 0; }
+  .arch-list .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .arch-list .s { grid-column: 1; display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+                  font-size: 12px; color: var(--muted); }
+  .arch-list .a { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; }
+  @media (max-width: 640px) {
+    .arch-list li { grid-template-columns: minmax(0, 1fr); }
+    .arch-list .a { grid-column: 1; grid-row: auto; margin-top: 4px; }
+  }
+  .archive-bar {
+    background: var(--surface); border: 1px solid color-mix(in srgb, var(--info) 40%, var(--border));
+    border-left: 4px solid var(--info); border-radius: 12px; padding: 14px 18px; box-shadow: var(--shadow);
+  }
+  .archive-bar .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .archive-bar .title { font-weight: 650; font-size: 14.5px; min-width: 0; overflow-wrap: anywhere; }
+  .archive-bar .spacer { flex: 1; }
+  .archive-bar .meta { margin-top: 4px; font-size: 12.5px; color: var(--muted); }
+  .dec-hist { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+  .dec-hist li { padding: 9px 12px; background: var(--surface-2); border-radius: 8px; display: grid; gap: 3px;
+                 overflow-wrap: anywhere; }
+  .lease .rv { margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -491,6 +532,8 @@
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
   <symbol id="i-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
   <symbol id="i-hex" viewBox="0 0 32 32"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="var(--accent)" stroke="none"/><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="var(--surface)" stroke="none"/></symbol>
 </svg>
@@ -509,6 +552,8 @@
     <label class="check"><input type="checkbox" id="remember" checked> Remember on this device</label>
     <button class="btn primary" style="width:100%;height:38px" id="signIn">Sign in</button>
     <div class="error" id="loginErr" role="alert"></div>
+    <div class="login-alt"><button type="button" class="linkbtn" id="loginOpenArch">Open an archive file</button>
+      to view a saved run without signing in.</div>
   </form>
 </div>
 
@@ -526,9 +571,9 @@
       </div>
     </div>
     <div class="actions">
-      <span class="conn" id="conn" title=""><span>Live</span></span>
-      <button class="btn" id="pauseBtn" hidden><svg class="i"><use href="#i-pause"/></svg>Pause</button>
-      <button class="btn" id="resumeBtn" hidden><svg class="i"><use href="#i-play"/></svg>Resume</button>
+      <span class="conn live-only" id="conn" title=""><span>Live</span></span>
+      <button class="btn live-only" id="pauseBtn" hidden><svg class="i"><use href="#i-pause"/></svg>Pause</button>
+      <button class="btn live-only" id="resumeBtn" hidden><svg class="i"><use href="#i-play"/></svg>Resume</button>
       <button class="btn icon ghost" id="themeBtn" title="Theme" aria-label="Theme"><svg class="i"><use href="#i-sun"/></svg></button>
       <div class="menu">
         <button class="btn icon ghost" id="menuBtn" aria-haspopup="true" aria-expanded="false" aria-label="More"><svg class="i"><use href="#i-more"/></svg></button>
@@ -538,7 +583,8 @@
           <button role="menuitemradio" data-theme-set="dark"><svg class="i"><use href="#i-moon"/></svg>Dark</button>
           <button role="menuitemradio" data-theme-set="system"><svg class="i"><use href="#i-monitor"/></svg>System</button>
           <div class="sep"></div>
-          <button role="menuitem" id="resetBtn" class="danger" style="color:var(--bad)"><svg class="i"><use href="#i-reset"/></svg>Reset fleet…</button>
+          <button role="menuitem" id="archivesBtn"><svg class="i"><use href="#i-archive"/></svg>Archives…</button>
+          <button role="menuitem" id="resetBtn" class="danger live-only" style="color:var(--bad)"><svg class="i"><use href="#i-reset"/></svg>Reset fleet…</button>
           <button role="menuitem" id="signOutBtn"><svg class="i"><use href="#i-out"/></svg>Sign out</button>
         </div>
       </div>
@@ -565,7 +611,7 @@
       <div class="col center">
         <section class="panel out-panel">
           <div class="panel-h">
-            <h2>Live output</h2><span class="count" id="outCount">0 lines</span>
+            <h2 id="outTitle">Live output</h2><span class="count" id="outCount">0 lines</span>
             <span class="spacer"></span>
             <div class="toggles" role="group" aria-label="View options">
               <button id="tResults" aria-pressed="true" title="Show tool results">Results</button>
@@ -605,18 +651,18 @@
       <div class="col right">
         <section class="panel side">
           <div class="tabs" role="tablist">
-            <button role="tab" data-tab="chat" aria-selected="true">Orchestrator<i class="dot" hidden></i></button>
+            <button role="tab" data-tab="chat" aria-selected="true"><span id="chatTab">Orchestrator</span><i class="dot" hidden></i></button>
             <button role="tab" data-tab="feed" aria-selected="false">Updates<i class="dot" hidden></i></button>
             <button role="tab" data-tab="approvals" aria-selected="false">Approvals<span class="n" hidden></span></button>
             <button role="tab" data-tab="reports" aria-selected="false">Reports<i class="dot" hidden></i></button>
           </div>
           <div class="tabpanel" data-panel="chat">
             <div class="scroll" id="chatScroll"><div class="chat" id="chat"></div></div>
-            <form class="composer" id="composer">
+            <form class="composer live-only" id="composer">
               <textarea class="field" id="say" rows="1" placeholder="Message the orchestrator…" aria-label="Message the orchestrator"></textarea>
               <button class="btn primary icon" id="sendBtn" title="Send (Enter)" aria-label="Send" disabled><svg class="i"><use href="#i-send"/></svg></button>
             </form>
-            <div class="hint">Enter to send, Shift+Enter for a new line. Messages wake the orchestrator.</div>
+            <div class="hint live-only">Enter to send, Shift+Enter for a new line. Messages wake the orchestrator.</div>
           </div>
           <div class="tabpanel" data-panel="feed" hidden><div class="scroll"><ul class="feed" id="feed"></ul></div></div>
           <div class="tabpanel" data-panel="approvals" hidden><div class="scroll"><ul class="feed" id="approvals"></ul></div></div>
@@ -636,7 +682,28 @@
       </div>
     </form>
   </dialog>
+  <dialog id="archDlg" class="wide">
+    <div class="d-body">
+      <h3>Archives</h3>
+      <p class="lead">An archive saves this run's tasks, decisions, chat, updates, reports, approvals and agent
+        output to a file on the server, and you can open it again here, read-only. <b>Archive &amp; clear</b>
+        also removes all of that from the live view so the next goal starts fresh. Agents, their tokens, the
+        config and the repository are kept.</p>
+      <div class="arch-tools">
+        <input class="field" id="archLabel" placeholder="Label for a new archive (optional)" maxlength="200">
+        <button class="btn" id="archSnap">Save snapshot</button>
+        <button class="btn danger" id="archFlush">Archive &amp; clear…</button>
+      </div>
+      <div class="arch-err" id="archErr" role="alert"></div>
+      <ul class="arch-list" id="archList"></ul>
+    </div>
+    <div class="d-actions">
+      <button class="btn ghost" id="archOpenFile" style="margin-right:auto">Open a file…</button>
+      <button class="btn" id="archDone">Close</button>
+    </div>
+  </dialog>
 </div>
+<input type="file" id="archFile" accept=".json,.gz,application/json,application/gzip" hidden>
 
 <script>
 "use strict";
@@ -845,6 +912,7 @@ async function refresh() {
     api("/status?limit=60"), api("/messages?channel=%23user&limit=100"), api("/approvals?limit=50"),
     api("/reports?limit=50"),
   ]);
+  if (ARCHIVE || !running) return;
   Object.assign(S, { fleet, decisions, agents, tasks, leases, feed, chat, approvals, reports });
   renderAll();
 }
@@ -911,10 +979,11 @@ function renderHeader() {
   const open = S.decisions.filter((d) => d.state === "open").length;
   const appr = S.approvals.filter((a) => a.state === "requested").length;
   const n = open + appr;
-  document.title = (n ? `(${n}) ` : "") + `Hive · ${STATE_LABEL[st] || st}`;
+  document.title = ARCHIVE ? `Archive · ${ARCHIVE.title} · Hive` : (n ? `(${n}) ` : "") + `Hive · ${STATE_LABEL[st] || st}`;
 }
 
 function renderBanner() {
+  if (ARCHIVE) return renderArchiveBanner();
   const f = S.fleet;
   if (f.state === "setup") {
     if (!changed("banner", "setup")) return;
@@ -1020,11 +1089,20 @@ function renderLeases() {
     const m = Math.round((l.expires_at - now()) / 60);
     return `<li class="lease">
       <div class="top">${agentChip(l.holder)}
-        <span class="small muted">${l.task_id ? `#${l.task_id} · ` : ""}<span class="exp ${m < 2 ? "soon" : ""}" data-exp="${l.expires_at}">${m <= 0 ? "expiring" : m + "m left"}</span></span></div>
+        <span class="small muted">${l.task_id ? `#${l.task_id} · ` : ""}<span class="exp ${m < 2 ? "soon" : ""}" data-exp="${l.expires_at}">${m <= 0 ? "expiring" : m + "m left"}</span><button class="btn sm ghost rv live-only" data-revoke="${l.id}" title="Take these files away from ${esc(l.holder)}">Revoke</button></span></div>
       <div class="globs">${l.globs.map((g) => `<code class="glob">${esc(g)}</code>`).join("")}</div>
     </li>`;
   }).join("") || '<div class="empty">No files are leased.</div>';
 }
+$("#leases").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-revoke]"); if (!b) return;
+  const l = S.leases.find((x) => String(x.id) === b.dataset.revoke);
+  if (!(await confirmDialog(`Revoke lease #${b.dataset.revoke}?`,
+      `${l ? l.holder : "The agent"} loses these files. If it tries to merge changes to them afterwards, Hive refuses, and the agent has to lease them again.`,
+      "Revoke lease", true))) return;
+  act(b, () => api(`/leases/${b.dataset.revoke}/force-release`, "POST", { reason: "revoked by the user from the dashboard" }),
+      `Lease #${b.dataset.revoke} revoked.`);
+});
 
 let taskFilter = "active";
 const expanded = new Set();
@@ -1117,11 +1195,13 @@ function renderChat() {
   const sc = $("#chatScroll"), atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 60;
   $("#chat").innerHTML = S.chat.map((m) => {
     const me = m.author === "user";
+    // Archives hold every message, not only the #user chat: show where the others went.
+    const to = m.channel === "#user" ? "" : ` → ${m.recipient ? agentChip(m.recipient, "plain") : esc(m.channel || "")}`;
     return `<div class="msg ${me ? "me" : "them"}">
-      <div class="meta">${me ? "You" : agentChip(m.author)} · ${timeEl(m.ts)}</div>
+      <div class="meta">${me ? "You" : agentChip(m.author)}${to} · ${timeEl(m.ts)}</div>
       <div class="bubble">${hl(m.body)}</div>
     </div>`;
-  }).join("") || `<div class="empty">No messages yet. Write to the orchestrator below; it answers here.</div>`;
+  }).join("") || `<div class="empty">${ARCHIVE ? "No messages in this archive." : "No messages yet. Write to the orchestrator below; it answers here."}</div>`;
   if (atBottom) sc.scrollTop = sc.scrollHeight;
 }
 const say = $("#say");
@@ -1184,7 +1264,7 @@ function renderApprovals() {
       ${a.decided_by ? `<div class="small muted">${lab} by ${agentChip(a.decided_by, "plain")}${a.note ? `: ${esc(a.note)}` : ""}</div>` : ""}
       ${a.exit_code !== null && a.exit_code !== undefined ? `<div class="small">Exit code <b class="${a.exit_code === 0 ? "h-good" : "h-bad"}">${a.exit_code}</b></div>` : ""}
       ${a.output ? `<details class="out-detail"><summary>Output</summary><pre class="cmd">${hl(a.output)}</pre></details>` : ""}
-      ${a.state === "requested" ? `<div class="appr-actions">
+      ${a.state === "requested" ? `<div class="appr-actions live-only">
         <input class="field" id="aNote${a.id}" placeholder="Note (optional)">
         <button class="btn sm primary" data-appr="${a.id}" data-ok="1">Approve</button>
         <button class="btn sm danger" data-appr="${a.id}" data-ok="0">Deny</button></div>` : ""}
@@ -1224,6 +1304,7 @@ const OUT = { lines: [], lastId: 0, agents: new Set(), q: "", results: true, wra
               clearedAt: 0, pending: 0, rendered: 0, known: new Set() };
 const outEl = $("#out");
 
+const toLine = (l) => ({ id: l.id, agent: l.agent, ts: l.ts, text: l.text, low: l.text.toLowerCase(), kind: kindOf(l.text) });
 function kindOf(text) {
   const c = text.charAt(0);
   if (c === "→") return "tool";
@@ -1260,7 +1341,7 @@ function updateCount() {
 }
 function emptyOut() {
   return `<div class="empty" style="padding:48px 16px">${OUT.lines.length ? "No lines match the current filters." :
-    "No output yet. Workers' live output appears here while they run a turn."}</div>`;
+    ARCHIVE ? "No agent output was recorded in this archive." : "No output yet. Workers' live output appears here while they run a turn."}</div>`;
 }
 function rerenderOutput() {
   const vis = OUT.lines.filter(visible);
@@ -1268,8 +1349,11 @@ function rerenderOutput() {
   outEl.classList.toggle("nowrap", !OUT.wrap);
   const w = Math.max(6, ...[...OUT.known].map((n) => n.length));
   outEl.style.setProperty("--agw", w + 2 + "ch");
-  outEl.innerHTML = vis.length ? vis.map(lineHTML).join("") : emptyOut();
-  OUT.rendered = vis.length;
+  const shown = vis.length > MAX_LINES ? vis.slice(-MAX_LINES) : vis;
+  const hidden = vis.length - shown.length;
+  outEl.innerHTML = shown.length ? (hidden ? `<div class="empty small">${hidden} earlier lines aren't shown. Pick an agent or search to narrow it down.</div>` : "") +
+    shown.map(lineHTML).join("") : emptyOut();
+  OUT.rendered = shown.length;
   OUT.pending = 0; $("#jump").hidden = true;
   if (OUT.follow) outEl.scrollTop = outEl.scrollHeight;
   updateCount();
@@ -1293,9 +1377,9 @@ function showJump() {
 }
 async function pollOutput() {
   const r = await api(`/streams?since_id=${OUT.lastId}&limit=${OUT.lastId ? 1000 : 600}`);
-  if (!r.lines.length) return;
+  if (ARCHIVE || !running || !r.lines.length) return;
   OUT.lastId = r.last_id;
-  const add = r.lines.map((l) => ({ id: l.id, agent: l.agent, ts: l.ts, text: l.text, low: l.text.toLowerCase(), kind: kindOf(l.text) }));
+  const add = r.lines.map(toLine);
   let newAgent = false;
   for (const l of add) if (!OUT.known.has(l.agent)) { OUT.known.add(l.agent); newAgent = true; }
   OUT.lines.push(...add);
@@ -1355,6 +1439,161 @@ $("#resetBtn").onclick = async () => {
       "Reset fleet", true))) return;
   act(null, () => api("/fleet/reset", "POST", {}), "Fleet reset to setup.");
 };
+
+/* =================================================================== archives */
+let ARCHIVE = null;  // the archive being viewed; null in the live view
+const fmtBytes = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const countsText = (c) => [plural(c.tasks, "task"), plural(c.messages, "message"), plural(c.status, "update"),
+                           plural(c.reports, "report"), plural(c.streams, "output line")].join(" · ");
+
+async function archAct(btn, fn) {
+  $("#archErr").textContent = "";
+  setBusy(btn, true);
+  try { return await fn(); }
+  catch (e) { if (e.status !== 401) $("#archErr").textContent = e.message; return null; }
+  finally { setBusy(btn, false); }
+}
+async function loadArchives() {
+  const ul = $("#archList");
+  if (!ul.children.length) ul.innerHTML = '<div class="empty">Loading…</div>';
+  const list = await archAct(null, () => api("/admin/archives"));
+  if (!list) return;
+  ul.innerHTML = list.map((m) => `<li>
+      <div class="t" title="${esc(m.goal || "")}">${esc(m.label || m.goal || "Untitled run")}</div>
+      <div class="s"><span class="badge nodot ${m.kind === "flush" ? "warn" : "info"}">${m.kind === "flush" ? "Cleared" : "Snapshot"}</span>
+        <span>${esc(absTime(m.created))} · ${fmtBytes(m.size)}</span><span>· ${esc(countsText(m.counts))}</span></div>
+      <div class="a">
+        <button class="btn sm primary" data-aopen="${esc(m.id)}">Open</button>
+        <button class="btn sm icon" data-adl="${esc(m.id)}" title="Download" aria-label="Download"><svg class="i"><use href="#i-dl"/></svg></button>
+        <button class="btn sm icon danger" data-adel="${esc(m.id)}" title="Delete" aria-label="Delete"><svg class="i"><use href="#i-trash"/></svg></button>
+      </div></li>`).join("") || '<div class="empty">No archives yet.</div>';
+}
+$("#archivesBtn").onclick = () => { closeMenu(); $("#archErr").textContent = ""; $("#archDlg").showModal(); loadArchives(); };
+$("#archDone").onclick = () => $("#archDlg").close();
+$("#archSnap").onclick = async (e) => {
+  const r = await archAct(e.currentTarget, () => api("/admin/archives", "POST", { label: $("#archLabel").value }));
+  if (r) { $("#archLabel").value = ""; toast("Snapshot saved.", "ok", 3000); loadArchives(); }
+};
+$("#archFlush").onclick = async (e) => {
+  const btn = e.currentTarget;
+  if (!(await confirmDialog("Archive and clear this run?",
+      "Tasks, decisions, chat, updates, reports, approvals and agent output are saved to an archive and then removed from the live view. The fleet goes back to setup, ready for a new goal.\n\nAgents, their tokens, the config and the repository are not touched. The fleet must be paused (or in setup) and no files may be leased.",
+      "Archive and clear", true))) return;
+  const r = await archAct(btn, () => api("/admin/archives", "POST", { label: $("#archLabel").value, flush: true }));
+  if (!r) return;
+  $("#archLabel").value = "";
+  $("#archDlg").close();
+  resetView(); refreshSoon();
+  toast("Archived and cleared. The fleet is back in setup, ready for a new goal.", "ok");
+};
+$("#archList").addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.aopen) {
+    const data = await archAct(b, () => api(`/admin/archives/${encodeURIComponent(b.dataset.aopen)}`));
+    if (data) { $("#archDlg").close(); enterArchive(data); }
+  } else if (b.dataset.adl) {
+    await archAct(b, () => downloadArchive(b.dataset.adl));
+  } else if (b.dataset.adel) {
+    if (!(await confirmDialog("Delete this archive?", "The file is removed from the server for good. Download it first if you want to keep a copy.", "Delete", true))) return;
+    if (await archAct(b, () => api(`/admin/archives/${encodeURIComponent(b.dataset.adel)}`, "DELETE"))) loadArchives();
+  }
+});
+async function downloadArchive(id) {
+  let r;
+  try { r = await fetch(`/api/v1/admin/archives/${encodeURIComponent(id)}?download=1`, { headers: { Authorization: "Bearer " + token } }); }
+  catch (e) { throw new ApiError("Can't reach the Hive server.", 0); }
+  if (!r.ok) throw new ApiError(`Download failed (${r.status}).`, r.status);
+  const url = URL.createObjectURL(await r.blob());
+  const a = Object.assign(document.createElement("a"), { href: url, download: `hive-archive-${id}.json.gz` });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return true;
+}
+
+/* Archive files can be opened from disk too, even without signing in (.json or .json.gz). */
+$("#archOpenFile").onclick = () => $("#archFile").click();
+$("#loginOpenArch").onclick = () => $("#archFile").click();
+$("#archFile").onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
+  try {
+    let stream = f.stream();
+    const head = new Uint8Array(await f.slice(0, 2).arrayBuffer());
+    if (head[0] === 0x1f && head[1] === 0x8b) {
+      if (typeof DecompressionStream === "undefined") throw new Error("This browser can't unpack .gz files. Unzip the file first.");
+      stream = stream.pipeThrough(new DecompressionStream("gzip"));
+    }
+    let data;
+    try { data = JSON.parse(await new Response(stream).text()); } catch (err) { data = null; }
+    if ($("#archDlg").open) $("#archDlg").close();
+    enterArchive(data);
+  } catch (err) {
+    if ($("#app").hidden) $("#loginErr").textContent = err.message; else toast(err.message, "error");
+  }
+};
+
+function resetView() {
+  for (const k of Object.keys(sigs)) delete sigs[k];
+  Object.assign(S, { fleet: {}, decisions: [], agents: [], tasks: [], leases: [], feed: [], chat: [], approvals: [], reports: [] });
+  Object.assign(OUT, { lines: [], lastId: 0, clearedAt: 0, pending: 0, rendered: 0 });
+  OUT.known.clear(); OUT.agents.clear(); expanded.clear();
+  firstRender = true; seen.chat = seen.feed = seen.reports = 0;
+  outEl.innerHTML = ""; $("#jump").hidden = true;
+}
+function enterArchive(data) {
+  if (!data || data.format !== "hive-archive" || !Array.isArray(data.tasks)) throw new Error("That file isn't a Hive archive.");
+  if (data.version > 1) throw new Error("This archive was made by a newer Hive. Update the server to open it.");
+  stopLoops(); resetView();
+  const counts = { tasks: data.tasks.length, messages: data.messages.length, status: data.status.length,
+                   reports: data.reports.length, streams: data.streams.length };
+  ARCHIVE = { title: data.label || data.fleet.goal || "Untitled run", created: data.created, kind: data.kind, counts };
+  document.body.classList.add("archive");
+  Object.assign(S, {
+    fleet: data.fleet, decisions: data.decisions, tasks: data.tasks, feed: data.status, chat: data.messages,
+    approvals: data.approvals, reports: data.reports, leases: data.leases.filter((l) => l.state === "active"),
+    agents: data.agents.map((a) => ({ ...a, online: false, exhausted: false })),
+  });
+  OUT.lines = data.streams.map(toLine);
+  OUT.lastId = maxId(data.streams);
+  for (const l of OUT.lines) OUT.known.add(l.agent);
+  $("#archivesBtn").hidden = $("#signOutBtn").hidden = !token;
+  $("#outTitle").textContent = "Recorded output";
+  $("#chatTab").textContent = "Messages";
+  taskFilter = "all";
+  $("#login").hidden = true; $("#app").hidden = false;
+  renderAll(); rerenderOutput();
+  window.scrollTo(0, 0);
+}
+function leaveArchive() {
+  ARCHIVE = null;
+  document.body.classList.remove("archive");
+  $("#archivesBtn").hidden = $("#signOutBtn").hidden = false;
+  $("#outTitle").textContent = "Live output";
+  $("#chatTab").textContent = "Orchestrator";
+  taskFilter = "active";
+  resetView();
+  if (token) start(); else showLogin();
+}
+function renderArchiveBanner() {
+  if (!changed("banner", ["archive", ARCHIVE.created, ARCHIVE.title])) return;
+  const a = ARCHIVE, ds = S.decisions, f = S.fleet;
+  const answer = (d) => d.state === "answered"
+    ? `Answered <b>${esc(d.answer)}</b>${d.note ? ` · ${esc(d.note)}` : ""}${d.answered_at ? ` · ${esc(absTime(d.answered_at))}` : ""}`
+    : `<span class="h-warn">${esc(label(d.state))}</span>, never answered`;
+  $("#banner").innerHTML = `<section class="archive-bar">
+    <div class="head">
+      <span class="badge info nodot">${a.kind === "flush" ? "Archive" : "Snapshot"}</span>
+      <span class="title">${esc(a.title)}</span><span class="spacer"></span>
+      <button class="btn sm" id="archBack">${token ? "Back to live" : "Close archive"}</button>
+    </div>
+    <div class="meta">Read-only. Saved ${esc(absTime(a.created))}${f.goal && f.goal !== a.title ? ` · goal: ${esc(f.goal)}` : ""} · ${esc(countsText(a.counts))}</div>
+    ${ds.length ? `<details class="dec-ctx"><summary>${plural(ds.length, "decision")}</summary><ul class="dec-hist">${ds.map((d) => `<li>
+        <div class="small muted">#${d.id} · ${esc(label(d.kind))} · from ${agentChip(d.raised_by, "plain")} · ${esc(absTime(d.created))}</div>
+        <div>${hl(d.question)}</div><div class="small">${answer(d)}</div></li>`).join("")}</ul></details>` : ""}
+  </section>`;
+  $("#archBack").onclick = leaveArchive;
+}
 
 /* =================================================================== keyboard */
 document.addEventListener("keydown", (e) => {

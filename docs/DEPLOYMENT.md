@@ -308,12 +308,57 @@ curl https://USER.pythonanywhere.com/api/v1/health          # → {"ok": true}
 
 ### 4.7 Updating the code later
 
+Get the new code, then run the server installer from the project folder in a Bash console:
+
 ```bash
-cd ~/hive && git pull
-workon hive && pip install --upgrade "$HOME/hive[mysql]"
+cd ~/hive && git pull          # or upload and unzip the new version over ~/hive
+./install-pa-server.sh         # or: bash install-pa-server.sh
 ```
 
-Then click **Reload** on the Web tab. See §9 for database changes between versions.
+It removes the previous installation and installs this folder fresh, without touching your
+credentials or data:
+- **Never modified:** the WSGI file (admin token, database URL and password), secret files it
+  loads (such as `~/.hive-env`), the database (SQLite file or MySQL), and the dashboard
+  archives. The WSGI file is copied to `~/hive-install-backups/<time>/` (readable only by
+  you) and touched to reload the web app.
+- **Reads the web app's settings from the WSGI file:**
+  - which driver to install: `[mysql]` for MySQL, and `python-dotenv` if the file uses it;
+  - where the database and archives are, to make sure neither is inside the virtualenv it is
+    about to replace;
+  - whether the admin token is set.
+
+  It shows a summary first, with the database password masked and the token never shown,
+  and asks before changing anything.
+- **Removes stray copies** of Hive installed with `pip install` outside the virtualenv (in
+  `~/.local`), which can be picked up by mistake. It asks first.
+- **Swaps safely:**
+  1. moves the old virtualenv aside;
+  2. builds a new one with the same Python version;
+  3. installs and self-tests it on a throwaway database (health, dashboard, admin API);
+  4. reloads the web app;
+  5. checks `https://<your site>/api/v1/health`.
+
+  If any step fails, or the site answers with an error, the old virtualenv is put back and
+  the web app reloaded with it. If the console can't reach the site to check it, the new
+  install stays, the old one is kept as `<venv>.previous-<time>` until you've checked in a
+  browser, and the script says so.
+
+| Option | Effect |
+|---|---|
+| `--yes`, `-y` | Answer every question with yes (unattended). |
+| `--venv PATH` | The web app's virtualenv, if not `~/.virtualenvs/hive` (Web tab → Virtualenv). |
+| `--python 3.13` | Python for the new virtualenv (default: the old one's version). Change the Web tab's Python version to match first. |
+| `--wsgi FILE` | The WSGI file, if several web apps import Hive. |
+| `--url URL` | Site to health-check, if not derived from the WSGI file name. |
+| `--extra "PKGS"` | Extra pip packages your WSGI file needs. |
+| `--no-reload` | Install only; reload on the Web tab yourself. Keeps the old virtualenv. |
+| `--keep-old` | Keep the previous virtualenv after a successful install. |
+
+Back up the database first (`hive admin backup` from your computer, §10). See §9 for
+database changes between versions.
+
+**By hand instead:** `workon hive && pip install --upgrade "$HOME/hive[mysql]"`, then click
+**Reload** on the Web tab.
 
 ### 4.8 Free (Beginner) plan with SQLite
 
@@ -488,6 +533,7 @@ Cloudflare Tunnel) in front of it works.
 | `HIVE_ADMIN_TOKEN` | **yes** | – | The admin token. The app refuses to start without it. |
 | `HIVE_DATABASE_URL` | no | `sqlite:///hive.db` (relative to the working directory) | SQLAlchemy database URL. |
 | `HIVE_GITHUB_TOKEN` | no | – | Enables GitHub mode: the server fast-forwards `main` through the GitHub API. Also requires `[repo] github = "owner/repo"` in the uploaded `hive.toml`. Needs a fine-grained token with *Contents: read and write* on that repository. |
+| `HIVE_ARCHIVE_DIR` | no | `hive-archives/` next to a SQLite database file, else `~/hive-archives` | Where the dashboard's archives are written (README §18). The server process must be able to write there. On PythonAnywhere the files count toward your disk quota. |
 | `HIVE_SQLITE_JOURNAL` | no | `wal`; `delete` when PythonAnywhere is detected | SQLite only. `wal` for local disks (fastest; readers and the writer don't block each other). `delete` (or `truncate`) for network filesystems such as PythonAnywhere's, where WAL doesn't work. `GET /api/v1/health` reports the active mode. |
 
 **How Hive uses SQLite:**
@@ -529,8 +575,10 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
 
 ## 9. Upgrading
 
-1. **Update the code:** `git pull`, then `pip install --upgrade` (PythonAnywhere: §4.7; VPS:
-   as the `hive` user into `/srv/hive/venv`, then `sudo systemctl restart hive`).
+1. **Update the code:** `git pull`, then reinstall:
+   - **PythonAnywhere:** `./install-pa-server.sh` (§4.7);
+   - **VPS:** `pip install --upgrade` as the `hive` user into `/srv/hive/venv`, then
+     `sudo systemctl restart hive`.
 2. **Update the machines too.** Agent machines and the server should run the same Hive
    version: `uv tool install --force /path/to/hive` on each, then re-run `hive init` in the
    repository and commit the refreshed bundles.
@@ -555,7 +603,9 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
 - active leases;
 - the uploaded `hive.toml`.
 
-Code lives in git and is not in the database.
+Code lives in git and is not in the database. Dashboard archives (README §18) are separate
+files in `HIVE_ARCHIVE_DIR`. Copy that folder too if you want to keep them, but they are
+read-only history, not a way to restore the database.
 
 **If the database is lost:**
 1. Re-enroll the agents; this gives new tokens.
@@ -610,6 +660,21 @@ DELETE FROM tasks       WHERE state IN ('done','cancelled') AND updated < UNIX_T
 
 Run it in the MySQL console (PythonAnywhere: Databases tab → open a console on `USER$hive`),
 or as a monthly scheduled task.
+
+**The easier way, between runs:** the dashboard's ⋯ → *Archives…* → *Archive & clear…* saves
+a finished run's history to a compressed file in `HIVE_ARCHIVE_DIR` and empties those tables
+in one step, without touching agents or config (README §18). Archives are gzip-compressed
+JSON; the dialog shows each one's size. Delete old archives from the same dialog, or download
+them first.
+
+**Ids keep counting after a clear.** Daemons keep event cursors and cached message ids, so the
+server never hands out an old id again:
+- **Postgres and MySQL 8:** their sequences never go back.
+- **SQLite:** the cleared tables use `AUTOINCREMENT`. Databases created by older Hive versions
+  are converted on their first clear.
+- **MySQL 5.7 and older:** the counter resets to the highest remaining id when the database
+  server restarts, so restart MySQL only after the next run has created some rows. MySQL 8
+  stores the counter and doesn't have this problem.
 
 **Reclaiming disk space:**
 

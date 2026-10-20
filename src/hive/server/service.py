@@ -24,6 +24,7 @@ from .. import globs as G
 from .. import permissions as P
 from ..roles import RoleSet, load_roles, resolve_kind, role_set, validate_assignment, validate_fleet
 from . import db
+from .archives import FORMAT as ARCHIVE_FORMAT, VERSION as ARCHIVE_VERSION, ArchiveStore, default_dir
 from .db import (agents, approvals, decisions, events, fleet, integrations, leases, messages,
                  receipts, reports, status_feed, streams, tasks)
 
@@ -69,14 +70,20 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _n(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
 def row(r) -> dict | None:
     return dict(r._mapping) if r is not None else None
 
 
 class Hive:
     def __init__(self, engine, *, github_token: str = "", offline_after: float = 90,
-                 failover_after: float = 300, tick_interval: float = 1.0):
+                 failover_after: float = 300, tick_interval: float = 1.0,
+                 archive_dir: str | None = None):
         self.engine = engine
+        self.archives = ArchiveStore(archive_dir or default_dir(engine.url))
         self.github_token = github_token
         self.offline_after = offline_after
         self.failover_after = failover_after
@@ -1362,6 +1369,141 @@ class Hive:
                     dst.close()
             finally:
                 raw.close()
+
+    # ------------------------------------------------------------------ archives
+
+    # What an archive holds besides the fleet and agents; events, receipts and integration grants
+    # are delivery plumbing (and grants are secrets), so they are left out.
+    ARCHIVED = (("tasks", tasks), ("decisions", decisions), ("messages", messages),
+                ("status", status_feed), ("reports", reports), ("approvals", approvals),
+                ("leases", leases), ("streams", streams))
+
+    def _snapshot(self, c, t: float, kind: str, label: str) -> dict:
+        f = self._fleet(c, lock=False)
+        fl = {**self._public_fleet(f), "review": self._review_mode(f), "config": f["config"]}
+        ags = []
+        for r in c.execute(select(agents).order_by(agents.c.name)):
+            a = row(r)
+            a.pop("token_hash")
+            ags.append(a)
+        data = {"format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION, "created": t,
+                "kind": kind, "label": label, "fleet": fl, "agents": ags}
+        for key, tbl in self.ARCHIVED:
+            data[key] = [row(r) for r in c.execute(select(tbl).order_by(tbl.c.id))]
+        return data
+
+    def _archive_meta(self, data: dict) -> dict:
+        fl = data["fleet"]
+        times = [x[k] for key, k in (("tasks", "created"), ("messages", "ts"), ("status", "ts"),
+                                     ("streams", "ts")) for x in data[key]]
+        return {"created": data["created"], "kind": data["kind"], "label": data["label"],
+                "goal": fl["goal"],
+                "state": fl["state"], "agents": [a["name"] for a in data["agents"]],
+                "counts": {k: len(data[k]) for k, _ in self.ARCHIVED},
+                "first": min(times, default=None)}
+
+    def create_archive(self, actor: Actor, label: str = "", flush: bool = False) -> dict:
+        """Save everything the dashboard shows into an archive file. With `flush`, also clear it
+        from the database and return the fleet to setup; agents, their tokens, the config, the
+        orchestrator assignment and main's sha stay."""
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        label = " ".join(str(label or "").split())[:200]
+        t = now()
+        if not flush:
+            with self._read() as c:
+                data = self._snapshot(c, t, "snapshot", label)
+            return self.archives.write(self.archives.new_id(t), data, self._archive_meta(data))
+        with self._write() as c:
+            f = self._fleet(c)
+            self._check_flushable(c, f)
+            data = self._snapshot(c, t, "flush", label)
+            aid = self.archives.new_id(t)
+            # The file is complete on disk before anything is deleted. If clearing fails, the
+            # transaction rolls back and the archive is removed again.
+            meta = self.archives.write(aid, data, self._archive_meta(data))
+            try:
+                self._flush(c, actor, aid)
+            except BaseException:
+                self.archives.delete(aid)
+                raise
+        return meta
+
+    def _check_flushable(self, c, f: dict) -> None:
+        if f["state"] not in ("setup", "paused"):
+            raise ApiError(409, "bad_state", "pause the fleet before archiving and clearing it")
+        problems = []
+        n = c.execute(select(func.count()).select_from(leases)
+                      .where(leases.c.state == "active")).scalar()
+        if n:
+            problems.append(f"{_n(n, 'file lease is', 'file leases are')} still held; "
+                            f"revoke {'it' if n == 1 else 'them'} first")
+        n = c.execute(select(func.count()).select_from(approvals)
+                      .where(approvals.c.state.in_(("requested", "approved")))).scalar()
+        if n:
+            it = "it" if n == 1 else "them"
+            problems.append(f"{_n(n, 'command approval is', 'command approvals are')} waiting "
+                            f"or about to run; deny {it} or let {it} run first")
+        n = c.execute(select(func.count()).select_from(integrations)
+                      .where(integrations.c.state == "granted")).scalar()
+        if n:
+            problems.append(f"{_n(n, 'merge into main is', 'merges into main are')} in "
+                            "progress; wait for it to finish")
+        if problems:
+            raise ApiError(409, "busy", "Can't clear yet: " + "; ".join(problems) + ".",
+                           problems=problems)
+
+    def _flush(self, c, actor: Actor, aid: str) -> None:
+        highs = {}
+        for tbl in db.FLUSHED_TABLES:
+            pk = list(tbl.primary_key.columns)[0]
+            highs[tbl.name] = c.execute(select(func.max(pk))).scalar() or 0
+        c.execute(delete(receipts))
+        for tbl in db.FLUSHED_TABLES:
+            c.execute(delete(tbl))
+        if self.is_sqlite:
+            self._keep_counting(c, highs)
+        self._set_fleet(c, state="setup", prev_state=None, frozen_at=None,
+                        blocking_decision=None, goal="")
+        self._emit(c, "fleet.state", actor.name, "*", state="setup", archived=aid)
+
+    @staticmethod
+    def _keep_counting(c, highs: dict[str, int]) -> None:
+        """SQLite would hand out max(id)+1 = 1 again on the now-empty tables. Rebuild any table
+        created before ids were AUTOINCREMENT (it is empty, so this is cheap) and seed its
+        counter with the old high-water mark."""
+        for tbl in db.FLUSHED_TABLES:
+            sql = c.exec_driver_sql("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                                    (tbl.name,)).scalar() or ""
+            if "AUTOINCREMENT" in sql.upper():
+                continue  # sqlite_sequence already remembers the highest id ever used
+            tbl.drop(c)
+            tbl.create(c)
+            c.exec_driver_sql("DELETE FROM sqlite_sequence WHERE name=?", (tbl.name,))
+            c.exec_driver_sql("INSERT INTO sqlite_sequence(name, seq) VALUES(?, ?)",
+                              (tbl.name, highs[tbl.name]))
+
+    def list_archives(self, actor: Actor) -> list[dict]:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        return self.archives.list()
+
+    def archive_file(self, actor: Actor, aid: str):
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        try:
+            return self.archives.path(aid)
+        except KeyError:
+            raise ApiError(404, "no_such_archive", f"no archive {aid!r}")
+
+    def delete_archive(self, actor: Actor, aid: str) -> dict:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        try:
+            self.archives.delete(aid)
+        except KeyError:
+            raise ApiError(404, "no_such_archive", f"no archive {aid!r}")
+        return {"ok": True}
 
     def _failover(self, c, f: dict) -> None:
         orch = f["orchestrator"]

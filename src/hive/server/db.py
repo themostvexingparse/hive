@@ -191,6 +191,14 @@ integrations = Table(
     Column("created", Float, nullable=False),
 )
 
+# Tables an archive flush empties. Their ids must keep counting up afterwards: daemons hold event
+# cursors and cache message/approval ids, and agents remember task numbers. Postgres and MySQL
+# sequences never go back; SQLite reuses max(id)+1 unless the table is AUTOINCREMENT.
+FLUSHED_TABLES = (events, messages, tasks, leases, decisions, status_feed, streams, reports,
+                  approvals, integrations)
+for _t in FLUSHED_TABLES:
+    _t.dialect_options["sqlite"]["autoincrement"] = True
+
 SQLITE_JOURNALS = ("wal", "delete", "truncate")
 
 

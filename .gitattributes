@@ -1,0 +1,5 @@
+# Installer scripts must keep their platform's line endings in every checkout: a CRLF
+# `#!/bin/sh` script fails on macOS/Linux, and cmd.exe misreads labels in LF batch files.
+*.sh       text eol=lf
+*.command  text eol=lf
+*.bat      text eol=crlf
