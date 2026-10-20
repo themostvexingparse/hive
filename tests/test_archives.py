@@ -137,6 +137,18 @@ def test_archives_are_admin_only_and_ids_are_checked(env):
     assert admin.get("/admin/archives") == []
 
 
+def test_admin_check_tells_the_admin_token_from_an_agents(env):
+    """The dashboard signs in through this: an agent's token can read /fleet, but must not
+    get into the admin panel (archives, live output and decisions are admin-only)."""
+    hive, admin, ag = env
+    assert admin.get("/admin/check", expect=200) == {"ok": True}
+    assert ag["orch"].get("/fleet", expect=200)["state"] == "setup"   # what sign-in used to test
+    assert ag["orch"].get("/admin/check", expect=403)["message"] == "admin token required"
+    fc = create_app(hive, admin_token=ADMIN).test_client()
+    assert fc.get("/api/v1/admin/check", headers={"Authorization": "Bearer nope"}).status_code == 403
+    assert fc.get("/api/v1/admin/check").status_code == 401
+
+
 def test_two_archives_in_the_same_second_get_distinct_ids(env):
     hive, admin, ag = env
     a = admin.post("/admin/archives", {}, expect=201)

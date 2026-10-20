@@ -447,6 +447,12 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None) -> Flas
                         headers={"Content-Disposition": f'attachment; filename="{name}"',
                                  "Content-Length": str(os.path.getsize(path))})
 
+    @app.get(f"{api}/admin/check")
+    @auth(admin=True)
+    def admin_check():
+        """Lets the dashboard tell the admin token from an agent's at sign-in."""
+        return jsonify({"ok": True})
+
     @app.get(f"{api}/admin/archives")
     @auth(admin=True)
     def list_archives():

@@ -896,7 +896,7 @@ $("#loginForm").onsubmit = async (e) => {
   if (!token) return;
   setBusy($("#signIn"), true); $("#loginErr").textContent = "";
   try {
-    await api("/fleet");
+    await checkAdmin();
     store.del("hiveToken"); store.set("hiveToken", token, $("#remember").checked);
     start();
   } catch (err) {
@@ -904,6 +904,14 @@ $("#loginForm").onsubmit = async (e) => {
   } finally { setBusy($("#signIn"), false); }
 };
 $("#signOutBtn").onclick = () => { closeMenu(); signOut(); };
+/* Agents' tokens can read the fleet too, so signing in checks an admin-only endpoint: the
+   admin panel needs the server's admin token for live output, decisions and archives. */
+const NOT_ADMIN = "That isn't this server's admin token (HIVE_ADMIN_TOKEN). An agent's token " +
+                  "can't open the admin panel.";
+async function checkAdmin() {
+  try { await api("/admin/check"); }
+  catch (e) { throw e.status === 403 ? new ApiError(NOT_ADMIN, 403) : e; }
+}
 
 /* =================================================================== state & polling */
 const S = { fleet: {}, decisions: [], agents: [], tasks: [], leases: [], feed: [], chat: [], approvals: [], reports: [] };
@@ -1463,7 +1471,7 @@ async function loadArchives() {
   const ul = $("#archList");
   if (!ul.children.length) ul.innerHTML = '<div class="empty">Loading…</div>';
   const list = await archAct(null, () => api("/admin/archives"));
-  if (!list) return;
+  if (!list) { ul.innerHTML = '<div class="empty">Couldn\'t load the archives.</div>'; return; }
   ul.innerHTML = list.map((m) => `<li>
       <div class="t" title="${esc(m.goal || "")}">${esc(m.label || m.goal || "Untitled run")}</div>
       <div class="s"><span class="badge nodot ${m.kind === "flush" ? "warn" : "info"}">${m.kind === "flush" ? "Cleared" : "Snapshot"}</span>
@@ -1613,7 +1621,11 @@ function start() {
   running = true;
   coreLoop(); outLoop();
 }
-if (token) start(); else showLogin();
+if (!token) showLogin();
+else checkAdmin().then(start, (e) => {
+  if (e.status === 403) signOut(NOT_ADMIN);   // a remembered agent token
+  else if (e.status !== 401) start();         // unreachable for now: start and keep retrying
+});
 </script>
 </body>
 </html>
