@@ -1,4 +1,5 @@
-"""`hive hook <event>`: bridge from CLI hooks (Claude Code / Gemini CLI) to the daemon. SPEC §11.
+"""`hive hook <event>`: bridge from CLI hooks (Claude Code / Gemini CLI / Codex) to the daemon.
+SPEC §11. Codex uses Claude Code's event names and output format.
 
 Reads the hook JSON on stdin, asks the daemon for a neutral verdict (deny / context / block) and
 prints it in the vendor's hook output format. Delivery fails open; write enforcement fails closed.
@@ -21,10 +22,16 @@ EVENTS = {
     "BeforeTool": "pre_tool", "AfterTool": "post_tool", "BeforeAgent": "prompt",
     "AfterAgent": "stop",
 }
-WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "replace", "edit"}
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "replace", "edit",
+               "apply_patch"}
 
 
 def format_output(vendor: str, raw_event: str, verdict: dict) -> dict | None:
+    if "ask" in verdict and vendor == "codex":
+        # Codex hooks can't ask; its execpolicy rules prompt for the common forms instead.
+        verdict = {"deny": verdict["ask"] + " (Hive can't ask for confirmation in Codex, so it "
+                           "blocked the command: ask the user to run it, or use a narrower "
+                           "command.)"}
     if "deny" in verdict:
         if vendor == "gemini":
             return {"decision": "deny", "reason": verdict["deny"]}
