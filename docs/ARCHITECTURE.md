@@ -35,28 +35,39 @@ and full specification are in [SPEC.md](../SPEC.md).
 
 ## The big picture
 
-```
-                 ┌──────────────── hive-server (Flask / WSGI) ─────────────────┐
-                 │ agents · messages · tasks · leases · fleet state ·          │
-                 │ decisions · status feed · reports · live output (admin)     │
-                 │ web dashboard                                               │
-                 └──────────▲──────────────────────────────▲───────────────────┘
-                HTTPS poll  │                              │   HTTPS poll
-   ┌────────────────────────┴───────────┐       ┌──────────┴─────────────────────────┐
-   │ Your computer: `hive up`           │       │ Worker machine: `hive up`          │
-   │  daemon (background)               │       │  daemon                            │
-   │  ┌───────────────────────────────┐ │       │  ┌───────────────────────────────┐ │
-   │  │ claude (interactive)          │ │       │  │ claude -p … (headless wakes)  │ │
-   │  │  = orchestrator, you chat here│ │       │  │ gemini -p … (headless wakes)  │ │
-   │  └───────────────────────────────┘ │       │  └───────────────────────────────┘ │
-   │  worktree: proj-orch               │       │  worktrees: proj-claude-2, …       │
-   └────────────────────────────────────┘       └────────────────────────────────────┘
-                 \__________________ GitHub / git origin ___________________/
-```
+### A sample setup
 
-In the diagram, `proj` stands for your repository's folder name, so `proj-orch` is the
-orchestrator's worktree. `claude -p` and `gemini -p` are those CLIs' headless mode. "HTTPS
-poll" means each daemon asks the server for news every few seconds.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="images/architecture-light.svg">
+  <img alt="A sample Hive setup in layers. You: a terminal chat with the orchestrator, hive commands and the web dashboard, which reach the hive-server over HTTPS with the admin token. Shared state: the hive-server and the git origin. One daemon per machine exchanges events and heartbeats with the server; on the two worker machines it also wakes agents and pushes their work to the git origin. Agent CLIs, one worktree each: the orchestrator on your computer, claude-2 (programmer) and codex-1 (tester) on worker machine A, gemini-1 (reviewer) on worker machine B." src="images/architecture-light.svg" width="100%">
+</picture>
+
+This is one possible fleet: three computers and four agents. Any split works, including
+everything on one computer ([Setting up machines](MACHINES.md#a-typical-layout)). How to
+read it:
+
+- **Rows are layers**, one kind of object per row, named on the left:
+  1. **You:** the terminal where you chat with the orchestrator, the `hive` commands, and
+     the web dashboard. The commands and the dashboard talk to the server directly, using
+     your admin token.
+  2. **Shared state:** the hive-server, which every machine talks to, and the git origin,
+     which every worker pushes to.
+  3. **One daemon per machine:** the program `hive up` runs. It exchanges events and
+     heartbeats with the server every few seconds. On worker machines it also starts
+     (*wakes*) the agents and does their git work: commit, rebase, push.
+  4. **Agent CLIs, one worktree each:** the orchestrator runs interactively in your
+     terminal; the workers run headless. Each one works in its own
+     [worktree](GLOSSARY.md#worktree), on its own branch (`hive/claude-2`, …).
+- **Large boxes are computers.** Worker machine A shows that one computer can run several
+  agents, each with its own account and worktree.
+- **Arrows show who talks to whom:** grey for your connections, slate for connections to
+  the shared server and repository, amber for traffic inside a machine. An agent reaches its
+  daemon through Hive's [MCP tools](GLOSSARY.md#mcp-mcp-server-mcp-tool) and
+  [hooks](GLOSSARY.md#hook); agents never talk to the server or to each other directly.
+
+The diagram is drawn by `scripts/render_diagram.py`; change it there and re-run the script
+to regenerate both versions.
 
 Hive has three kinds of parts:
 

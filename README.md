@@ -72,16 +72,11 @@ vendor's terms for your own situation, for example how many accounts one person 
 
 ## How it works
 
-```
- you ──chat──▶ orchestrator (interactive CLI)      workers (headless CLIs)
-                      │                                   │
-                      └──── daemon (hive up) ─── daemon ──┘    one per machine
-                                    │                │
-                                    ▼                ▼
-                         hive-server: tasks · messages · leases · decisions
-                                    │
-                               git origin (main)
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/architecture-light.svg">
+  <img alt="Hive in layers. You: a terminal chat with the orchestrator, hive commands and the web dashboard, which reach the hive-server over HTTPS with the admin token. Shared state: the hive-server (tasks, messages, leases, decisions, reports and live output; it assigns tasks, grants leases and enforces the fleet state) and the git origin (main and hive/agent branches). One daemon per machine, started by hive up, exchanges events and heartbeats with the server; on worker machines it also wakes agents, uploads live output, and commits, rebases and pushes their work to the git origin. Agent CLIs, one worktree each, reach their daemon through MCP tools and hooks: the orchestrator on your computer (Claude Code, interactive), claude-2 (programmer) and codex-1 (tester) on worker machine A, and gemini-1 (reviewer) on worker machine B." src="docs/images/architecture-light.svg" width="100%">
+</picture>
 
 - **The server** (`hive server`) is the single source of truth: agents, tasks, messages,
   leases, fleet state, decisions (questions for you), reports, live output, and the web

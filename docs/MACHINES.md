@@ -168,7 +168,8 @@ reports slots whose account has never been logged in.
 | Spare machine | `gemini-1` (reviewer, planner) | |
 
 Any split works, including everything on one computer. Machines can run Windows, macOS or
-Linux in any mix.
+Linux in any mix. The [sample setup diagram](ARCHITECTURE.md#a-sample-setup) shows a
+three-machine fleet like this one, with what runs on each computer and how they connect.
 
 ---
 
