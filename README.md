@@ -190,3 +190,13 @@ Hive is under active development. The server, daemon, leases, git integration an
 are covered by automated unit and end-to-end tests, and Codex support is tested end to end against the
 real CLI. Some integration points haven't yet been exercised with live, logged-in accounts;
 [Known limitations](docs/LIMITATIONS.md) lists them.
+
+---
+
+## Contributing
+
+Contributions are welcome. If something doesn't work as described, or you have an idea,
+please [open an issue](https://github.com/themostvexingparse/hive/issues): include what you
+ran, what you expected, and what happened instead (`hive overview` output helps). Pull
+requests are welcome too; [Development](docs/DEVELOPMENT.md) explains how to run the tests
+and where things live in the source.
