@@ -30,24 +30,31 @@ The CLI runs `hive mcp` as a local MCP server. Each tool call goes to the comput
 the Hive server, or does the git work itself for `lease_release`. Tools are listed below with
 their main inputs in brackets.
 
+Everything a tool returns stays in the agent's conversation and is re-read with every later
+request, so results are kept small: compact JSON, summaries in lists, and a short
+acknowledgement (id, state, assignee) from tools that change a task. The full text is one call
+away (`task_get`, `report_get`, `status_read(full=true)`).
+
 Every agent has the **base set**:
 
 | Tool | Purpose |
 |---|---|
-| `whoami` | the agent's name, [roles](ROLES.md), which tools it has, what it may edit, and the [fleet state](LIFECYCLE.md) (the phase the team is in) |
+| `whoami` | the agent's name, [roles](ROLES.md), what it may edit, and the [fleet state](LIFECYCLE.md) (the phase the team is in) |
 | `roster` | all agents: roles, whether online or busy, whether their account has used up its allowance (quota) |
 | `post(body, channel, priority, thread_id)` / `dm(to, body, priority)` | send a message to a channel / to one agent ([Messages](COORDINATION.md#messages-and-priorities)); `thread_id` replies to an earlier message |
 | `inbox(limit, include_other_channels)` / `ack(ids)` | read messages / confirm urgent ones have been handled |
-| `task_list`, `task_get`, `task_claim`, `task_update`, `task_handoff`, `task_complete` | work on [tasks](COORDINATION.md#tasks): list, read one, take one, record progress, hand one to another agent, finish one |
+| `task_list(state, assignee, mine, since_id, limit)` | task summaries (id, state, kind, priority, assignee, title, dependencies, path hints), unfinished tasks only unless `state` says otherwise (`"all"`, `"done"`, …); at most `limit` (50), continuing with `since_id` |
+| `task_get`, `task_claim`, `task_update`, `task_handoff`, `task_complete` | work on [tasks](COORDINATION.md#tasks): read one in full, take one, record progress, hand one to another agent, finish one |
 | `report_stuck(details, task_id)` | ask for help; may lead to the whole fleet pausing until you answer ([Stuck agents and freezing](LIFECYCLE.md#stuck-agents-and-freezing)) |
-| `report_submit`, `report_list`, `report_get` | file and read [reports](COORDINATION.md#reports) |
+| `report_submit`, `report_list`, `report_get` | file [reports](COORDINATION.md#reports), list them (summaries), read one in full |
 | `request_approval(command, reason, shell, task_id, wait_seconds)`, `run_approved(id)`, `approval_list` | ask to run a dangerous shell command, run it once approved, list requests ([Shell-command permissions](PERMISSIONS.md)) |
-| `lease_status`, `repo_state`, `fleet_state`, `status_read` | look around: current file locks, the repository's state, the fleet's state, the orchestrator's status updates |
+| `lease_status`, `repo_state`, `fleet_state`, `status_read(limit, full)` | look around: current file locks, the repository's state, the fleet's state, the orchestrator's latest status updates (summaries unless `full`) |
 
 **Roles that write code** (`programmer`, `tester`; a role you define gets them by listing
 them in its `tools`) add the
 [lease](INTEGRATION.md#leases) tools: `lease_acquire` (lock files before editing),
 `lease_extend` (keep them longer) and `lease_release` (merge the work into `main` and unlock;
+given a `result` and a report, it also completes the task and files the report:
 [What `lease_release` does](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)).
 
 **The orchestrator** adds:
@@ -87,7 +94,10 @@ events, and unread messages.
 
 | Delivered at once | Collected for `debounce_seconds` |
 |---|---|
-| your messages, answered decisions, new reports, finished/failed/blocked tasks, stuck agents, review verdicts, agents out of quota or offline, expired leases, merge conflicts, approval requests | task progress, ordinary messages |
+| your messages, answered decisions, failed or blocked tasks, stuck agents, agents out of quota or offline, expired leases, merge conflicts, approval requests | task progress, ordinary messages, completed tasks, new reports, review verdicts |
+
+Routine news waits for the window so it arrives in one batch: every batch the orchestrator
+handles re-reads its whole conversation.
 
 ---
 
@@ -98,12 +108,12 @@ the moments at which it runs hooks (*events*); Gemini uses different names for t
 moments, and Codex uses Claude Code's names.
 
 | Claude / Codex event | Gemini event | When | What Hive does |
-|---|---|---|
+|---|---|---|---|
 | PreToolUse | BeforeTool | before every tool call | Refuses edits to files the agent hasn't leased (and that its role's `write_globs` don't cover), and edits in other agents' [worktrees](GLOSSARY.md#worktree). For Codex's file-editing tool, `apply_patch`, every file the edit adds, changes, deletes or moves is checked. While the fleet state doesn't allow the agent's roles to work, refuses everything except reading and Hive's own tools. Also applies the [shell-command tiers](PERMISSIONS.md). |
 | PostToolUse | AfterTool | after every tool call | Adds new `high` and `interrupt` messages to what the agent reads next, in the middle of its turn. |
-| UserPromptSubmit | BeforeAgent | when a turn starts, or when you send a message in an interactive session | Adds unread messages and, in sessions you're typing in, fleet events since the last check. |
-| Stop | AfterAgent | when the agent tries to end its turn | Sends the agent back (at most 3 times per turn) if it has unhandled urgent messages, uncommitted changes in files it has leased, or, for the orchestrator in your terminal, urgent events waiting. |
-| SessionStart | SessionStart | when a session starts | Tells the agent who it is, its roles, the fleet state, and which skill to follow. |
+| UserPromptSubmit | BeforeAgent | when a turn starts, or when you send a message in an interactive session | Adds unread messages and, in sessions you're typing in, a one-line reminder of who the agent is and fleet events since the last check. Adds nothing else in headless turns, whose wake prompt already says it. |
+| Stop | AfterAgent | when the agent tries to end its turn | Sends the agent back (at most 3 times per turn) if it has unhandled urgent messages, or, for the orchestrator in your terminal, urgent events waiting. Also if it has uncommitted changes in files it has leased and hasn't recorded a progress note this turn (`task_update` with a note, a handoff, or a stuck report): its next turn may start in a fresh session that only has the task and its notes. |
+| SessionStart | SessionStart | when a session starts | In sessions you're typing in: tells the agent who it is, its roles, the fleet state, and which skill to follow, plus its role prompt, except when an existing session is resumed (it already has them). Headless turns get all of this in their wake prompt instead. |
 
 When a hook denies something, the denial includes the reason and what to do instead (for
 example, "call `lease_acquire` first"). That is what you see in the live output as a failed

@@ -30,11 +30,12 @@ terminal **is** the chat
 `await_events` is how the orchestrator waits without using any of its account's model usage.
 It waits inside the [daemon](GLOSSARY.md#daemon) (the background program `hive up` runs) and
 returns as soon as something needs attention:
-- **urgent events** (your messages, finished or failed tasks, stuck agents, …) within about 3
-  seconds;
-- **routine events** (progress notes, ordinary messages) collected over a short window, 90 s
-  by default (`debounce_seconds` in [`hive.toml`](CONFIGURATION.md#hivetoml)), so they arrive
-  together.
+- **urgent events** (your messages, failed or blocked tasks, stuck agents, approval
+  requests, …) within about 3 seconds;
+- **routine events** (progress notes, ordinary messages, completed tasks, new reports)
+  collected over a short window, 90 s by default (`debounce_seconds` in
+  [`hive.toml`](CONFIGURATION.md#hivetoml)), so they arrive together. Every batch it handles
+  re-reads its whole conversation, so fewer, fuller batches cost less.
 
 It then returns a summary (*digest*) of what happened. See
 [MCP tools](AGENT_INTERFACE.md#await_events) for details.
@@ -84,15 +85,18 @@ orchestrator with your answer. Use it to explain a rejection or to add constrain
 
 ## How it keeps you informed
 
-- After handling a batch of events it **publishes a status update**: a one-line summary of
-  what changed since the last update, details in the body, and a level: `fyi` (for your
-  information), `decision-needed` (you need to answer a decision) or `alert` (something
-  went wrong).
+- When something changed that you'd want to know (a task or milestone finished, a blocker, a
+  decision raised, a problem), it **publishes a status update**: a one-line summary of what
+  changed since the last update, details in the body, and a level: `fyi` (for your
+  information), `decision-needed` (you need to answer a decision) or `alert` (something went
+  wrong). Routine batches pass without one.
 - Status updates appear in `hive status`, `hive status -v` (with bodies), and the dashboard's
   *Updates* panel.
 - It keeps notes in `.hive/orchestrator/state.md` in its own working folder of the
   repository (its [worktree](GLOSSARY.md#worktree)); git ignores the file, so it's never
-  committed. That lets it pick up where it left off after a restart or a fresh conversation.
+  committed. That lets it pick up where it left off after a restart or a fresh conversation:
+  `hive up` starts it in a fresh conversation after 12 hours idle (configurable), rather than
+  resuming a long, stale one.
 - It learns what workers did from their **reports**, not from their raw output (everything
   they printed), and checks their claims against the repository
   ([Reports](COORDINATION.md#reports)).

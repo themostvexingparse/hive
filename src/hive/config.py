@@ -16,6 +16,9 @@ DEFAULT_REPO_CONFIG = {
     "repo": {"main": "main"},
     "integration": {"review": "off", "checks": [], "shell": "native"},
     "orchestrator": {"standby": [], "debounce_seconds": 90, "heartbeat_hours": 4},
+    # When agents start a fresh CLI session instead of resuming (docs/RUNNING.md).
+    "sessions": {"per_task": True, "max_context_tokens": 120_000, "max_wakes": 40,
+                 "orchestrator_fresh_after_hours": 12},
     "roles": {},
     "permissions": {"preset": "standard", "allow": [], "approval": [], "deny": []},
 }

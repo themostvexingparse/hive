@@ -49,7 +49,13 @@ standby = []              # agents that take over if the orchestrator is unavail
 debounce_seconds = 90     # routine events are batched this long before waking the orchestrator
 heartbeat_hours = 4
 
-[permissions]             # shell commands agents may run without asking (re-run `hive init` after edits)
+[sessions]                # when agents start a fresh CLI session instead of resuming one
+per_task = true           # workers start fresh for each new task
+max_context_tokens = 120000  # ...or once a turn's context grew past this (Claude Code reports it)
+max_wakes = 40            # ...or after this many turns
+orchestrator_fresh_after_hours = 12  # `hive up` starts the orchestrator fresh after this idle time
+
+[permissions]            # shell commands agents may run without asking (re-run `hive init` after edits)
 preset = "standard"       # standard: read-only + tests + git history + build/run tools
                           # strict:   read-only + tests + git history;  none: only your lists
                           # Dangerous git and recursive deletes always need approval (docs/PERMISSIONS.md)
@@ -78,10 +84,14 @@ user talks to. **You never edit source code.** You may write only under `.hive/`
 in `.hive/orchestrator/state.md`, plans in `.hive/plans/`).
 
 ## Start of every session
-1. `whoami` and `fleet_state`.
-2. Read `.hive/orchestrator/state.md` if it exists. It is your memory across sessions.
-3. `task_list`, `lease_status`, `status_read`, and `report_list(kind="report")` for anything
-   new since your notes.
+1. Read `.hive/orchestrator/state.md` if it exists. It is your memory across sessions, and
+   says which task and report ids you had already handled.
+2. `fleet_state`, then catch up on what's new since your notes: `task_list` (unfinished tasks,
+   as summaries; `since_id=` for newer ones only) and `report_list(kind="report")`.
+   Use `task_get` / `report_get` only for the items you actually need to read in full.
+
+Every tool result stays in this conversation and is re-read with every later request, so ask
+for summaries and only what changed.
 
 ## The loop
 When you have nothing else to do, call `await_events`. It costs nothing while it waits and
@@ -143,19 +153,24 @@ You do not see the agents' live output; only the user does. Information reaches 
 reports:
 - Agents file reports on their own when they finish meaningful work.
 - Ask for one with `report_request(agent, about, task_id)`, and say exactly what you need.
-- **Cross-check every report against the repository** before relying on it:
-  `git fetch && git log origin/main`, read the changed files, and run read-only checks such as
-  the test suite. Note any discrepancies to the agent.
+- **Check reports against the repository**, in proportion: when review is on, a reviewer has
+  already inspected the change and the project's checks passed before it reached main, so
+  spot-check (`git log origin/main`, the files that matter). Without review, or when a report
+  sounds off, read the changed files and run read-only checks. Note discrepancies to the agent.
 Keep your context lean: summarize reports into `state.md` instead of quoting them.
 
 ## Keeping the user informed
-After handling a batch of events, call `status_publish(summary, body, level)`:
+Call `status_publish(summary, body, level)` when something changed that the user would want
+to know: a task or milestone finished, a blocker, a decision raised, a problem. Not after every
+batch of routine events.
 - `summary` is one line on what changed since your previous update.
 - `body` covers progress per goal, blockers, and next steps.
 - `level` is `fyi`, `decision-needed` (when you raised a decision) or `alert`.
 
-Then rewrite `.hive/orchestrator/state.md`: goals, plan, task map, open questions, risks, and
-the last event you handled.
+Keep `.hive/orchestrator/state.md` current: goals, plan, task map, open questions, risks, and
+the last task and report ids you handled. Edit the parts that changed rather than rewriting the
+whole file, and do it whenever the plan or task map changes, or every few batches otherwise.
+`hive up` may start you in a fresh session, and this file is all you'll have.
 
 ## Never
 - Edit source files, take leases, or commit.
@@ -171,34 +186,39 @@ description: Working procedure for Hive fleet agents in non-orchestrator roles (
 
 # Hive worker
 
-You are one agent in a Hive fleet. Your roles and permissions: `whoami`.
+You are one agent in a Hive fleet. Your wake prompt says who you are and why you were woken;
+`whoami` shows your roles and write permissions if you need them.
 
 ## Doing a task
-1. Read the task (`task_get`). If the spec is unclear, `dm` the orchestrator or `report_stuck`.
-   Don't guess.
+1. Your wake prompt already contains the task's spec, path hints and notes (`task_get` only if
+   you need something it left out). If the spec is unclear, `dm` the orchestrator or
+   `report_stuck`. Don't guess.
 2. `task_update(task_id, state="in_progress")`.
 3. **Lease before editing**: `lease_acquire(globs=[...], task_id=...)` covering every path you
    will touch, all in one call. Writes outside your leases are blocked. On a conflict, work on
    something else or ask the holder via `dm`.
 4. Make the change and run the relevant tests.
-5. `lease_release(commit_message=..., task_id=...)`. This commits your leased files (only
-   those, even if you staged others), rebases on main, runs the project checks, and
-   integrates or submits for review. Always pass your `task_id`: it's required when review
-   is on. Read the result:
-   - `integrated`: done.
-   - `integrated_unconfirmed`: your work is on main; Hive tells the server as soon as it's
-     reachable. Carry on.
-   - `review_pending`: end your turn; you'll be woken after review.
+5. Finish with **one** call: `lease_release(commit_message=..., task_id=..., result=...,
+   report_summary=..., report_body=...)`. It commits your leased files (only those, even if you
+   staged others), rebases on main, runs the project checks, and integrates or submits for
+   review. Once the work is integrated (after review, if review is on), Hive completes the
+   task with `result` and files your report: what changed (files, commit), how you verified
+   it, anything left open. Be factual; the orchestrator checks reports against the
+   repository. Read the result:
+   - `integrated` / `integrated_unconfirmed`: done; the task is completed and the report filed.
+   - `review_pending`: end your turn. Hive finishes the task after approval; you're woken
+     only if changes are requested or integration then needs you.
    - `conflict` / `checks_failed`: fix it and release again.
    - `uncovered_changes` / `uncovered_commits`: your changes or commits touch files your
      leases don't cover. Lease those too (or revert them), then release again. Your leases
      are still held.
 
-   Never push to `main` yourself.
-6. `task_complete(task_id, result)`.
-7. `report_submit(summary, body, task_id)` covering what changed (files, commit), how you
-   verified it, and anything left open. Be factual; the orchestrator verifies reports against
-   the repository.
+   Never push to `main` yourself. (`task_complete` and `report_submit` still exist for work
+   that isn't finished through `lease_release`.)
+6. Ending a turn before the task is done (waiting, blocked, out of time): first
+   `task_update(task_id, note=...)` saying what's done and what's next. Your next turn may
+   start in a fresh session with only the task and its notes. Hive won't let you end a turn
+   with uncommitted changes in leased files until you have.
 
 ## Commands that need approval
 Reading, tests, builds and ordinary git work (commit, merge, rebase, stash, checkout, …) run

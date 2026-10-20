@@ -123,13 +123,22 @@ The task number is then required, and it must be the agent's own task.
 
 Calling `lease_release` with `abandon=true` frees the leases without integrating anything.
 
+### Finishing a task in one call
+
+`lease_release` can also take the task's `result` and the agent's report (`report_summary`,
+`report_body`). Once the work is integrated, Hive completes the task with that result and
+files the report on the agent's behalf. With review on, it keeps them until the reviewer
+approves, and finishes the task then. The agent needs no further calls and isn't woken again
+just to hear the news. The worker skill tells agents to finish this way: each extra call or
+turn would re-read the agent's whole conversation.
+
 ### What the agent gets back
 
 | Status | Meaning | What happens next |
 |---|---|---|
-| `integrated` | The work is on `main`. | The agent completes its task and files a report. |
+| `integrated` | The work is on `main`. | With a result and report given, the task is completed and the report filed (the result lists what was done); otherwise the agent does both itself. |
 | `integrated_unconfirmed` | Pushed to `main`, server not yet told. | The daemon keeps confirming in the background. |
-| `review_pending` | Review is on; the branch is pushed and the task is in review. | The reviewer is woken ([Reviews](#reviews)). |
+| `review_pending` | Review is on; the branch is pushed and the task is in review. | The reviewer is woken ([Reviews](#reviews)); the agent ends its turn. |
 | `nothing` | No changes to integrate. | – |
 | `conflict` | The rebase onto `origin/main` failed. | The agent merges and releases again; the orchestrator is notified. |
 | `checks_failed` | One of the checks failed. | The agent fixes it, using the output, and releases again. |
@@ -186,7 +195,9 @@ A review means another agent must approve a programmer's work before it reaches 
    `git diff origin/main...<commit>`. It gives its verdict (approve or not, with notes) with
    the `review_verdict` tool. Nobody can review their own task.
 3. **Approve:** the programmer's daemon re-runs the release automatically (rebase, checks,
-   integrate) and the task becomes **done**.
+   integrate). If the programmer left its result and report with `lease_release`, Hive
+   completes the task and files the report, and the programmer isn't woken; otherwise it's
+   woken to do both.
    - **If the programmer is in the middle of a run,** the daemon waits for it to finish
      first, so half-finished edits are never committed.
    - **The approval is single-use:** it only counts for that review.
