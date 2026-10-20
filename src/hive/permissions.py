@@ -238,8 +238,11 @@ def _nested(words: list[str]) -> str | None:
     `pwsh -EncodedCommand <base64>`; None for anything else."""
     prog, args = words[0], words[1:]
     lowered = [a.lower() for a in args]
-    if prog in _POSIX_SHELLS and "-c" in lowered:
-        return " ".join(_requote(args[lowered.index("-c") + 1:]))
+    if prog in _POSIX_SHELLS:
+        # `-c` may be bundled with other short options: `bash -lc …` (how Codex runs commands).
+        for i, a in enumerate(lowered):
+            if re.fullmatch(r"-[a-z]*c[a-z]*", a):
+                return " ".join(_requote(args[i + 1:]))
     if prog == "cmd":
         for i, a in enumerate(lowered):
             if a in ("/c", "/k"):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import threading
 import time
 import uuid
@@ -634,21 +635,28 @@ class Daemon:
                 return {}
             return {"deny": f"Hive fleet is {state}; your roles ({', '.join(rt.roles)}) must "
                             "not act now. End your turn; you will be woken when it is your turn."}
+        ti = data.get("tool_input") or {}
         if tool in SHELL_TOOLS:
             # Codex reports every shell as "Bash" but runs the user's shell (PowerShell on
             # Windows).
             shell = default_shell() if rt.cfg.vendor == "codex" else tool_shell(tool)
-            verdict = self._check_shell(rt, str((data.get("tool_input") or {}).get("command", "")),
-                                        shell)
+            verdict = self._check_shell(rt, command_text(ti.get("command", "")), shell)
             if verdict:
                 return verdict
-        ti = data.get("tool_input") or {}
         if tool in CLAUDE_WRITE_TOOLS or tool in GEMINI_WRITE_TOOLS:
             raw = ti.get("file_path") or ti.get("notebook_path") or ti.get("path") or ""
             return self._check_write(rt, raw) if raw else {}
         if tool in CODEX_PATCH_TOOLS:
             patch = ti.get("command") or ti.get("input") or ti.get("patch") or ""
-            for raw in patch_paths(patch if isinstance(patch, str) else str(patch)):
+            if isinstance(patch, list):  # argv form: ["apply_patch", "<patch>"]
+                patch = "\n".join(map(str, patch))
+            paths = patch_paths(str(patch))
+            if not paths:
+                # Fail closed: a patch Hive can't read would otherwise skip lease checks.
+                return {"deny": "Hive could not find the files this patch changes, so it "
+                                "can't check your leases. Use the standard apply_patch "
+                                "format (*** Add File: / *** Update File: / *** Delete File:)."}
+            for raw in paths:
                 verdict = self._check_write(rt, raw)
                 if verdict:
                     return verdict
@@ -664,8 +672,9 @@ class Daemon:
                             "agent's worktree or the user's own clone). Only edit files "
                             "in your own worktree."}
         if prompts.is_protected(rel):
-            return {"deny": f"{rel} is one of the project's prompt files, which only the "
-                            "user maintains. Agents may not edit .hive/prompts/."}
+            return {"deny": f"{rel} is one of the project's Hive files, which only the "
+                            "user maintains. Agents may not edit .hive/prompts/ or "
+                            ".hive/agent/."}
         allowed = list(rt.me.get("write_globs", []))
         if rt.me.get("can_code"):
             allowed += [g for l in rt.leases for g in l["globs"]]
@@ -980,13 +989,20 @@ def is_hive_tool(tool: str) -> bool:
     return name in HIVE_TOOL_NAMES and "hive" in head
 
 
-_PATCH_FILE = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$",
-                         re.M)
+_PATCH_FILE = re.compile(
+    r"^\s*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 
 
 def patch_paths(patch: str) -> list[str]:
     """Every file a Codex apply_patch touches, including both ends of a move."""
     return list(dict.fromkeys(_PATCH_FILE.findall(patch)))
+
+
+def command_text(command) -> str:
+    """A hook's shell command as one string; Codex may send it as an argv list."""
+    if isinstance(command, (list, tuple)):
+        return shlex.join(str(a) for a in command)
+    return str(command)
 
 
 def wake_on_default(rt: SlotRuntime) -> set[str]:

@@ -219,8 +219,9 @@ def _integrate(wt, client, slot, leases, task_id, allowed, checks, main, retries
         protected = [p for p in paths if prompts.is_protected(p)]
         if protected:
             return ReleaseResult("uncovered_commits",
-                                 f"Your branch changes {protected[:20]}, the project's prompt "
-                                 "files, which only the user may change. Revert those changes "
+                                 f"Your branch changes {protected[:20]}, the project's Hive "
+                                 "files (.hive/prompts/, .hive/agent/), which only the user "
+                                 "may change. Revert those changes "
                                  "(e.g. git checkout origin/main -- <path>, then commit), then "
                                  "call lease_release again. Your leases are still held.")
         uncovered = [p for p in paths if not G.covered(p, allowed)]

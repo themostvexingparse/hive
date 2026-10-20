@@ -26,7 +26,9 @@ from . import globs as G
 
 PROMPTS_DIR = Path(".hive") / "prompts"
 SKILL_FILES = {"hive-orchestrator": "orchestrator.md", "hive-worker": "worker.md"}
-PROTECTED_GLOBS = [".hive/prompts/**"]
+# The user's prompt files, and the generated CLI bundles: an agent editing its own hooks,
+# rules or MCP command there would change what Hive enforces on its next session.
+PROTECTED_GLOBS = [".hive/prompts/**", ".hive/agent/**"]
 MAX_BYTES = 32 * 1024          # what is sent to the agent, after comments are removed
 MAX_FILE_BYTES = 1024 * 1024   # the file itself, comments included
 _COMMENT = re.compile(r"<!--.*?-->", re.S)

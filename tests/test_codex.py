@@ -235,3 +235,32 @@ def test_codex_patches_need_leases_for_every_file(tmp_path):
     added = f"*** Begin Patch\n*** Add File: {tmp_path / 'src' / 'new.py'}\n+x\n*** End Patch\n"
     assert pre("apply_patch", command=added) == {}  # absolute paths in the worktree
     assert "not allowed" in pre("Bash", command="git push origin main")["deny"]
+    # Fail closed: a patch whose files Hive can't find is refused, not waved through.
+    assert "could not find the files" in pre("apply_patch", command="garbage")["deny"]
+    assert "could not find the files" in pre("apply_patch")["deny"]
+    assert pre("apply_patch", command=["apply_patch", patch]) == {}  # argv form
+    assert "No lease covers docs/a.py" in pre("apply_patch", command=["apply_patch", moved])["deny"]
+    indented = "*** Begin Patch\n  *** Add File: docs/b.py\n+x\n*** End Patch\n"
+    assert "No lease covers docs/b.py" in pre("apply_patch", command=indented)["deny"]
+    # The generated bundles are protected like the prompt files, lease or not.
+    rt.leases = [{"globs": ["**"]}]
+    hooks = "*** Begin Patch\n*** Update File: .hive/agent/codex/hive.config.toml\n@@\n*** End Patch"
+    assert "Agents may not edit" in pre("apply_patch", command=hooks)["deny"]
+
+
+def test_codex_shell_commands_are_checked_in_every_form(tmp_path):
+    d = core.Daemon(MachineConfig(server_url="http://127.0.0.1:9", slots=[codex_slot(tmp_path)]),
+                    Store(tmp_path / "state.db"), echo=False)
+    rt = d.slots["x1"]
+    rt.me = {"roles": ["programmer"], "active": True, "can_code": True, "write_globs": []}
+
+    def pre(command):
+        return d._pre_tool(rt, "running", {"tool_name": "Bash", "tool_input": {"command": command}})
+
+    # Codex runs commands as `bash -lc <script>`, possibly sent to the hook as an argv list.
+    for cmd in (["bash", "-lc", "git push origin main"], "bash -lc 'git push origin main'",
+                "sh -ec 'git push origin main'"):
+        assert "not allowed" in pre(cmd)["deny"], cmd
+    assert "never allowed" in pre(["bash", "-lc", "hive admin token"])["deny"]
+    assert "request_approval" in pre(["zsh", "-lc", "git reset --hard"])["deny"]
+    assert pre(["bash", "-lc", "git status"]) == {}

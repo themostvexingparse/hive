@@ -383,7 +383,7 @@ What `hive join` does:
 | `--worktree PATH` | Explicit worktree path (use with or instead of `--repo`). |
 | `--config-dir PATH` | The account's CLI config folder (default `~/.hive/accounts/<name>`). |
 | `--permission-mode MODE` | Claude: `acceptEdits` (default for workers), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default for workers), `read-only`, `danger-full-access`, `yolo`. See §23. |
-| `--model MODEL` | The model the slot's CLI uses, e.g. `--model gpt-6-astra` for a Codex slot. Default: the account's default model. |
+| `--model MODEL` | The model the slot's CLI uses, e.g. `--model <model-name>`. Default: the account's default model. |
 | `--server URL` | Server URL, saved for the whole machine. |
 | `--hive-cmd CMD` | How the git hook calls `hive` (default `hive`). |
 
@@ -1153,8 +1153,10 @@ the authority.
   Commands in the *allowed* tier run outside the sandbox, as with the other CLIs. Give a slot
   `--permission-mode danger-full-access` (or `yolo`) if its work needs more.
 - Codex hooks can't ask for confirmation, so for the interactive orchestrator a dangerous
-  command that only the hook recognises (a flag after a path, for example) is refused with a
-  note to ask you; the common prefix forms prompt you through the `.rules` file.
+  command in the *approval* tier is refused with a note to ask you to run it yourself. The
+  `.rules` file's prompts only apply when the Hive daemon can't be reached.
+- `.hive/agent/` (like `.hive/prompts/`) is protected: agents can't edit or commit it, since
+  Codex loads the hooks and rules there without its own hook-trust check.
 
 **How approval works for workers:** **the orchestrator approves, not you.**
 1. The worker's CLI blocks the command, and the hook tells it to call
@@ -1524,7 +1526,7 @@ worktree = "/path/to/proj-claude-2"
 config_dir = "/home/you/.hive/accounts/claude-2"
 permission_mode = ""         # empty = default (claude: acceptEdits, gemini: auto_edit,
                              # codex: workspace-write)
-model = ""                   # empty = the account's default model, e.g. "gpt-6-astra"
+model = ""                   # empty = the account's default model
 command = []                 # optional custom headless command, see below
 ```
 

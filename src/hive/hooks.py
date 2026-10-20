@@ -28,7 +28,8 @@ WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "repl
 
 def format_output(vendor: str, raw_event: str, verdict: dict) -> dict | None:
     if "ask" in verdict and vendor == "codex":
-        # Codex hooks can't ask; its execpolicy rules prompt for the common forms instead.
+        # Codex hooks can't ask, so Hive refuses. The orchestrator's `prompt` rules only take
+        # effect if the hook doesn't answer (daemon unreachable: shell checks fail open).
         verdict = {"deny": verdict["ask"] + " (Hive can't ask for confirmation in Codex, so it "
                            "blocked the command: ask the user to run it, or use a narrower "
                            "command.)"}

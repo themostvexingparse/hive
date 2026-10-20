@@ -706,7 +706,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--permission-mode", help="claude: acceptEdits|bypassPermissions|…; "
                                              "gemini: auto_edit|yolo; codex: workspace-write|"
                                              "read-only|danger-full-access|yolo")
-    s.add_argument("--model", help="model for this slot's CLI, e.g. gpt-6-astra (default: the "
+    s.add_argument("--model", help="model for this slot's CLI (default: the "
                                    "account's default model)")
     s.add_argument("--hive-cmd", default="hive")
     s.set_defaults(fn=cmd_join)
