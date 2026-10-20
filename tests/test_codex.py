@@ -30,6 +30,7 @@ def test_init_writes_codex_profile_rules_and_skills(tmp_path):
     profile = tomllib.loads((codex / "hive.config.toml").read_text())
     mcp = profile["mcp_servers"]["hive"]
     assert mcp["command"] == "hive" and mcp["args"] == ["mcp"]
+    assert mcp["required"] is True
     assert set(mcp["env_vars"]) == {"HIVE_SLOT", "HIVE_DAEMON_URL", "HIVE_LOCAL_SECRET",
                                     "HIVE_HOME"}
     assert mcp["default_tools_approval_mode"] == "approve" and mcp["tool_timeout_sec"] >= 1800

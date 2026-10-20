@@ -520,6 +520,8 @@ A slot's `--model` is passed as `--model` (Claude) or `-m` (Gemini, Codex).
 
 The slot's own `config.toml` and login are left alone. If the repository was initialised by
 an older Hive and has no `.hive/agent/codex/` yet, the files are generated on the fly.
+The Hive MCP server is required: Codex waits for it before the first turn and fails startup
+if it cannot initialize, so an agent cannot begin work before its Hive tools are ready.
 
 Codex asks you to review new hooks before they run. Hive generates its hooks itself, and the
 slot's private `CODEX_HOME` holds no others, so it launches Codex with

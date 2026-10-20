@@ -5,8 +5,10 @@ when `codex` is not installed."""
 import shutil
 import sys
 import threading
+import tomllib
 
 import pytest
+import tomli_w
 from werkzeug.serving import make_server
 
 from fake_responses import FakeResponses, mcp_call, message, patch, tool_outputs
@@ -26,7 +28,9 @@ pytestmark = pytest.mark.skipif(not shutil.which("codex") or not shutil.which("h
 HELLO = "*** Begin Patch\n*** Add File: src/hello.py\n+print('hello')\n*** End Patch\n"
 
 
-def test_codex_programmer_leases_integrates_and_streams(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mcp_startup_delay", [0, 3], ids=["normal", "slow-mcp"])
+def test_codex_programmer_leases_integrates_and_streams(tmp_path, monkeypatch,
+                                                       mcp_startup_delay):
     monkeypatch.setenv("HIVE_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("FAKE_AGENT_LOG", str(tmp_path / "agent.log"))
     monkeypatch.setattr(core, "COALESCE_SECONDS", 0)
@@ -51,6 +55,20 @@ def test_codex_programmer_leases_integrates_and_streams(tmp_path, monkeypatch):
     # Codex runs hooks through the user's shell, whose startup files may put another `hive`
     # first on PATH; pin the one under test.
     init_repo(clone, "http://unused", hive_cmd=shutil.which("hive"))
+    if mcp_startup_delay:
+        # A fast model response must not race MCP initialization. Delay only the MCP
+        # process; hooks still run immediately, as they would with a cold MCP startup.
+        profile_path = clone / ".hive" / "agent" / "codex" / "hive.config.toml"
+        profile = tomllib.loads(profile_path.read_text())
+        mcp = profile["mcp_servers"]["hive"]
+        mcp["args"] = [
+            "-c", "import subprocess, sys, time; "
+                  f"time.sleep({mcp_startup_delay}); "
+                  "sys.exit(subprocess.call(sys.argv[1:]))",
+            mcp["command"], *mcp["args"],
+        ]
+        mcp["command"] = sys.executable
+        profile_path.write_text(tomli_w.dumps(profile))
     git(clone, "add", "-A")
     git(clone, "commit", "-m", "init")
     git(clone, "push", "origin", "main")
