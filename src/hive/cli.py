@@ -14,7 +14,7 @@ import tomllib
 from pathlib import Path
 
 from . import __version__, ui
-from .config import (AdminConfig, Slot, find_repo_root, hive_home, load_admin_config,
+from .config import (VENDORS, AdminConfig, Slot, find_repo_root, hive_home, load_admin_config,
                      load_machine_config, load_repo_config, machine_config_path,
                      save_admin_config, save_machine_config)
 from .daemon.client import HiveError, ServerClient
@@ -249,6 +249,10 @@ def cmd_join(a):
     me = call(c.get, "/agents/me")
     if me["name"] != a.name:
         die(f"token belongs to {me['name']!r}, not {a.name!r}")
+    if a.vendor == "codex" and a.permission_mode:
+        from .daemon.wake import CODEX_MODES
+        if a.permission_mode not in CODEX_MODES:
+            die(f"codex --permission-mode must be one of {', '.join(CODEX_MODES)}")
     if a.worktree:
         wt = Path(a.worktree).resolve()
     elif a.repo:
@@ -270,13 +274,16 @@ def cmd_join(a):
     Path(config_dir).mkdir(parents=True, exist_ok=True)
     cfg.slots = [s for s in cfg.slots if s.name != a.name] + [Slot(
         name=a.name, vendor=a.vendor, token=a.token, worktree=str(wt), config_dir=config_dir,
-        permission_mode=a.permission_mode or "")]
+        permission_mode=a.permission_mode or "", model=a.model or "")]
     save_machine_config(cfg)
-    var = "CLAUDE_CONFIG_DIR" if a.vendor == "claude" else "GEMINI_CLI_HOME"
+    var = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}.get(a.vendor, "GEMINI_CLI_HOME")
     ui.ok(f"Slot {ui.agent(a.name)} ready.")
-    ui.kv([("worktree", ui.path(wt)), ("account", ui.path(config_dir))])
+    ui.kv([("worktree", ui.path(wt)), ("account", ui.path(config_dir))]
+          + ([("model", a.model)] if a.model else []))
     ui.section("Log this slot's account in once (interactive)")
-    ui.out(login_instructions(var, config_dir, str(wt), a.vendor))
+    # Codex has a login command; `--device-auth` also works over SSH, without a local browser.
+    ui.out(login_instructions(var, config_dir, str(wt),
+                              "codex login" if a.vendor == "codex" else a.vendor))
     ui.out(f"  {ui.dim('or, while `hive up` runs:')}  {ui.cmd(f'hive chat {a.name}')}")
     ui.section("Then start the machine")
     ui.out("  " + ui.cmd("hive up"))
@@ -302,20 +309,28 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
     store = Store(hive_home() / "state.db")
     session = None if fresh else store.get(slot.name, "session")
     resume = bool(session)
-    session = session or str(uuid.uuid4())
-    store.put(slot.name, "session", session)
+    if slot.vendor != "codex":  # Codex picks its own session id; it is read back afterwards
+        session = session or str(uuid.uuid4())
+        store.put(slot.name, "session", session)
     env = wake.slot_env(slot, cfg.local_url, cfg.local_secret)
-    err = wake.ensure_gemini_extension(slot, env)
+    role = "orchestrator" if orchestrator else "worker"
+    err = wake.prepare_vendor(slot, env, role)
     if err:
         ui.warn(f"{err}. Hive tools will be missing in this session.")
     if initial is None and orchestrator:
         initial = wake.ORCH_RESUME_PROMPT if resume else wake.ORCH_FIRST_PROMPT
-    cmd = wake.build_interactive_command(slot, session, resume, initial,
-                                         "orchestrator" if orchestrator else "worker")
+    cmd = wake.build_interactive_command(slot, session or "", resume, initial, role)
+    started = time.time()
     p = subprocess.run(wake.resolve(cmd), cwd=slot.worktree, env=env)
     if p.returncode != 0 and resume:
         # The stored session may be gone (e.g. different machine); start a fresh one next time.
         store.put(slot.name, "session", None)
+    if slot.vendor == "codex" and slot.config_dir:
+        found = wake.codex_latest_session(slot.config_dir, started)
+        if found:
+            store.put(slot.name, "session", found)
+        elif not resume:
+            store.put(slot.name, "session", None)
     return p.returncode
 
 
@@ -645,7 +660,7 @@ def main(argv: list[str] | None = None) -> None:
     s.set_defaults(fn=cmd_admin_login)
     s = adm.add_parser("enroll", help="create an agent and print its token")
     s.add_argument("name")
-    s.add_argument("--vendor", choices=["claude", "gemini"], required=True)
+    s.add_argument("--vendor", choices=VENDORS, required=True)
     s.add_argument("--roles", required=True, help="comma-separated, e.g. programmer,tester")
     s.set_defaults(fn=cmd_admin_enroll)
     s = adm.add_parser("roles", help="change an agent's roles")
@@ -673,7 +688,7 @@ def main(argv: list[str] | None = None) -> None:
 
     s = sub.add_parser("prompts", help="show what Hive tells agents with given roles")
     s.add_argument("--role", help="comma-separated roles (default: programmer)")
-    s.add_argument("--vendor", default="claude", choices=["claude", "gemini"],
+    s.add_argument("--vendor", default="claude", choices=VENDORS,
                    help="fills {{vendor}} in role files")
     s.add_argument("--slot", help="agent name used for {{slot}} (default: <slot>)")
     s.add_argument("--full", action="store_true", help="also print the built-in skill text")
@@ -683,13 +698,16 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("join", help="add an agent slot to this machine")
     s.add_argument("name")
     s.add_argument("--token", required=True)
-    s.add_argument("--vendor", choices=["claude", "gemini"], required=True)
+    s.add_argument("--vendor", choices=VENDORS, required=True)
     s.add_argument("--server")
     s.add_argument("--repo", help="local clone; the slot worktree is created next to it")
     s.add_argument("--worktree", help="explicit worktree path")
     s.add_argument("--config-dir", help="CLI account config dir (default ~/.hive/accounts/NAME)")
     s.add_argument("--permission-mode", help="claude: acceptEdits|bypassPermissions|…; "
-                                             "gemini: auto_edit|yolo")
+                                             "gemini: auto_edit|yolo; codex: workspace-write|"
+                                             "read-only|danger-full-access|yolo")
+    s.add_argument("--model", help="model for this slot's CLI (default: the "
+                                   "account's default model)")
     s.add_argument("--hive-cmd", default="hive")
     s.set_defaults(fn=cmd_join)
 
@@ -738,7 +756,9 @@ def main(argv: list[str] | None = None) -> None:
     s.set_defaults(fn=cmd_mcp)
     s = sub.add_parser("hook", help="(used by agent CLIs) hook bridge")
     s.add_argument("event")
-    s.add_argument("--vendor", choices=["claude", "gemini"])
+    # Free-form on purpose: a usage error exits with 2, which Claude Code and Codex treat as
+    # "block", so an unknown vendor (version skew) would stall the agent instead of failing open.
+    s.add_argument("--vendor", help=f"{', '.join(VENDORS)}; others get Claude Code's format")
     s.set_defaults(fn=cmd_hook)
 
     a = p.parse_args(argv)

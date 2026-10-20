@@ -1,7 +1,7 @@
 # Hive
 
 Hive turns several subscription-based coding agents into one coordinated team. Each agent is
-**Claude Code** or **Gemini CLI**, running as the vendor's official CLI on a computer you own
+**Claude Code**, **Gemini CLI** or **Codex**, running as the vendor's official CLI on a computer you own
 and logged into its own account. Together they share:
 
 - one git repository;
@@ -93,7 +93,7 @@ operating manual.
   - hooks (message delivery and write enforcement);
   - two skills: `hive-orchestrator` and `hive-worker`.
 
-  A `claude` or `gemini` you start yourself never sees any of this.
+  A `claude`, `gemini` or `codex` you start yourself never sees any of this.
 - **The orchestrator** runs as the **native interactive CLI** in your terminal. You talk to it
   like any session. When idle it waits inside the `await_events` tool, which uses no tokens,
   and returns the moment something needs its attention.
@@ -112,11 +112,12 @@ operating manual.
 | git | every agent machine | Each slot gets its own worktree. |
 | Claude Code CLI (`claude`) | machines hosting Claude slots | Each Claude slot logs into its own Claude account once. |
 | Gemini CLI (`gemini`) | machines hosting Gemini slots | Each Gemini slot logs into its own Google account once. |
+| Codex CLI (`codex`) | machines hosting Codex slots | Each Codex slot logs into its own ChatGPT account once (`codex login`). |
 | A git remote (`origin`) | the repository | GitHub or any remote all machines can push to. |
 | A reachable server URL | | `http://127.0.0.1:8765` for single-machine trials; a public HTTPS URL otherwise. |
 
 **One machine can host several slots.** Each slot has its own CLI config folder, so several
-Claude or Gemini accounts can run side by side on one computer. You don't need one computer
+Claude, Gemini or Codex accounts can run side by side on one computer. You don't need one computer
 per account.
 
 **Platforms.** Agent machines can run **Windows, macOS or Linux**, mixed freely in one fleet.
@@ -247,6 +248,7 @@ It creates or updates:
 | `hive.toml` | Fleet configuration: review policy, checks, standby orchestrator, shell-command permissions, roles (§20.1). Created only if missing. | yes |
 | `.hive/agent/claude/` | **Claude Code plugin**: `.claude-plugin/plugin.json`, `.mcp.json` (hive MCP server), `hooks/hooks.json`, `skills/hive-orchestrator/SKILL.md`, `skills/hive-worker/SKILL.md`, plus per-role permission files `settings/{orchestrator,worker}.json` (§17.4). | yes |
 | `.hive/agent/gemini/` | **Gemini CLI extension**: `gemini-extension.json` (MCP server, `HIVE.md` context), `hooks/hooks.json`, the same skills, plus per-role policy files `policies/{orchestrator,worker}.toml` (§17.4). | yes |
+| `.hive/agent/codex/` | **Codex profile**: `hive.config.toml` (hive MCP server and hooks), the same skills, plus per-role execpolicy rules `rules/{orchestrator,worker}.rules` (§17.4). | yes |
 | `.hive/plans/` | Place for written plans. | yes |
 | `.hive/prompts/` | **Your additions to the agents' instructions** (§17.5): `README.md`, plus commented-out starters `orchestrator.md`, `worker.md` and `roles/<role>.md` for every role. Each is created only if missing; your files are never overwritten. Until you write something outside the comments, they add nothing. | yes |
 | `.hive/README.md` | Explains the folder. | yes |
@@ -255,8 +257,10 @@ It creates or updates:
 **The bundles are inert.** Neither CLI loads `.hive/agent/` on its own:
 - Claude Code gets the plugin only when `hive` passes `--plugin-dir .hive/agent/claude`.
 - Gemini gets the extension only through the slot's **private** Gemini home (§7.3).
+- Codex gets the profile, rules and skills only through the slot's **private** `CODEX_HOME`,
+  selected with `-p hive` (§7.3).
 
-Opening `claude` or `gemini` in this repository yourself loads nothing from Hive.
+Opening `claude`, `gemini` or `codex` in this repository yourself loads nothing from Hive.
 
 **Cleanup of older versions:** `hive init` removes Hive entries written by Hive 0.1 to files
 the CLIs load automatically: `.mcp.json`, `.claude/settings.json`, `.gemini/settings.json`,
@@ -339,6 +343,7 @@ hive admin enroll orch     --vendor claude --roles orchestrator
 hive admin enroll claude-2 --vendor claude --roles programmer
 hive admin enroll claude-3 --vendor claude --roles programmer,tester
 hive admin enroll gemini-1 --vendor gemini --roles reviewer,planner
+hive admin enroll codex-1  --vendor codex  --roles programmer
 ```
 
 - **Names** must match `^[a-z][a-z0-9-]{1,31}$`. `user`, `system` and `admin` are reserved.
@@ -377,7 +382,8 @@ What `hive join` does:
 | `--repo PATH` | Local clone; the worktree is created next to it. |
 | `--worktree PATH` | Explicit worktree path (use with or instead of `--repo`). |
 | `--config-dir PATH` | The account's CLI config folder (default `~/.hive/accounts/<name>`). |
-| `--permission-mode MODE` | Claude: `acceptEdits` (default for workers), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`. See §23. |
+| `--permission-mode MODE` | Claude: `acceptEdits` (default for workers), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default for workers), `read-only`, `danger-full-access`, `yolo`. See §23. |
+| `--model MODEL` | The model the slot's CLI uses, e.g. `--model <model-name>`. Default: the account's default model. |
 | `--server URL` | Server URL, saved for the whole machine. |
 | `--hive-cmd CMD` | How the git hook calls `hive` (default `hive`). |
 
@@ -391,6 +397,8 @@ cd /path/to/clone-claude-2
 CLAUDE_CONFIG_DIR=~/.hive/accounts/claude-2 claude      # log in, then exit
 cd /path/to/clone-gemini-1
 GEMINI_CLI_HOME=~/.hive/accounts/gemini-1 gemini        # log in, then exit
+cd /path/to/clone-codex-1
+CODEX_HOME=~/.hive/accounts/codex-1 codex login         # add --device-auth over SSH
 ```
 
 **PowerShell (Windows):**
@@ -399,6 +407,8 @@ cd C:\path\to\clone-claude-2
 $env:CLAUDE_CONFIG_DIR = "$HOME\.hive\accounts\claude-2"; claude; Remove-Item Env:CLAUDE_CONFIG_DIR
 cd C:\path\to\clone-gemini-1
 $env:GEMINI_CLI_HOME = "$HOME\.hive\accounts\gemini-1"; gemini; Remove-Item Env:GEMINI_CLI_HOME
+cd C:\path\to\clone-codex-1
+$env:CODEX_HOME = "$HOME\.hive\accounts\codex-1"; codex login; Remove-Item Env:CODEX_HOME
 ```
 
 **cmd.exe (Windows):** `set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.hive\accounts\claude-2" && claude`.
@@ -432,8 +442,10 @@ hive up
    - Claude: `claude --plugin-dir <worktree>/.hive/agent/claude --settings <allow hive tools>
      --session-id|--resume <id> "<start prompt>"`
    - Gemini: `gemini -e hive --session-id|--resume <id> -i "<start prompt>"`
+   - Codex: `codex [resume <id>] -p hive --dangerously-bypass-hook-trust "<start prompt>"`
 3. **Session:** the first launch creates a new session. Later launches **resume the same
-   conversation**.
+   conversation**. (Codex picks its own session ids; Hive reads the id back from the slot's
+   `CODEX_HOME/sessions/` when the session ends.)
 4. **Start prompt:** tells the agent to use the `hive-orchestrator` skill. It then:
    1. calls `whoami`;
    2. reads its memory (`.hive/orchestrator/state.md`);
@@ -478,6 +490,7 @@ When something concerns a worker, its daemon starts one headless turn:
 |---|---|
 | Claude | `claude -p --output-format stream-json --verbose --plugin-dir <bundle> --settings <allow hive tools> --permission-mode <mode> --session-id/--resume <id>` |
 | Gemini | `gemini -p "Follow the Hive wake notice…" -o stream-json -e hive --approval-mode <mode> --session-id/--resume <id>` |
+| Codex | `codex exec --json -p hive --dangerously-bypass-hook-trust -c sandbox_mode="<mode>" -c approval_policy="never" [resume <id>] -` |
 
 **Environment for every launch:**
 
@@ -489,10 +502,34 @@ When something concerns a worker, its daemon starts one headless turn:
 | `MCP_TOOL_TIMEOUT` | 30 minutes |
 | `CLAUDE_CONFIG_DIR` | the slot's config folder (Claude slots) |
 | `GEMINI_CLI_HOME` | the slot's config folder (Gemini slots) |
+| `CODEX_HOME` | the slot's config folder (Codex slots) |
+
+A slot's `--model` is passed as `--model` (Claude) or `-m` (Gemini, Codex).
 
 **Gemini extension:** before a Gemini slot's first launch, `hive` runs
 `gemini extensions link <worktree>/.hive/agent/gemini --consent` **inside the slot's private
 `GEMINI_CLI_HOME`**. Your personal `~/.gemini` is never touched.
+
+**Codex profile:** before every Codex launch, `hive` copies into the slot's **private**
+`CODEX_HOME` (never `~/.codex`):
+- `.hive/agent/codex/hive.config.toml` as `hive.config.toml`, selected with `-p hive`. It
+  adds the `hive` MCP server (forwarding `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET`
+  and `HIVE_HOME`, with Hive's tools pre-approved) and the hooks;
+- the rules for the slot's role as `rules/hive.rules`;
+- the skills to `skills/hive-orchestrator/` and `skills/hive-worker/`.
+
+The slot's own `config.toml` and login are left alone. If the repository was initialised by
+an older Hive and has no `.hive/agent/codex/` yet, the files are generated on the fly.
+The Hive MCP server is required: Codex waits for it before the first turn and fails startup
+if it cannot initialize, so an agent cannot begin work before its Hive tools are ready.
+
+Codex asks you to review new hooks before they run. Hive generates its hooks itself, and the
+slot's private `CODEX_HOME` holds no others, so it launches Codex with
+`--dangerously-bypass-hook-trust`. Codex reports this as a warning at the start of each turn;
+`hive watch` hides that line.
+
+Codex chooses its own session ids. The daemon reads the id from the `thread.started` event of
+the first turn and resumes it with `codex exec resume <id>` afterwards.
 
 **The wake prompt contains:**
 - who the agent is and its roles;
@@ -1020,11 +1057,12 @@ It returns a digest: fleet state, a state-specific hint, the events, and unread 
 
 ### 17.2 Hooks
 
-The hooks ship inside the bundles and call `hive hook <event> --vendor <cli>`.
+The hooks ship inside the bundles and call `hive hook <event> --vendor <cli>`. Codex uses
+Claude Code's event names and output format.
 
-| Claude event | Gemini event | What Hive does |
+| Claude / Codex event | Gemini event | What Hive does |
 |---|---|---|
-| PreToolUse | BeforeTool | Denies writes not covered by leases or `write_globs`, and writes into other slots' worktrees. While the fleet state doesn't allow the agent's roles to act, denies everything except reading and Hive tools. |
+| PreToolUse | BeforeTool | Denies writes not covered by leases or `write_globs`, and writes into other slots' worktrees. For Codex's `apply_patch`, every file the patch adds, updates, deletes or moves is checked. While the fleet state doesn't allow the agent's roles to act, denies everything except reading and Hive tools. |
 | PostToolUse | AfterTool | Injects new `high` and `interrupt` messages mid-turn. |
 | UserPromptSubmit | BeforeAgent | Injects unread messages and, in interactive sessions, events queued since the last check. |
 | Stop | AfterAgent | Sends the agent back (max 3 times per turn) if it has unhandled urgent messages, uncommitted changes under its leases, or, in the interactive orchestrator, urgent events waiting. |
@@ -1067,6 +1105,7 @@ session**:
 |---|---|---|
 | Claude Code | `.hive/agent/claude/settings/{orchestrator,worker}.json` | `--settings` |
 | Gemini CLI | `.hive/agent/gemini/policies/{orchestrator,worker}.toml` | `--policy` |
+| Codex | `.hive/agent/codex/rules/{orchestrator,worker}.rules` (execpolicy `prefix_rule`s) | copied to the slot's `CODEX_HOME/rules/hive.rules` |
 
 - **Which file:** the orchestrator gets the `orchestrator` set; every other role gets the
   `worker` set.
@@ -1107,6 +1146,17 @@ matching text prefixes only:
 
 The CLIs' own permission files hold the common prefix forms as a first layer. Hive's hook is
 the authority.
+
+**Codex specifics:**
+- Codex workers run in its `workspace-write` sandbox by default: they can write in their
+  worktree, and commands without a matching rule run sandboxed, without network access.
+  Commands in the *allowed* tier run outside the sandbox, as with the other CLIs. Give a slot
+  `--permission-mode danger-full-access` (or `yolo`) if its work needs more.
+- Codex hooks can't ask for confirmation, so for the interactive orchestrator a dangerous
+  command in the *approval* tier is refused with a note to ask you to run it yourself. The
+  `.rules` file's prompts only apply when the Hive daemon can't be reached.
+- `.hive/agent/` (like `.hive/prompts/`) is protected: agents can't edit or commit it, since
+  Codex loads the hooks and rules there without its own hook-trust check.
 
 **How approval works for workers:** **the orchestrator approves, not you.**
 1. The worker's CLI blocks the command, and the hook tells it to call
@@ -1366,12 +1416,12 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
 | `hive server [--host H] [--port P] [--db URL] [--sqlite-journal wal\|delete\|truncate] [--admin-token T]` | Run the server (development). |
 | `hive admin backup [-o FILE]` | Download a consistent copy of the server's SQLite database. |
 | `hive admin login --server URL --token T` | Save admin credentials to `~/.hive/admin.toml`. |
-| `hive admin enroll NAME --vendor claude\|gemini --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
+| `hive admin enroll NAME --vendor claude\|gemini\|codex --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
 | `hive admin roles NAME r1,r2` | Change an agent's roles. |
 | `hive admin push-config` | Upload `hive.toml` from the current repository. |
 | `hive init [PATH] [--server URL] [--main BRANCH] [--hive-cmd CMD]` | Prepare a repository (§5). |
 | `hive overview [PATH] [--offline]` | Describe this project's Hive setup: repository, configuration, permissions, roles, prompts, this machine's slots, the fleet, and problems with their fixes (§5). |
-| `hive prompts [--role R1,R2] [--slot NAME] [--vendor claude\|gemini] [--full] [--path DIR]` | Show what Hive tells an agent with those roles, including your additions (§17.5). |
+| `hive prompts [--role R1,R2] [--slot NAME] [--vendor claude\|gemini\|codex] [--full] [--path DIR]` | Show what Hive tells an agent with those roles, including your additions (§17.5). |
 | `hive start "GOAL"` | Start the fleet; uploads `hive.toml` if run in the repo. |
 | `hive status [--all] [-n N] [-v]` | Fleet state, waiting decision, agents, tasks (`--all` includes finished ones), leases, last N status entries (`-v` with bodies). |
 | `hive decisions [--all]` | Open and queued decisions with context (`--all`: also answered ones). |
@@ -1384,7 +1434,7 @@ Open the server's root URL (`https://…/`) and sign in with the admin token. If
 
 | Command | Description |
 |---|---|
-| `hive join NAME --vendor V --token T [--server URL] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--hive-cmd CMD]` | Add a slot to this machine (§6.2). |
+| `hive join NAME --vendor V --token T [--server URL] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--model MODEL] [--hive-cmd CMD]` | Add a slot to this machine (§6.2). |
 | `hive up [-v] [--headless]` | Run this machine's slots (§7). |
 | `hive chat SLOT [--fresh]` | Attach interactively to a slot (§7.4). |
 
@@ -1474,7 +1524,9 @@ vendor = "claude"
 token = "hv_…"
 worktree = "/path/to/proj-claude-2"
 config_dir = "/home/you/.hive/accounts/claude-2"
-permission_mode = ""         # empty = default (claude: acceptEdits, gemini: auto_edit)
+permission_mode = ""         # empty = default (claude: acceptEdits, gemini: auto_edit,
+                             # codex: workspace-write)
+model = ""                   # empty = the account's default model
 command = []                 # optional custom headless command, see below
 ```
 
@@ -1506,7 +1558,7 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
 | `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off (§19, "Coloured output"). |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |
-| `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` | set by Hive per slot | Keep each account's CLI config separate. |
+| `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` / `CODEX_HOME` | set by Hive per slot | Keep each account's CLI config separate. |
 | `MCP_TOOL_TIMEOUT` | set by Hive | Lets `await_events` block for up to 30 minutes. |
 
 ---
@@ -1520,11 +1572,11 @@ command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "
 | `machine.toml` | server URL, local API port and secret, slots with tokens (keep private) |
 | `admin.toml` | admin server URL and token (only where you ran `hive admin login`) |
 | `state.db` | daemon state: event cursors, inbox cache, pending wake reasons, session ids |
-| `accounts/<slot>/` | each slot's private Claude or Gemini config, including its login |
+| `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login |
 | `logs/daemon.log` | daemon log |
 | `logs/<slot>.log` | raw output of every headless turn of that slot |
 
-**In the repository:** `hive.toml`, `.hive/agent/{claude,gemini}/`, `.hive/plans/`,
+**In the repository:** `hive.toml`, `.hive/agent/{claude,gemini,codex}/`, `.hive/plans/`,
 `.hive/prompts/` (yours; §17.5), `.hive/README.md`, and `.hive/orchestrator/state.md` (orchestrator worktree only,
 git-ignored).
 
@@ -1575,6 +1627,7 @@ feed, reports, live-output lines. Dashboard archives are files in `$HIVE_ARCHIVE
   keep real credentials out of the repository. Reports and status updates are instructed
   never to contain secrets.
 - **Permissions:** headless workers run in `acceptEdits` (Claude) or `auto_edit` (Gemini) mode,
+  or Codex's `workspace-write` sandbox,
   with the session permission files from §17.4. File edits are auto-approved, while lease
   enforcement still blocks edits outside leases. Shell commands follow the three tiers of
   §17.4: allowed, approved by the orchestrator, or never. Anything else is refused. Widen
@@ -1605,6 +1658,8 @@ the fix for each problem it finds.
 | `lease_release` returns `checks_failed` | A command in `[integration] checks` failed; the output tail is in the result. |
 | Push to `main` rejected | Another machine integrated first; Hive retries automatically, up to 3 times. |
 | A Gemini slot fails to resume | Set a custom `command` with `--resume latest` (§20.2). |
+| A Codex turn ends at once, or its Stop hook repeats `invalid choice: 'codex'` | The `hive` that Codex finds on PATH is older than the one running `hive up`. Codex runs hooks through your shell, so its startup files decide; reinstall Hive (§3) or pin it with `hive init --hive-cmd /full/path/to/hive`. |
+| Codex says the profile `hive` doesn't exist | The slot has no private `CODEX_HOME`; re-run `hive join` (it creates `~/.hive/accounts/<name>`). |
 | Orchestrator doesn't respond to typing | It's waiting in `await_events`: press Esc first (§8.1). |
 | Lease stays after a machine died | It expires within its TTL (≤ 10 min by default), or the orchestrator or you can force-release it. |
 | Fleet stuck in `frozen` | Run `hive decisions` and answer the open one. `hive reset` is the emergency exit. |
@@ -1621,11 +1676,26 @@ the fix for each problem it finds.
   skills there and leaves `~/.gemini` untouched.
 - Gemini's hook decision format matches its bundled documentation.
 
+**Verified with Codex CLI 0.163**, driven end to end by a scripted model server in place of
+the OpenAI API (`tests/test_codex_e2e.py`, which runs when `codex` is installed):
+- `codex exec --json` and `exec resume <id>` with `-p hive`; the JSONL events Hive formats;
+  the session id from `thread.started`.
+- The `hive` MCP server starts from the profile, receives the forwarded `HIVE_*` variables,
+  and its tools arrive as `mcp__hive__<tool>` without approval prompts.
+- The hooks run with `--dangerously-bypass-hook-trust`; PreToolUse denials stop `apply_patch`
+  and shell commands, and SessionStart context reaches the model.
+- The generated `.rules` pass `codex execpolicy check`; skills in `CODEX_HOME/skills/` are
+  listed to the model.
+- A Codex programmer is refused an unleased write, leases, writes, integrates with
+  `lease_release` and completes its task.
+
 **Not yet exercised with a live, logged-in session** (it would use account quota):
 - Claude: that `--plugin-dir` loads the plugin's hooks and MCP server, and the tool name prefix
   `mcp__plugin_hive_hive__`.
 - Gemini: `--resume <uuid>` (Gemini documents `latest` or an index; see §20.2) and the exact
   stream-json field names.
+- Codex with a real model and account: the interactive orchestrator (`codex resume <id>`) and
+  usage-limit messages.
 - GitHub mode (§14.4).
 
 **Current limitations:**

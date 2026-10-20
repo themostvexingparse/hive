@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import shlex
 import threading
 import time
 import uuid
@@ -17,7 +19,7 @@ from ..permissions import role_class
 from ..config import MachineConfig, Slot, find_repo_root, hive_home, load_repo_config
 from . import gitops, wake
 from .client import HiveError, ServerClient
-from .shells import resolve_shell, run_shell, tool_shell
+from .shells import default_shell, resolve_shell, run_shell, tool_shell
 from .store import Store
 
 log = logging.getLogger("hive.daemon")
@@ -31,6 +33,7 @@ AUTO_RELEASE_MAX_WAIT = 1800  # wait at most this long for a running turn to fin
 
 CLAUDE_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 GEMINI_WRITE_TOOLS = {"write_file", "replace", "edit"}
+CODEX_PATCH_TOOLS = {"apply_patch"}  # one patch may add, update, delete and move many files
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS", "read_file", "read_many_files", "glob",
                    "search_file_content", "list_directory", "grep"}
 SHELL_TOOLS = {"Bash", "PowerShell", "run_shell_command"}
@@ -478,7 +481,7 @@ class Daemon:
                                        project_prompt=self.project_prompt(rt))
             cmd = wake.build_command(rt.cfg, session, resume, role_class(rt.roles))
             env = wake.slot_env(rt.cfg, self.mcfg.local_url, self.mcfg.local_secret)
-            err = wake.ensure_gemini_extension(rt.cfg, env)
+            err = wake.prepare_vendor(rt.cfg, env, role_class(rt.roles))
             if err:
                 log.warning("[%s] %s", rt.name, err)
                 rt.sink.write([f"· {err}"])
@@ -495,6 +498,10 @@ class Daemon:
 
             res = wake.run_cli(rt.cfg, cmd, prompt, env, self.logdir / f"{rt.name}.log",
                                on_start=started, on_lines=rt.sink.write)
+            if res.session_id:
+                session = res.session_id
+            elif rt.cfg.vendor == "codex" and not resume:
+                session = None  # Codex never reported its new session: nothing to resume
             self.store.put(rt.name, "session", session)
             self.store.put(rt.name, "wakes_in_session", wakes + 1)
             self.store.put(rt.name, "last_wake", time.time())
@@ -628,36 +635,56 @@ class Daemon:
                 return {}
             return {"deny": f"Hive fleet is {state}; your roles ({', '.join(rt.roles)}) must "
                             "not act now. End your turn; you will be woken when it is your turn."}
+        ti = data.get("tool_input") or {}
         if tool in SHELL_TOOLS:
-            verdict = self._check_shell(rt, str((data.get("tool_input") or {}).get("command", "")),
-                                        tool_shell(tool))
+            # Codex reports every shell as "Bash" but runs the user's shell (PowerShell on
+            # Windows).
+            shell = default_shell() if rt.cfg.vendor == "codex" else tool_shell(tool)
+            verdict = self._check_shell(rt, command_text(ti.get("command", "")), shell)
             if verdict:
                 return verdict
         if tool in CLAUDE_WRITE_TOOLS or tool in GEMINI_WRITE_TOOLS:
-            ti = data.get("tool_input") or {}
             raw = ti.get("file_path") or ti.get("notebook_path") or ti.get("path") or ""
-            if not raw:
-                return {}
-            rel = self._relpath(rt, raw)
-            if rel is None:
-                return {}
-            if rel is False:
-                return {"deny": f"{raw} is inside another checkout of this repository (another "
-                                "agent's worktree or the user's own clone). Only edit files "
-                                "in your own worktree."}
-            if prompts.is_protected(rel):
-                return {"deny": f"{rel} is one of the project's prompt files, which only the "
-                                "user maintains. Agents may not edit .hive/prompts/."}
-            allowed = list(rt.me.get("write_globs", []))
-            if rt.me.get("can_code"):
-                allowed += [g for l in rt.leases for g in l["globs"]]
-            if not G.covered(rel, allowed):
-                if not rt.me.get("can_code"):
-                    return {"deny": f"Your roles ({', '.join(rt.roles)}) may not edit {rel}. "
-                                    f"You may only write {allowed or 'nothing'}; ask a "
-                                    "programmer via a task instead."}
-                return {"deny": f"No lease covers {rel}. Call lease_acquire(globs=[...]) for all "
-                                "paths you need first (e.g. the file or its directory/**)."}
+            return self._check_write(rt, raw) if raw else {}
+        if tool in CODEX_PATCH_TOOLS:
+            patch = ti.get("command") or ti.get("input") or ti.get("patch") or ""
+            if isinstance(patch, list):  # argv form: ["apply_patch", "<patch>"]
+                patch = "\n".join(map(str, patch))
+            paths = patch_paths(str(patch))
+            if not paths:
+                # Fail closed: a patch Hive can't read would otherwise skip lease checks.
+                return {"deny": "Hive could not find the files this patch changes, so it "
+                                "can't check your leases. Use the standard apply_patch "
+                                "format (*** Add File: / *** Update File: / *** Delete File:)."}
+            for raw in paths:
+                verdict = self._check_write(rt, raw)
+                if verdict:
+                    return verdict
+        return {}
+
+    def _check_write(self, rt: SlotRuntime, raw: str) -> dict:
+        """Verdict for writing the file `raw` (absolute or relative to the worktree)."""
+        rel = self._relpath(rt, raw)
+        if rel is None:
+            return {}
+        if rel is False:
+            return {"deny": f"{raw} is inside another checkout of this repository (another "
+                            "agent's worktree or the user's own clone). Only edit files "
+                            "in your own worktree."}
+        if prompts.is_protected(rel):
+            return {"deny": f"{rel} is one of the project's Hive files, which only the "
+                            "user maintains. Agents may not edit .hive/prompts/ or "
+                            ".hive/agent/."}
+        allowed = list(rt.me.get("write_globs", []))
+        if rt.me.get("can_code"):
+            allowed += [g for l in rt.leases for g in l["globs"]]
+        if not G.covered(rel, allowed):
+            if not rt.me.get("can_code"):
+                return {"deny": f"Your roles ({', '.join(rt.roles)}) may not edit {rel}. "
+                                f"You may only write {allowed or 'nothing'}; ask a "
+                                "programmer via a task instead."}
+            return {"deny": f"No lease covers {rel}. Call lease_acquire(globs=[...]) for all "
+                            "paths you need first (e.g. the file or its directory/**)."}
         return {}
 
     @staticmethod
@@ -960,6 +987,22 @@ def is_hive_tool(tool: str) -> bool:
         return True
     head, _, name = tool.rpartition("__")
     return name in HIVE_TOOL_NAMES and "hive" in head
+
+
+_PATCH_FILE = re.compile(
+    r"^\s*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
+
+
+def patch_paths(patch: str) -> list[str]:
+    """Every file a Codex apply_patch touches, including both ends of a move."""
+    return list(dict.fromkeys(_PATCH_FILE.findall(patch)))
+
+
+def command_text(command) -> str:
+    """A hook's shell command as one string; Codex may send it as an argv list."""
+    if isinstance(command, (list, tuple)):
+        return shlex.join(str(a) for a in command)
+    return str(command)
 
 
 def wake_on_default(rt: SlotRuntime) -> set[str]:

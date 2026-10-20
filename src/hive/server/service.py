@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from .. import globs as G
 from .. import permissions as P
+from ..config import VENDORS
 from ..roles import RoleSet, load_roles, resolve_kind, role_set, validate_assignment, validate_fleet
 from . import db
 from .archives import FORMAT as ARCHIVE_FORMAT, VERSION as ARCHIVE_VERSION, ArchiveStore, default_dir
@@ -213,8 +214,8 @@ class Hive:
             raise ApiError(403, "forbidden", "admin only")
         if not NAME_RE.match(name) or name in RESERVED:
             raise ApiError(400, "bad_name", "agent names must match ^[a-z][a-z0-9-]{1,31}$")
-        if vendor not in ("claude", "gemini"):
-            raise ApiError(400, "bad_vendor", "vendor must be 'claude' or 'gemini'")
+        if vendor not in VENDORS:
+            raise ApiError(400, "bad_vendor", f"vendor must be one of {', '.join(VENDORS)}")
         token = "hv_" + secrets.token_urlsafe(32)
         with self._write() as c:
             f = self._fleet(c)

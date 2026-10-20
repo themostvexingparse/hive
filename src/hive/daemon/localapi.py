@@ -69,7 +69,8 @@ def create_local_app(daemon: Daemon) -> Flask:
         allowed = list(rt.me.get("write_globs", []))
         if rt.me.get("can_code"):
             allowed += [g for l in rt.leases for g in l["globs"]]
-        # The project's prompt files (.hive/prompts/) are the user's; never an agent's commit.
+        # The project's Hive files (.hive/prompts/, .hive/agent/) are the user's; never an agent's
+        # commit.
         return jsonify({"uncovered": [p for p in paths if not G.covered(p, allowed)
                                       or prompts.is_protected(p)]})
 

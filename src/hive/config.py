@@ -45,14 +45,18 @@ def load_repo_config(root: Path | None) -> dict:
     return cfg
 
 
+VENDORS = ("claude", "gemini", "codex")
+
+
 @dataclass
 class Slot:
     name: str
-    vendor: str  # "claude" | "gemini"
+    vendor: str  # one of VENDORS
     token: str
     worktree: str
     config_dir: str = ""
     permission_mode: str = ""
+    model: str = ""  # passed to the CLI's model flag; empty = the account's default
     command: list[str] = field(default_factory=list)  # optional override template
     session_id: str = ""
     session_started: bool = False
