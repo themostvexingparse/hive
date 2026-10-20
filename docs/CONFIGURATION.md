@@ -2,12 +2,16 @@
 
 This page lists every configuration file, environment variable, file location, timing and
 limit in one place. The other pages explain what each setting is for. This one is for looking
-them up.
+them up; the [glossary](GLOSSARY.md) explains the terms. The settings files are in
+[TOML](GLOSSARY.md#files), a simple format of `key = value` lines under `[section]`
+headings; `#` starts a comment. Environment variables are settings given to a program
+through its environment (e.g. `export NAME=value` in bash, `$env:NAME = "value"` in
+PowerShell).
 
 | Where | What | Written by |
 |---|---|---|
-| [`hive.toml`](#hivetoml) | The project's fleet configuration, committed to the repository. | `hive init`, then you |
-| [`~/.hive/machine.toml`](#hivemachinetoml) | One machine's slots and their tokens. Private. | `hive join` |
+| [`hive.toml`](#hivetoml) | The project's settings for its fleet (its team of agents), committed to the repository. | `hive init`, then you |
+| [`~/.hive/machine.toml`](#hivemachinetoml) | One computer's agents (*slots*) and their tokens (passwords). Private. | `hive join` |
 | `~/.hive/admin.toml` | Your admin logins. Private. | `hive admin login` |
 | [Environment variables](#environment-variables) | Server settings and overrides. | you |
 
@@ -33,7 +37,7 @@ checks = ["python -m pytest -q"]   # run before every integration; must exit 0
 shell = "native"             # native (cmd.exe on Windows, sh elsewhere) | bash | powershell | cmd
 
 [orchestrator]
-standby = ["claude-2"]       # failover candidates, in order
+standby = ["claude-2"]       # agents that take over if the orchestrator is unavailable, in order
 debounce_seconds = 90        # batching window for routine events
 heartbeat_hours = 4          # headless orchestrator only: periodic check-in
 
@@ -65,7 +69,12 @@ task_kinds = ["docs"]
 
 ## `~/.hive/machine.toml`
 
-Per machine, private, written by `hive join`. You rarely edit it by hand.
+One per computer that runs agents, private, written by `hive join`. You rarely edit it by
+hand. Each `[[slots]]` block describes one agent on this computer: its name, CLI (`vendor`),
+token, working folder (`worktree`), private CLI settings folder (`config_dir`), and the
+options given to `hive join` ([Setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
+`local_port` and `local_secret` are for the [daemon](GLOSSARY.md#daemon)'s local API, a small
+web service reachable only from this computer, which agents' tools use.
 
 ```toml
 server_url = "https://USER.pythonanywhere.com"   # default for slots that name none
@@ -88,15 +97,17 @@ command = []                 # optional custom headless command, see below
 
 ### Custom headless command
 
-Use `command` if a CLI's flags differ on your system. Hive replaces these placeholders and
+Normally Hive builds the command that starts an agent's headless run itself
+([How an agent is launched](RUNNING.md#how-an-agent-is-launched-for-a-headless-turn-wake)).
+Use `command` if a CLI's options differ on your system. Hive replaces these placeholders and
 passes the prompt on stdin:
 
 | Placeholder | Replaced with |
 |---|---|
-| `{session}` | the session id |
-| `{session_flag}` | `--session-id` or `--resume` |
+| `{session}` | the id of the agent's conversation (*session*) with its AI model |
+| `{session_flag}` | `--session-id` (start that session) or `--resume` (continue it) |
 | `{mode}` | the permission mode |
-| `{bundle}` | the slot's `.hive/agent/<vendor>` folder |
+| `{bundle}` | the slot's `.hive/agent/<vendor>` folder (Hive's [bundle](GLOSSARY.md#bundle-plugin-extension-profile) for that CLI) |
 
 ```toml
 command = ["gemini", "-p", "Follow the notice on stdin.", "-o", "stream-json", "-e", "hive",
@@ -137,7 +148,7 @@ The default commands are listed in
 |---|---|
 | `machine.toml` | default server URL, local API port and secret, slots with their tokens and server URLs (keep private) |
 | `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive admin login`) |
-| `state.db` | daemon state: event cursors, inbox cache, pending wake reasons, session ids |
+| `state.db` | what the daemon remembers between runs: which fleet events each slot has seen, a copy of its messages, why it's waiting to be started, and its conversation ids |
 | `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login |
 | `logs/daemon.log` | daemon log |
 | `logs/<slot>.log` | raw output of every headless turn of that slot |
@@ -162,17 +173,17 @@ and archives in `projects/<project>/hive-archives/`, under the data folder.
 | What | Value |
 |---|---|
 | Daemon polls the server | every 3 s (`poll_interval`) |
-| Heartbeat / agent shown offline after | every 20 s / 90 s without one |
-| Orchestrator failover after | 5 min unseen, or out of quota |
-| Urgent events delivered (wake or `await_events`) | ≈ 3 s after arrival |
+| Daemon tells the server a slot is alive / agent shown offline after | every 20 s / 90 s without hearing from it |
+| A standby takes over from the orchestrator after | 5 min without contact, or its account out of usage |
+| Urgent events delivered (by starting the agent, or ending the orchestrator's `await_events` wait) | ≈ 3 s after arrival |
 | Routine events batched for the orchestrator | `debounce_seconds` (90 s) |
 | Minimum gap between wakes of one slot | 10 s |
 | Maximum wakes per slot | 20 per hour |
 | Headless turn timeout | 1 hour |
 | Pause after a usage-limit error | 1 hour |
 | New CLI session after | 40 turns |
-| Lease TTL | 600 s default, 30–3600 s; auto-extended when < 5 min remain |
-| Stop-hook pushbacks per turn | 3 |
+| How long a lease (file lock) lasts | 600 s default, 30–3600 s; extended automatically when < 5 min remain |
+| Times an agent is sent back when trying to end a run with urgent messages unhandled | 3 per run |
 | Message size / rate | 8 KB / 20 per minute per agent |
 | Live-output upload | every 1 s, ≤ 500 lines per batch, ≤ 4000 chars per line |
 | Live output kept on server | last 20,000 lines per agent |

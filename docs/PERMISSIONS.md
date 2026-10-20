@@ -1,15 +1,17 @@
 # Shell-command permissions
 
-Agents run shell commands all the time: `git status`, the test suite, a build, a formatter.
-Headless agents can't answer "may I run this command?" prompts, so an unapproved command is
-simply refused. Hive therefore decides ahead of time which commands an agent may run, and
-sorts every command into one of three tiers:
+The AI agents in a Hive fleet run shell commands all the time: `git status`, the test suite,
+a build, a formatter. Normally a coding CLI asks a person "may I run this command?". But most
+Hive agents, the **workers** (everyone except the orchestrator), run **headless**: without a
+terminal or anyone to answer, so an unapproved command is simply refused. Hive therefore
+decides ahead of time which commands an agent may run, and sorts every command into one of
+three tiers:
 
 | Tier | Examples | What happens |
 |---|---|---|
 | **1. Allowed** | reading, tests, git history work, builds | Runs directly. |
-| **2. Needs approval** | `git push`, `git reset --hard`, `rm -rf`, `sudo` | A worker asks; **the orchestrator** approves or denies, and the daemon runs the exact command once. |
-| **3. Never** | `hive decide`, `hive admin`, pushing to `main` | Refused, with no way to approve. |
+| **2. Needs approval** | `git push`, `git reset --hard`, `rm -rf`, `sudo` | A worker asks; **the orchestrator** (the agent that coordinates the others) approves or denies, and Hive's [daemon](GLOSSARY.md#daemon) on the worker's computer runs the exact command once. |
+| **3. Never** | `hive decide`, `hive admin` (commands that would act as you), pushing to `main` | Refused, with no way to approve. |
 
 The aim is to need as little human intervention as possible while staying safe: routine work
 never waits for anyone, dangerous commands wait for the orchestrator, not for you, and the
@@ -19,34 +21,37 @@ few commands that would let an agent act as you are impossible.
 
 ## Where the rules live
 
-`hive init` generates per-session permission files for each CLI from `[permissions]` in
-`hive.toml`:
+`hive init` generates a permission file for each CLI, in that CLI's own format, from the
+`[permissions]` section of `hive.toml` (the project's Hive settings). Hive attaches it only to
+the sessions it starts:
 
 | CLI | Generated file | Attached with |
 |---|---|---|
 | Claude Code | `.hive/agent/claude/settings/{orchestrator,worker}.json` | `--settings` |
 | Gemini CLI | `.hive/agent/gemini/policies/{orchestrator,worker}.toml` | `--policy` |
-| Codex | `.hive/agent/codex/rules/{orchestrator,worker}.rules` (execpolicy `prefix_rule`s) | copied to the slot's `CODEX_HOME/rules/hive.rules` |
+| Codex | `.hive/agent/codex/rules/{orchestrator,worker}.rules` (Codex's rule format, *execpolicy*) | copied into the agent's private Codex settings folder (`CODEX_HOME`) as `rules/hive.rules` |
 
 - **Which file:** the orchestrator gets the `orchestrator` set; every other role gets the
   `worker` set.
 - **Scope:** nothing is added to your own CLI settings, so your normal sessions are unaffected.
 - **Hive's own tools:** always allowed.
 
-The CLIs' own permission files hold the common prefix forms as a first layer. **Hive's
-PreToolUse hook is the authority**: it parses every command itself (see
+These files list commands by how they begin (e.g. anything starting with `git diff`), as a
+first layer. **Hive's own check is the authority**: a [hook](AGENT_INTERFACE.md#hooks) that
+the CLI runs before every tool call, which analyses each command itself (see
 [below](#how-hive-recognises-dangerous-commands)).
 
 ---
 
 ## 1. Allowed: run directly
 
-With the `standard` preset:
+A *preset* is a ready-made starting set of rules; you choose it in `hive.toml`
+([Customising](#customising)). With the default, `standard`:
 
 | Group | Examples | Orchestrator | Workers |
 |---|---|---|---|
 | Reading | `git status/diff/log/show/blame/fetch/reflog`, `ls`, `cat`, `grep`, `rg`, `find`, `tree`, PowerShell `Get-ChildItem`/`Get-Content`/`Select-String` | ✓ | ✓ |
-| Tests and checks | `pytest`, `python -m pytest`, `npm test`, `cargo test`, `go test`, `ruff check`, `mypy`, `tsc --noEmit`, plus every command in `[integration] checks` | ✓ | ✓ |
+| Tests and checks | `pytest`, `python -m pytest`, `npm test`, `cargo test`, `go test`, `ruff check`, `mypy`, `tsc --noEmit`, plus every test command you listed under `checks` in `hive.toml` ([Checks](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)) | ✓ | ✓ |
 | Git history work | `git add`, `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `checkout`, `switch`, `restore`, `stash`, `tag`, `mv`, `rm`, `am`, `apply` | – | ✓ |
 | Building and running | `python`, `node`, `uv run`, `npm run`, `npm install`, `npx`, `make`, `cargo build`, `go build`, formatters and linters, `mkdir`, `touch`, `cp`, `mv`, plain `rm`, `Copy-Item`/`Move-Item`/`New-Item`/`Remove-Item` | – | ✓ |
 
@@ -65,18 +70,20 @@ These publish, discard or rewrite history, or delete recursively:
 | Elevation and permissions | `sudo`, `su`, `doas`, `runas`, `gsudo`, `Start-Process -Verb RunAs`; `chmod -R`, `chown -R`, `takeown`, `Set-Acl`, `icacls` with `/grant`, `/deny`, `/t`, … |
 | Machine-level | `dd`, `mkfs`, `shred`, `format`, `diskpart`, `Format-Volume`, `Clear-Disk`, `reg delete`, `Remove-ItemProperty`, `shutdown`, `Stop-Computer`, `Restart-Computer`, `Set-ExecutionPolicy` |
 
-Agents rarely need any of these: integration (`git push` included) goes through
-`lease_release`, which doesn't need approval.
+Agents rarely need any of these: getting work into `main` (pushing included) goes through
+Hive's `lease_release` tool, which needs no approval
+([What `lease_release` does](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)).
 
 ### How approval works for workers
 
 **The orchestrator approves, not you.**
-1. The worker's CLI blocks the command, and the hook tells it to call
-   `request_approval(command, reason)`.
-2. The orchestrator is woken within seconds (`approval.requested`). It approves or denies with
-   a note, following criteria in its skill:
+1. The worker's CLI blocks the command, and the hook tells it to ask for approval with Hive's
+   `request_approval` tool, giving the command and a reason.
+2. The orchestrator is started (woken) within seconds. It approves or denies with a note,
+   following criteria in its [skill](GLOSSARY.md#skill) (written procedure):
    - the command is needed for the task;
-   - it's limited to the agent's own worktree and branch;
+   - it affects only the agent's own working folder of the repository (its
+     [worktree](GLOSSARY.md#worktree)) and its own branch;
    - it's the narrowest command that works.
 
    It escalates to you with a question only when consequences are unclear or reach outside
@@ -84,17 +91,17 @@ Agents rarely need any of these: integration (`git push` included) goes through
 3. **The Hive daemon runs the exact approved command once** in the worker's worktree, with a
    10-minute limit, and returns the output to the agent. It uses the shell the command was
    written for:
-   - `bash`: Git Bash on Windows;
-   - `powershell`: pwsh if installed, otherwise Windows PowerShell;
+   - `bash`: [Git Bash](GLOSSARY.md#git-bash) on Windows;
+   - `powershell`: PowerShell 7 (`pwsh`) if installed, otherwise Windows PowerShell;
    - `cmd`: Windows only.
 
    The hook tells the agent which shell it used. `auto` means PowerShell on Windows and bash
    elsewhere.
 
-**Why the worker usually doesn't need a new turn:** `request_approval` waits for the decision
-(up to 10 minutes, using no tokens), so the worker usually gets the result within the same
-turn. If no decision arrives, it ends its turn, is woken when the decision lands, and calls
-`run_approved(id)`.
+**Why the worker usually doesn't have to start again:** `request_approval` waits for the
+answer (up to 10 minutes, using none of the account's model usage), so the worker usually
+gets the result within the same run (*turn*). If no answer arrives in time, it ends its turn,
+is started again when the answer comes, and runs the command with the `run_approved` tool.
 
 You can approve or deny pending requests yourself in the dashboard's *Approvals* panel, just
 as the orchestrator can ([The web dashboard](MONITORING.md#the-web-dashboard)).
@@ -103,37 +110,41 @@ as the orchestrator can ([The web dashboard](MONITORING.md#the-web-dashboard)).
 
 - An approval is single-use and expires after an hour.
 - The requesting agent can't approve itself.
-- Everything is recorded on the server: who asked, why, who decided, the exit code and the
-  output.
+- Everything is recorded on the server: who asked, why, who decided, the command's exit code
+  (whether it succeeded) and its output.
 - **Who sees the output:** only the requesting agent and you. Other agents, including the
   orchestrator, see the request and the decision but not the output, which can contain
   secrets.
-- **Git options don't hide a command:** git global options (`git -C dir …`, `git -c k=v …`)
-  are looked through, so `git -C . push origin main` is still recognised as a push to `main`.
+- **Git options don't hide a command:** options given before git's subcommand
+  (`git -C dir …`, `git -c key=value …`) are looked through, so `git -C . push origin main`
+  is still recognised as a push to `main`.
 
-The **orchestrator's own** dangerous commands prompt *you* in its interactive session, since
-there's nobody else to approve them.
+The **orchestrator's own** dangerous commands ask *you*, in its terminal, since there's nobody
+else to approve them.
 
 ---
 
 ## 3. Never: no approval possible
 
-- **Hive's user commands:** `hive decide`, `admin`, `start`, `say`, `pause`, `resume`,
-  `reset`, `init`, `join`, `up`. An agent must never answer your decisions or speak as you,
-  even on a machine where you're logged in as admin.
-- **Pushing to `main`,** including `--all` and `--mirror`. Integration goes through
-  `lease_release`.
+- **Hive's own commands for you:** `hive decide`, `hive admin`, `hive start`, `hive say`,
+  `hive pause`, `hive resume`, `hive reset`, `hive init`, `hive join`, `hive up`. An agent
+  must never answer your questions ([decisions](GLOSSARY.md#decision)) or speak as you, even
+  on a computer where you're logged in as admin.
+- **Pushing to `main`,** including `git push --all` and `--mirror`, which push every branch.
+  Work reaches `main` only through `lease_release`.
 - Anything you add to `deny` ([below](#customising)).
 
-These are checked by the hook, by the server when a request is made, and by the daemon again
-just before it runs an approved command.
+These are checked by the hook, by the server when an approval is requested, and by the
+daemon again just before it runs an approved command.
 
 ---
 
 ## Anything else
 
-Commands not covered by these lists are refused in headless sessions. In an interactive
-session (the orchestrator, or `hive chat`), you're asked instead.
+Commands not covered by these lists are refused in headless sessions. In a session you're
+typing in (the orchestrator's, or an agent you took over with `hive chat`;
+[Running the fleet](RUNNING.md#taking-over-a-slot-interactively-hive-chat)), you're asked
+instead.
 
 If agents keep hitting refusals for a command your project needs, add it to `allow` or
 `approval`.
@@ -142,12 +153,13 @@ If agents keep hitting refusals for a command your project needs, add it to `all
 
 ## How Hive recognises dangerous commands
 
-It parses each command itself instead of matching text prefixes only, so the tiers hold in
-bash, PowerShell and cmd.exe alike:
-- **Compound commands** are split, while separators inside quotes are left alone. So
-  `git commit -m "fix; rm -rf x"` is just a commit.
-- **Nested shells are unwrapped:** `bash -c`, `cmd /c`, `powershell -Command` and
-  `-EncodedCommand`.
+It analyses each command itself instead of only looking at how it begins, so the tiers hold
+in bash, PowerShell and cmd.exe alike:
+- **Several commands on one line** (joined with `;`, `&&`, `|`, …) are checked one by one,
+  while those characters inside quotes are left alone. So `git commit -m "fix; rm -rf x"` is
+  just a commit.
+- **Commands run through another shell are unwrapped:** `bash -c "…"`, `cmd /c …`,
+  `powershell -Command …`, and PowerShell's base64-encoded form `-EncodedCommand`.
 - **Program names are normalised:** `C:\…\git.exe` → `git`, `/bin/rm` → `rm`.
 - **Dangerous flags are found in any position:** `Remove-Item build -Recurse` is caught just
   like `rm -rf build`.
@@ -156,21 +168,27 @@ bash, PowerShell and cmd.exe alike:
 
 ## Codex specifics
 
-- Codex workers run in its `workspace-write` sandbox by default: they can write in their
-  worktree, and commands without a matching rule run sandboxed, without network access.
-  Commands in the *allowed* tier run outside the sandbox, as with the other CLIs. Give a slot
-  `--permission-mode danger-full-access` (or `yolo`) if its work needs more.
-- Codex hooks can't ask for confirmation, so for the interactive orchestrator a dangerous
-  command in the *approval* tier is refused with a note to ask you to run it yourself. The
-  `.rules` file's prompts only apply when the Hive daemon can't be reached.
-- `.hive/agent/` (like `.hive/prompts/`) is protected: agents can't edit or commit it, since
-  Codex loads the hooks and rules there without its own hook-trust check.
+- Codex workers run in Codex's `workspace-write` sandbox by default: a restricted mode in
+  which they can write only in their worktree, and commands without a matching rule run with
+  no network access. Commands in the *allowed* tier run outside the sandbox, as with the other
+  CLIs. If an agent's work needs more, set its mode with
+  `hive join … --permission-mode danger-full-access` (or `yolo`)
+  ([Setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
+- Codex hooks can't ask a person for confirmation, so when the orchestrator runs on Codex, a
+  dangerous command in the *approval* tier is refused with a note to ask you to run it
+  yourself. The confirmation prompts in the `.rules` file only apply when the Hive daemon
+  can't be reached.
+- `.hive/agent/` (like `.hive/prompts/`) is protected: agents can't edit or commit it. Hive
+  starts Codex with its hook review switched off
+  ([why](RUNNING.md#codex-profile)), so an agent able to change those files could change its
+  own checks.
 
 ---
 
 ## Customising
 
-Edit `[permissions]` in `hive.toml`, then re-run `hive init` and commit:
+Edit the `[permissions]` section of `hive.toml`, then re-run `hive init` (which regenerates
+the CLIs' permission files), commit, and push:
 
 ```toml
 [permissions]
@@ -186,30 +204,33 @@ deny = ["kubectl delete"]                       # extra commands agents may neve
 | `strict` | The same without the building and running tools (interpreters, package managers, `make`). |
 | `none` | Only your `allow` list. |
 
-- **Prefix format:** entries are command prefixes without wildcards. Hive translates each one
-  per CLI: `"git diff"` becomes `Bash(git diff *)` and `PowerShell(git diff *)` for Claude, and
-  `commandPrefix = "git diff"` for Gemini.
+- **Format:** each entry is the beginning of a command, without wildcards: `"git diff"`
+  matches `git diff`, `git diff --stat` and so on. Hive translates each entry into every
+  CLI's own format (for Claude Code, `"git diff"` becomes `Bash(git diff *)` and
+  `PowerShell(git diff *)`; for Gemini, `commandPrefix = "git diff"`).
 - **Stricter tier wins:** a command can't be allowed if it's also listed for approval or
   never-allowed, and the built-in dangerous commands always need approval, whatever the
   preset.
 
-`hive overview` shows the preset and how many prefixes each tier has, for the orchestrator and
-for workers.
+`hive overview` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview))
+shows the preset and how many entries each tier has, for the orchestrator and for workers.
 
 ---
 
 ## Trust implications
 
 - **Interpreters run anything.** `python`, `node`, `npx`, `uv run`, `npm run` and `make` can
-  run arbitrary code. That's why `strict` leaves them out.
-- **Pattern rules aren't a security boundary.** The CLIs' own docs say so: an agent could reach
-  the same program another way, e.g. `sh -c '…'`. The workers' skill forbids working around a
-  block. The hard protections are:
-  - the admin token, needed for decisions;
-  - lease checks on integration;
+  run any code at all, including a script that deletes files. That's why `strict` leaves
+  them out.
+- **Rules about command names aren't a watertight wall.** The CLIs' own documentation says
+  so: an agent could reach the same program another way, e.g. through a script. The workers'
+  skill forbids working around a block. The protections an agent can't get around are:
+  - the admin token (your password for the server), needed to answer decisions;
+  - the check, when work is merged into `main`, that the agent holds valid
+    [leases](INTEGRATION.md#leases) on the files;
   - the server's and the daemon's checks on approved commands.
 
-  Keep the admin token off machines that host worker agents.
+  Keep the admin token off computers that run worker agents.
 
 See the [Security model](SECURITY.md) for the whole picture.
 

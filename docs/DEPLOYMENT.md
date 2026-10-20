@@ -1,12 +1,25 @@
 # Deploying the Hive server
 
-This guide covers everything about running `hive-server`:
+The Hive server (`hive-server`) is the program that holds everything a Hive **fleet** (a team
+of AI coding agents working on one repository) shares: the agents, their tasks and messages,
+their locks on files (*leases*), the questions waiting for you (*decisions*) and their live
+output. It also serves the web dashboard. The agents' computers and your own `hive` commands
+all talk to it over HTTPS, so for a fleet spread over several computers it has to be
+reachable from all of them. See [How Hive works](ARCHITECTURE.md) for the big picture and the
+[glossary](GLOSSARY.md) for terms.
+
+This guide covers everything about running the server:
 - what it needs;
 - how much data and load to expect, with measured numbers;
-- step-by-step deployment on PythonAnywhere, on a VPS, and locally;
+- step-by-step deployment on [PythonAnywhere](GLOSSARY.md#pythonanywhere) (a Python web
+  host), on a [VPS](GLOSSARY.md#vps) (a rented Linux server), and locally;
 - upgrades, backups, data retention, monitoring and hardening.
 
-For setting up the agent machines afterwards, see [Preparing the repository](REPOSITORY.md) and [Enrolling agents and setting up machines](MACHINES.md).
+**In the examples,** `USER` is your PythonAnywhere username, `hive.example.com` your own
+domain on a VPS, and `acme` an example [project](PROJECTS.md) (a second repository on the same
+server). For a first local trial you don't need this guide: see [Running the server](SERVER.md).
+
+For setting up the agents' computers afterwards, see [Preparing the repository](REPOSITORY.md) and [Enrolling agents and setting up machines](MACHINES.md).
 
 ---
 
@@ -17,7 +30,7 @@ For setting up the agent machines afterwards, see [Preparing the repository](REP
 3. [Capacity planning: how much data and load to expect](#3-capacity-planning-how-much-data-and-load-to-expect)
 4. [Deploying on PythonAnywhere](#4-deploying-on-pythonanywhere)
 5. [Deploying on a VPS (gunicorn + Caddy + systemd)](#5-deploying-on-a-vps-gunicorn--caddy--systemd)
-6. [Running locally or on a LAN](#6-running-locally-or-on-a-lan)
+6. [Running locally or on a local network](#6-running-locally-or-on-a-local-network)
 7. [Configuration reference](#7-configuration-reference)
 8. [After deploying: first-time checklist](#8-after-deploying-first-time-checklist)
 9. [Upgrading](#9-upgrading)
@@ -32,24 +45,25 @@ For setting up the agent machines afterwards, see [Preparing the repository](REP
 
 ## 1. What the server is and what it needs
 
-`hive-server` is a plain **Flask WSGI application** (`hive.server.wsgi:application`) backed by
-one SQL database.
+`hive-server` is a plain Python web application, written with Flask and following the
+**WSGI** standard that Python web hosts use to run apps ([WSGI](GLOSSARY.md#wsgi)). Its entry
+point is `hive.server.wsgi:application`. It stores its data in one SQL database.
 
 | Property | Value |
 |---|---|
-| Protocol | HTTPS + JSON. Every request is short; there are **no long-polls and no WebSockets**. |
-| Background work | **None.** Lease expiry, offline detection, orchestrator failover and task scheduling run lazily at the start of requests, at most once per second per worker process. No cron jobs, scheduled tasks or always-on tasks are needed. |
-| Database | SQLite (a local file; on network filesystems such as PythonAnywhere's in rollback-journal mode), MySQL, or Postgres, via SQLAlchemy. Tables and the SQLite file's folder are created automatically on first start. |
-| Outbound internet | Only for the optional GitHub mode (`api.github.com`). Otherwise none. |
-| Inbound | The agent machines' daemons, your admin CLI, and your browser (dashboard). |
+| Protocol | HTTPS + JSON. Every request is short; there are **no requests held open waiting for news (long-polls) and no permanent connections (WebSockets)**, which many cheap hosts don't support. |
+| Background work | **None.** Periodic duties (expiring old leases, marking agents offline, letting a standby take over from an orchestrator that went offline, assigning tasks) run at the start of whichever request comes next, at most once per second per server process. No cron jobs, scheduled tasks or always-on tasks are needed. |
+| Database | SQLite (a single local file; on network drives such as PythonAnywhere's, in its safer "rollback journal" writing mode), MySQL, or Postgres, through the SQLAlchemy library. Tables and the SQLite file's folder are created automatically on first start. |
+| Outbound internet | Only for the optional [GitHub mode](INTEGRATION.md#github-mode-optional), in which the server updates the repository's `main` branch through `api.github.com`. Otherwise none. |
+| Inbound | The [daemons](GLOSSARY.md#daemon) (the background program `hive up` runs on each computer with agents), your `hive` admin commands, and your browser (dashboard). |
 | Secrets | `HIVE_ADMIN_TOKEN` (required) and optionally `HIVE_GITHUB_TOKEN`. |
 
 **Who connects, and how often:**
 
 | Client | Requests |
 |---|---|
-| Each agent slot's daemon | `GET /events` every 3 s; heartbeat every 20 s; live-output uploads up to once a second **while that agent is running**. |
-| Agent tool calls | One request per Hive tool call (messages, tasks, leases, …). |
+| Each agent's daemon (one per agent, or *slot*, on its computer) | asks for news (`GET /events`) every 3 s; reports that it's alive (a *heartbeat*) every 20 s; uploads what the agent prints, up to once a second **while that agent is running**. |
+| Agents using Hive's tools | One request per tool call (messages, tasks, leases, …). |
 | Dashboard (while open) | About 2 requests per second. |
 | `hive watch` (while running) | One request every 1.5 s. |
 
@@ -59,11 +73,11 @@ one SQL database.
 
 | Host | Suits | Database | Notes |
 |---|---|---|---|
-| **PythonAnywhere – Developer** ($10/mo at the time of writing) | Recommended easy option | MySQL (included) | 3 web workers, 5 GB disk, unrestricted outbound internet, HTTPS included. See §3.5 for the verdict. |
-| PythonAnywhere – free (Beginner) | Trials and small fleets | **SQLite** (a `.db` file in your home directory) | Works with Hive's SQLite mode for network filesystems (§4.8). Limits: 512 MB disk, one web worker, and PythonAnywhere itself advises against SQLite for production. |
-| VPS (Hetzner, DigitalOcean, …) | Full control, lowest cost at scale | SQLite, Postgres or MySQL | You manage TLS, updates and backups (§5). |
-| Fly.io / Railway / Render | Container platforms | Managed Postgres | Run the same gunicorn command as §5. Use a managed database, not container-local SQLite. |
-| Your own computer / LAN | Trials, one-site fleets | SQLite | §6. Not reachable from outside without a tunnel. |
+| **PythonAnywhere – Developer** ($10/mo at the time of writing) | Recommended easy option | MySQL (included) | 3 web workers (server processes handling requests in parallel), 5 GB disk, unrestricted outbound internet, HTTPS included. See §3.5 for the verdict. |
+| PythonAnywhere – free (Beginner) | Trials and small fleets | **SQLite** (a `.db` file in your home directory) | Works with Hive's SQLite mode for network drives (§4.8). Limits: 512 MB disk, one web worker, and PythonAnywhere itself advises against SQLite for production. |
+| VPS (Hetzner, DigitalOcean, …) | Full control, lowest cost at scale | SQLite, Postgres or MySQL | You manage HTTPS certificates (TLS), updates and backups (§5). |
+| Fly.io / Railway / Render | Container platforms (they run your app in a container) | Managed Postgres | Run the same gunicorn command as §5. Use a managed database, not SQLite inside the container. |
+| Your own computer / local network | Trials, fleets in one place | SQLite | §6. Not reachable from outside without a tunnel service. |
 
 Plan details change; check [PythonAnywhere's pricing page](https://www.pythonanywhere.com/pricing/)
 before buying.
@@ -74,15 +88,17 @@ before buying.
 
 ### 3.1 How the numbers were obtained
 
-`scripts/simulate_load.py` drives the **real server code** with a synthetic workload and
+`scripts/simulate_load.py` drives the **real server code** with a made-up workload and
 measures the resulting database. One simulated **busy day** for a 7-agent fleet (1
-orchestrator, 4 programmers, 1 reviewer, 1 tester, with review turned on) contains:
+orchestrator, 4 programmers, 1 reviewer, 1 tester, with [reviews](INTEGRATION.md#reviews)
+turned on) contains:
 
-- **Tasks:** 30, each with a 1.5 KB spec, 3 progress notes, a lease, a review, an integration
-  and a 2 KB report.
+- **Tasks:** 30, each with a 1.5 KB description, 3 progress notes, a lease, a review, a merge
+  into `main` and a 2 KB report.
 - **Messages:** 150, about 400 characters each.
 - **Status updates:** 40 from the orchestrator, each with a 1.5 KB body.
-- **Other:** 5 report requests with answers, and one stuck-agent freeze decision.
+- **Other:** 5 report requests with answers, and one question to you from a stuck agent that
+  paused the fleet ([Stuck agents and freezing](LIFECYCLE.md#stuck-agents-and-freezing)).
 
 Thirty integrated tasks a day is a **heavy** pace for subscription accounts with usage limits.
 Treat it as an upper estimate for everyday use. To model your own fleet:
@@ -91,19 +107,20 @@ Treat it as an upper estimate for everyday use. To model your own fleet:
 uv run python scripts/simulate_load.py /tmp/hive-sim 30     # simulate 30 busy days
 ```
 
-The measurements below are SQLite file sizes after `VACUUM`. **MySQL (InnoDB) typically
-stores the same data in 1.5–3× the space** because of page fill, row overhead and index
-layout, so MySQL figures are given as a range.
+The measurements below are SQLite file sizes after `VACUUM` (SQLite's command to compact a
+file). **MySQL (with its usual InnoDB storage engine) typically stores the same data in
+1.5–3× the space** because of how it lays out rows and indexes, so MySQL figures are given as
+a range.
 
 ### 3.2 What grows, and what doesn't
 
 | Table | Growth | Bounded? |
 |---|---|---|
-| `events` | ≈ 540 rows per busy day; every message, task change, lease and decision | **no**: grows forever unless pruned (§11) |
+| `events` | ≈ 540 rows per busy day; a log of everything that happens (every message, task change, lease and decision), which daemons read to learn what's new | **no**: grows forever unless pruned (§11) |
 | `messages` | one row per message | **no** |
 | `tasks`, `reports`, `status_feed`, `decisions`, `leases` | per task / report / update | **no**, but small |
 | `streams` (live output) | up to 1 line per output line of a running agent | **yes**: the newest 20,000 lines per agent are kept; older lines are deleted on each upload |
-| `agents`, `receipts`, `fleet` | tiny | effectively constant |
+| `agents`, `receipts` (which agent has read which message), `fleet` | tiny | effectively constant |
 
 **Single-row size caps:**
 
@@ -133,13 +150,13 @@ Projected totals for a 7-agent fleet. Live output is about 20 MB (SQLite) or 30�
 | **Busy: ~30 tasks/day, ~150 messages** (measured) | ≈ 20 MB | ≈ 0.25 GB | 0.35 – 0.75 GB |
 | Extreme: ~100 tasks/day, ~500 messages, every day | ≈ 65 MB | ≈ 0.8 GB | 1.2 – 2.4 GB |
 
-**Rule of thumb:** each integrated task with its share of messages, reports and status
-updates costs about **22 KB in SQLite**, or **35–65 KB in MySQL**.
+**Rule of thumb:** each finished task (merged into `main`), with its share of messages,
+reports and status updates, costs about **22 KB in SQLite**, or **35–65 KB in MySQL**.
 
 ### 3.4 Request load
 
-For a 7-slot fleet whose daemons run 24 hours a day, with 4 workers active about 4 hours a
-day each:
+For a 7-agent fleet whose daemons run 24 hours a day, with 4 worker agents active about 4
+hours a day each:
 
 | Source | Requests per day |
 |---|---|
@@ -149,26 +166,26 @@ day each:
 | Tool calls, dashboard, `hive watch` | a few thousand to tens of thousands |
 | **Total** | **≈ 0.3 million per day, ≈ 3–4 per second on average** |
 
-**Measured cost** (in-process on a desktop, so excluding network and WSGI overhead, which is
-typically a few ms more):
+**Measured cost** (on a desktop computer, calling the server code directly, so excluding the
+network and the web server, which typically add a few ms):
 
 | Request | With 1 day of history | With 30 days of history |
 |---|---|---|
 | Agent poll (`GET /events`, nothing new) | 0.81 ms | 0.61 ms |
-| Maintenance tick (≤ once per second per worker) | 0.9 ms | 9.9 ms |
+| Maintenance tick: the periodic duties from §1 (≤ once per second per server process) | 0.9 ms | 9.9 ms |
 
 **What this means:**
-- **Poll cost doesn't grow with history**: events are read by primary key.
-- **The maintenance tick does grow.** Its scheduler currently reads all tasks, including
-  finished ones, so it scales with the total number of tasks. Projected: about 120 ms after a
+- **Poll cost doesn't grow with history**: new events are found directly by their number.
+- **The maintenance tick does grow.** The part that assigns tasks currently reads all tasks,
+  including finished ones, so it scales with the total number of tasks. Projected: about 120 ms after a
   busy year (≈ 11,000 tasks), i.e. up to ~12 % of one worker's time. Pruning finished tasks
   (§11) keeps it flat. Making the scheduler read only unfinished tasks is a planned
   improvement.
-- **Workers and timeouts:** even at 5–10 ms per request on shared hosting, 0.3 million
-  requests a day is only 25–50 minutes of worker time per day: 2–3 % of one worker. Three
-  workers leave plenty of headroom. No request blocks: `await_events` waits inside the
-  agent machine's local daemon, never on the server, so per-request time limits don't
-  matter.
+- **Server processes and time limits:** even at 5–10 ms per request on shared hosting, 0.3
+  million requests a day is only 25–50 minutes of processing per day: 2–3 % of one web
+  worker. Three workers leave plenty of headroom. No request waits for news: when the
+  orchestrator waits (with its `await_events` tool), it waits inside the daemon on its own
+  computer, never on the server, so hosts' per-request time limits don't matter.
 - **Access logs:** most hosts log every request. At ~150 bytes per line, 0.3 million requests
   are ≈ 40–50 MB of access log per day. Hosts rotate these logs, but check whether rotated
   archives count against your disk quota, and delete old ones if they do.
@@ -187,9 +204,10 @@ typically a few ms more):
   connections every 280 s.
 
 **Free plan: workable for trials and small fleets, with SQLite (§4.8).** New free accounts have
-no MySQL, so Hive stores its data in a SQLite file. It runs in a mode built for
-PythonAnywhere's network filesystem:
-- rollback journal instead of WAL;
+no MySQL, so Hive stores its data in a SQLite file. PythonAnywhere keeps your files on network
+storage, so Hive runs SQLite in a mode built for that:
+- SQLite's "rollback journal" way of writing, instead of its faster default (WAL), which
+  doesn't work reliably on network storage;
 - reads that never take the write lock;
 - one writer at a time inside the single web worker;
 - an idle server that does no writes at all;
@@ -207,7 +225,7 @@ The limits that remain:
 **Recommendation:** the free plan is a good way to try Hive or run a small fleet (a few
 agents). For daily use with a full fleet, the Developer plan with MySQL is the reliable choice.
 
-**Scale limits:** roughly, beyond ~15 agent slots or several always-open dashboards, consider
+**Scale limits:** roughly, beyond ~15 agents or several always-open dashboards, consider
 adding workers (PythonAnywhere custom plan) or moving to a VPS with Postgres.
 
 ---
@@ -219,7 +237,8 @@ PythonAnywhere username.
 
 ### 4.1 Get the code onto PythonAnywhere
 
-Open a **Bash console** (Consoles tab) and clone the repository containing Hive:
+Open a **Bash console** (a terminal in your browser, from PythonAnywhere's Consoles tab) and
+clone the repository containing Hive's source code:
 
 ```bash
 git clone https://github.com/<you>/<hive-repo>.git ~/hive
@@ -229,7 +248,9 @@ Or upload a zip in the **Files** tab and unzip it into `~/hive`.
 
 ### 4.2 Create a virtualenv and install Hive
 
-Use Python 3.12 or newer:
+A *virtualenv* is a private Python environment, so Hive's packages don't mix with others.
+`mkvirtualenv` (provided on PythonAnywhere) creates one and switches to it. Use Python 3.12 or
+newer:
 
 ```bash
 mkvirtualenv --python=python3.12 hive
@@ -237,7 +258,7 @@ pip install "$HOME/hive[mysql]"
 python -c "import hive, pymysql; print('ok', hive.__version__)"
 ```
 
-The `[mysql]` extra installs the PyMySQL driver. The virtualenv lives at
+The `[mysql]` extra also installs PyMySQL, the library Hive uses to talk to MySQL. The virtualenv lives at
 `/home/USER/.virtualenvs/hive`.
 
 ### 4.3 Create the database
@@ -253,8 +274,8 @@ The resulting URL:
 mysql+pymysql://USER:MYSQL_PASSWORD@USER.mysql.pythonanywhere-services.com/USER$hive?charset=utf8mb4
 ```
 
-If the password contains special characters (`@ : / ? #` …), URL-encode them, for example
-with `python -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=''))" 'p@ss'`.
+If the password contains special characters (`@ : / ? #` …), they must be written in the
+encoded form web addresses use (`@` becomes `%40`, and so on). This prints the encoded form: `python -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=''))" 'p@ss'`.
 
 ### 4.4 Generate the admin token
 
@@ -262,15 +283,17 @@ with `python -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], s
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Store it in your password manager. This token is full control over the fleet.
+This is the **admin token**, your password for the server. Store it in your password manager.
+This token is full control over the fleet.
 
 ### 4.5 Create the web app
 
 1. **Web** tab → **Add a new web app** → your domain (`USER.pythonanywhere.com` or a custom
    one) → **Manual configuration** (not "Flask") → the same Python version as the virtualenv.
 2. In the web app's settings, set **Virtualenv** to `/home/USER/.virtualenvs/hive`.
-3. Open the **WSGI configuration file** link (`/var/www/USER_pythonanywhere_com_wsgi.py`).
-   Replace its entire contents with:
+3. Open the **WSGI configuration file** link (`/var/www/USER_pythonanywhere_com_wsgi.py`):
+   the small Python file PythonAnywhere runs to start your app. Replace its entire contents
+   with:
 
    ```python
    import os
@@ -286,9 +309,10 @@ Store it in your password manager. This token is full control over the fleet.
    from hive.server.wsgi import application  # noqa: E402
    ```
 
-   To keep secrets out of the WSGI file, put them in `/home/USER/.hive-env` (permissions
-   `600`). Then load that file at the top of the WSGI file with
-   `from dotenv import load_dotenv` (`pip install python-dotenv`), or by reading it manually.
+   To keep secrets out of the WSGI file, put them in `/home/USER/.hive-env` (readable only by
+   you: `chmod 600`). Then load that file at the top of the WSGI file with the python-dotenv
+   library (`pip install python-dotenv`, then `from dotenv import load_dotenv`), or by reading
+   it manually.
 4. Under **Security**, turn on **Force HTTPS**.
 5. Click **Reload**.
 
@@ -301,7 +325,7 @@ curl https://USER.pythonanywhere.com/api/v1/health          # → {"ok": true}
 ```
 
 - Open `https://USER.pythonanywhere.com/` and enter the admin token: the dashboard should load
-  with fleet state `setup`.
+  with fleet state `setup` (no goal given yet).
 - On your computer: `hive admin login --server https://USER.pythonanywhere.com --token <token>`.
 
 **If anything fails:** read the **error log**, linked on the Web tab
@@ -367,8 +391,8 @@ The free plan has no MySQL for new accounts, so store Hive's data in a SQLite fi
 directory. Steps 4.1, 4.2, 4.4, 4.6 and 4.7 are the same, with these differences:
 
 1. **Install without the MySQL extra.** Get the code as in 4.1. Free accounts' restricted
-   internet access still allows GitHub and PyPI, so cloning and installing the dependencies
-   work:
+   internet access still allows GitHub and PyPI (the Python package index `pip` installs
+   from), so cloning and installing the dependencies work:
    ```bash
    mkvirtualenv --python=python3.12 hive
    pip install "$HOME/hive"
@@ -411,15 +435,19 @@ directory. Steps 4.1, 4.2, 4.4, 4.6 and 4.7 are the same, with these differences
 
 **Moving to a paid plan later:** upgrade, create the MySQL database (4.3), and switch
 `HIVE_DATABASE_URL` to it. Hive doesn't migrate data between databases automatically.
-Transfer the data with a tool such as `sqlite3-to-mysql`, or start fresh: re-enroll the agents
-and re-run `hive join` on each machine.
+Transfer the data with a tool such as `sqlite3-to-mysql`, or start fresh: create the agents
+again (`hive admin enroll`) and re-run `hive join` on each computer that runs them.
 
 ---
 
 ## 5. Deploying on a VPS (gunicorn + Caddy + systemd)
 
-These steps are for a Debian/Ubuntu server with a domain name `hive.example.com` pointing at
-it.
+These steps are for a Debian/Ubuntu server with a domain name, here `hive.example.com`,
+pointing at it. Three standard tools do the work:
+- **gunicorn** runs the Python app (several processes, *workers*, in parallel);
+- **Caddy** is the web server facing the internet: it handles HTTPS, getting and renewing the
+  certificate (TLS) automatically, and passes requests on to gunicorn;
+- **systemd**, Linux's service manager, starts gunicorn at boot and restarts it if it stops.
 
 ### 5.1 Install
 
@@ -480,7 +508,8 @@ curl http://127.0.0.1:8000/api/v1/health
 
 ### 5.5 TLS with Caddy
 
-Put this in `/etc/caddy/Caddyfile`:
+Put this in `/etc/caddy/Caddyfile`, so Caddy passes (*reverse-proxies*) requests for your
+domain to gunicorn:
 
 ```
 hive.example.com {
@@ -507,23 +536,25 @@ gunicorn --workers 3 --bind 0.0.0.0:$PORT hive.server.wsgi:application
 ```
 
 Set `HIVE_ADMIN_TOKEN` and `HIVE_DATABASE_URL` as platform secrets, and use the platform's
-managed Postgres. Container disks are usually ephemeral, so don't rely on SQLite there.
+managed Postgres. Container disks are usually wiped on every restart, so don't rely on SQLite
+there.
 
 ---
 
-## 6. Running locally or on a LAN
+## 6. Running locally or on a local network
 
 ```bash
 hive server --admin-token "<token>" --db sqlite:///hive.db --host 127.0.0.1 --port 8765
 ```
 
-- **Agents on the same machine:** use `--server http://127.0.0.1:8765`.
-- **Other machines on your LAN:** use `--host 0.0.0.0` and point them at
-  `http://<your-ip>:8765`.
+- **Agents on the same computer:** use `--server http://127.0.0.1:8765` with `hive join`.
+- **Other computers on your local network:** start the server with `--host 0.0.0.0` and point
+  them at `http://<your computer's IP address>:8765`.
 
-This is Flask's development server and plain HTTP, so tokens travel unencrypted. Use it only
-on networks you trust. For remote access without a public server, a tunnel (e.g. Tailscale or
-Cloudflare Tunnel) in front of it works.
+This is Flask's simple built-in server and plain HTTP, so tokens travel unencrypted. Use it
+only on networks you trust. For remote access without a public server, a tunnel service (such
+as Tailscale or Cloudflare Tunnel, which give other computers a private, encrypted route to
+yours) in front of it works.
 
 ---
 
@@ -532,10 +563,10 @@ Cloudflare Tunnel) in front of it works.
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `HIVE_ADMIN_TOKEN` | **yes** | – | The admin token. The app refuses to start without it. |
-| `HIVE_DATABASE_URL` | no | `sqlite:///hive.db` (relative to the working directory) | SQLAlchemy database URL. |
-| `HIVE_GITHUB_TOKEN` | no | – | Enables GitHub mode: the server fast-forwards `main` through the GitHub API. Also requires `[repo] github = "owner/repo"` in the uploaded `hive.toml`. Needs a fine-grained token with *Contents: read and write* on that repository. |
+| `HIVE_DATABASE_URL` | no | `sqlite:///hive.db` (relative to the working directory) | Where to store data ([database URL](GLOSSARY.md#sqlite-mysql-postgres-database-url)). |
+| `HIVE_GITHUB_TOKEN` | no | – | Enables [GitHub mode](INTEGRATION.md#github-mode-optional): the server moves `main` forward through GitHub's API. Also requires `github = "owner/repo"` in the `[repo]` section of the project's `hive.toml`, uploaded with `hive admin push-config`. Needs a fine-grained token with *Contents: read and write* on that repository. |
 | `HIVE_ARCHIVE_DIR` | no | `hive-archives/` next to a SQLite database file, else `~/hive-archives` | Where the dashboard's archives are written ([Archives](MONITORING.md#archives)). The server process must be able to write there. On PythonAnywhere the files count toward your disk quota. |
-| `HIVE_PROJECT_DATABASE_URL` | no | – | Database URL for new projects, with a `{slug}` placeholder, e.g. `mysql+pymysql://USER:PW@HOST/USER$hive_{slug}` (§15). Without it, projects on a SQLite server get their own SQLite file, and on MySQL/Postgres each `project create` needs `--db-url`. |
+| `HIVE_PROJECT_DATABASE_URL` | no | – | Database URL for new [projects](PROJECTS.md); `{slug}` in it is replaced by the project's name, e.g. `mysql+pymysql://USER:PW@HOST/USER$hive_{slug}` (§15). Without it, projects on a SQLite server get their own SQLite file, and on MySQL/Postgres each `project create` needs `--db-url`. |
 | `HIVE_DATA_DIR` | no | next to a SQLite database file, else `~/hive-data` | Where project SQLite databases and project archives go: `projects/<project>/` (§15). |
 | `HIVE_SQLITE_JOURNAL` | no | `wal`; `delete` when PythonAnywhere is detected | SQLite only. `wal` for local disks (fastest; readers and the writer don't block each other). `delete` (or `truncate`) for network filesystems such as PythonAnywhere's, where WAL doesn't work. `GET /api/v1/health` reports the active mode. |
 
@@ -547,17 +578,17 @@ Cloudflare Tunnel) in front of it works.
 - **Idle maintenance writes nothing:** the tick first checks, read-only, whether anything
   needs doing.
 
-**Fleet behaviour** (review policy, checks, roles, standby orchestrator) is not server
-configuration. It comes from the repository's `hive.toml`, uploaded with
+**Fleet behaviour** (whether work is reviewed, which tests must pass, [roles](ROLES.md), which
+agent takes over from the orchestrator) is not server configuration. It comes from the repository's `hive.toml`, uploaded with
 `hive admin push-config` or automatically by `hive start`.
 
 **Built-in constants** (not configurable at present):
 
 | Constant | Value |
 |---|---|
-| Agent considered offline | after 90 s without a heartbeat |
-| Orchestrator failover | after 5 minutes |
-| Maintenance tick | at most once per second per process |
+| Agent considered offline | after 90 s without a heartbeat from its daemon |
+| A standby takes over from an unreachable orchestrator | after 5 minutes |
+| Maintenance tick (the periodic duties) | at most once per second per process |
 | Message limits | 8 KB per message; 20 messages per minute per agent |
 | Live output kept | 20,000 lines per agent |
 
@@ -568,11 +599,13 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
 1. `curl https://<server>/api/v1/health` returns `{"ok": true}`.
 2. `hive admin login --server https://<server> --token <token>` on your computer.
 3. `hive status` shows fleet `setup` and no agents.
-4. In your project: `hive init`, commit and push, then `hive admin push-config`.
-5. Enroll the agents (`hive admin enroll …`) and join each machine (`hive join …`), as in
-   [Enrolling agents and setting up machines](MACHINES.md).
-6. `hive up` on every machine. `hive status` should show every agent `online` within 20 s.
-7. `hive start "<goal>"`.
+4. In your repository: `hive init`, commit and push, then `hive admin push-config`
+   ([Preparing the repository](REPOSITORY.md)).
+5. Create the agents (`hive admin enroll …`) and add each to the computer that runs it
+   (`hive join …`), as in [Enrolling agents and setting up machines](MACHINES.md).
+6. `hive up` on every one of those computers. `hive status` should show every agent `online`
+   within 20 s.
+7. Give the fleet its goal: `hive start "<goal>"`.
 
 ---
 
@@ -582,17 +615,22 @@ configuration. It comes from the repository's `hive.toml`, uploaded with
    - **PythonAnywhere:** `./install-pa-server.sh` (§4.7);
    - **VPS:** `pip install --upgrade` as the `hive` user into `/srv/hive/venv`, then
      `sudo systemctl restart hive`.
-2. **Update the machines too.** Agent machines and the server should run the same Hive
+2. **Update the agents' computers too.** They and the server should run the same Hive
    version: `uv tool install --force /path/to/hive` on each, then re-run `hive init` in the
-   repository and commit the refreshed bundles.
-   - **This release requires it.** Integration confirmations now carry a one-time grant from
-     the server. A daemon from before this change gets its work into `main`, but its leases
-     stay held until it's upgraded.
-   - **Git hooks refresh themselves.** `hive up` refreshes the pre-commit hook in each slot's
-     repository, so your own commits no longer need `hive` on PATH.
+   repository and commit the regenerated files in `.hive/agent/` (the *bundles*:
+   [Preparing the repository](REPOSITORY.md)).
+   - **This release requires it.** When an agent's work is merged into `main`, the daemon now
+     needs a one-time permission from the server
+     ([What `lease_release` does](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)).
+     A daemon from before this change still gets its work into `main`, but its leases stay
+     held until it's upgraded.
+   - **Git hooks refresh themselves.** `hive up` refreshes the git `pre-commit` hook (installed
+     by `hive join`) in each agent's repository, so your own commits no longer need `hive` on
+     PATH.
 3. **Several projects (this release):** the server adds a `projects` table on start-up. An
    existing deployment becomes the `default` project, unchanged, so agents and admin logins
-   keep working. Slots in an existing `machine.toml` keep using its `server_url`. Nothing to
+   keep working. Agents already set up on a computer (in its `~/.hive/machine.toml`) keep
+   using the server address recorded there. Nothing to
    do unless you add projects (§15).
 4. **Database changes:** on start-up the server creates any **missing tables**, but it does
    **not** alter existing ones.
@@ -615,9 +653,10 @@ files in `HIVE_ARCHIVE_DIR`. Copy that folder too if you want to keep them, but 
 read-only history, not a way to restore the database.
 
 **If the database is lost:**
-1. Re-enroll the agents; this gives new tokens.
-2. Re-run `hive join` on each machine.
-3. Push the config and start a new plan.
+1. Create the agents again (`hive admin enroll`); this gives new tokens.
+2. Re-run `hive join` on each computer that runs agents.
+3. Upload the settings (`hive admin push-config`) and give the fleet its goal again
+   (`hive start`).
 
 | Database | Backup | Restore |
 |---|---|---|
@@ -645,7 +684,7 @@ growth rates in §3 that's fine for years on a 5 GB plan. Pruning keeps the data
 the maintenance tick fast.
 
 **Safe to delete:**
-- old **events**: daemons only read events newer than their cursor;
+- old **events**: each daemon only reads events newer than the last one it saw;
 - old **messages** and their receipts;
 - **finished tasks** (`done`, `cancelled`) and their released, expired or revoked leases;
 - old **status updates**, **reports** and **answered decisions**.
@@ -672,14 +711,15 @@ DELETE FROM tasks       WHERE state IN ('done','cancelled') AND updated < UNIX_T
 Run it in the MySQL console (PythonAnywhere: Databases tab → open a console on `USER$hive`),
 or as a monthly scheduled task.
 
-**The easier way, between runs:** the dashboard's ⋯ → *Archives…* → *Archive & clear…* saves
+**The easier way, between runs** (a *run* being everything from one goal to the next): the
+dashboard's ⋯ menu → *Archives…* → *Archive & clear…* saves
 a finished run's history to a compressed file in `HIVE_ARCHIVE_DIR` and empties those tables
 in one step, without touching agents or config ([Archives](MONITORING.md#archives)). Archives are gzip-compressed
 JSON; the dialog shows each one's size. Delete old archives from the same dialog, or download
 them first.
 
-**Ids keep counting after a clear.** Daemons keep event cursors and cached message ids, so the
-server never hands out an old id again:
+**Ids keep counting after a clear.** Daemons remember the number of the last event and message
+they saw, so the server must never hand out an old number again:
 - **Postgres and MySQL 8:** their sequences never go back.
 - **SQLite:** the cleared tables use `AUTOINCREMENT`. Databases created by older Hive versions
   are converted on their first clear.
@@ -695,8 +735,9 @@ server never hands out an old id again:
 | SQLite | `VACUUM;` |
 | Postgres | autovacuum handles it |
 
-Pruning finished tasks removes their history from the orchestrator's `task_list` view as
-well. Keep the window longer than any plan the orchestrator might still be referencing.
+Pruning finished tasks also removes them from what the orchestrator (the agent that
+coordinates the fleet) sees when it lists tasks. Keep the window longer than any plan the
+orchestrator might still be referring to.
 
 ---
 
@@ -706,25 +747,27 @@ well. Keep the window longer than any plan the orchestrator might still be refer
 |---|---|
 | Server alive | `GET /api/v1/health` → `{"ok": true}`. Point any uptime monitor at it. |
 | Errors | PythonAnywhere: the error log on the Web tab. VPS: `journalctl -u hive -f`. |
-| Fleet health | `hive status` and the dashboard: offline agents, agents out of quota, a stuck freeze waiting for you. |
+| Fleet health | `hive status` and the dashboard: offline agents, agents whose account has used up its allowance (*out of quota*), a paused fleet waiting for your answer. |
 | Database size | MySQL: `SELECT table_name, ROUND((data_length+index_length)/1e6,1) AS mb FROM information_schema.tables WHERE table_schema = 'USER$hive' ORDER BY mb DESC;` SQLite: the file size. |
-| Request volume | Access log line counts (≈ 0.3 million/day for 7 slots is normal; see §3.4). |
+| Request volume | Access log line counts (≈ 0.3 million/day for 7 agents is normal; see §3.4). |
 
 ---
 
 ## 13. Security hardening
 
-- **HTTPS only.** Turn on PythonAnywhere's *Force HTTPS*, or use Caddy. Tokens are bearer
-  tokens: anyone who sees one can use it.
+- **HTTPS only.** Turn on PythonAnywhere's *Force HTTPS*, or use Caddy. Tokens work like
+  passwords sent with every request: anyone who sees one can use it.
 - **Admin token:**
   - long and random (§4.4);
   - kept in a password manager and in `~/.hive/admin.toml` only on machines where you run
     admin commands;
-  - never on agent machines unless you also work there.
+  - never on computers that only run agents, unless you also work there.
 - **Rotating tokens:**
   - **Admin:** change `HIVE_ADMIN_TOKEN` and reload; then `hive admin login` again.
-  - **Agent:** `POST /api/v1/agents/<name>/token` with the admin token, then update that
-    slot's `token` in its machine's `~/.hive/machine.toml`.
+  - **Agent:** have the server issue a new token by sending `POST /api/v1/agents/<name>/token`
+    with the admin token ([CLI.md §13](CLI.md#13-common-recipes) has the `curl` command), then
+    re-run `hive join` with it, or update that agent's `token` in `~/.hive/machine.toml` on
+    the computer that runs it.
 - **Live output contains whatever agents print**, including file contents they read. It's
   readable only with the admin token, but it sits in your database: keep real credentials out
   of the repository and prune streams if needed (`DELETE FROM streams WHERE agent = '…';`).
@@ -746,7 +789,7 @@ well. Keep the window longer than any plan the orchestrator might still be refer
 | Agents log `503 db_busy`, or requests are slow (SQLite) | The database is briefly locked. Clients retry automatically. If it's frequent: make sure nothing else opens the `.db` file (consoles, scheduled tasks), and check `/api/v1/health` shows `"sqlite_journal": "delete"` on PythonAnywhere. |
 | SQLite stays locked permanently on PythonAnywhere | A stale lock on the network filesystem. Reload the web app. If that doesn't help, contact PythonAnywhere support, or restore the latest `hive admin backup` to a new file path and point `HIVE_DATABASE_URL` at it. |
 | `disk I/O error` / `database disk image is malformed` (SQLite) | Usually WAL on a network filesystem: set `HIVE_SQLITE_JOURNAL=delete`. Restore from a backup if the file is damaged. |
-| Agents get `401 bad_token` | Wrong or rotated agent token in `~/.hive/machine.toml`, or the server's database was replaced. |
+| Agents get `401 bad_token` | Wrong agent token in `~/.hive/machine.toml`, or one that was since replaced, or the server's database was replaced. |
 | `hive admin login` fails with 403 | The token isn't the admin token configured on the server. |
 | Dashboard loads but stays empty / asks for the token again | The admin token was mistyped; clear it via the browser's site data and re-enter it. |
 | Requests slow down over months | The maintenance tick reads all tasks (§3.4); prune finished tasks (§11). |
@@ -763,10 +806,10 @@ section covers the server side.
 **What changes on the server:**
 - **Nothing to deploy.** The same WSGI app (`hive.server.wsgi:application`) serves every
   project. The existing database is the `default` project and holds the list of projects.
-- **No background workers.** Each project's lease expiry, scheduling and failover run on its
-  own requests, as before.
+- **No background processes.** Each project's periodic duties (§1) run on its own requests,
+  as before.
 - **Connections:** each project that has had a request in the last 10 minutes keeps a small
-  pool, at most 6 database connections. An idle project's pool is closed and reopens on
+  set (*pool*) of open database connections, at most 6. An idle project's pool is closed and reopens on
   demand. If your host limits connections per user, budget about 6 per active project, plus
   the default project's.
 

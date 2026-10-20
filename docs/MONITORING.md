@@ -1,15 +1,22 @@
 # Watching the fleet: live output and the dashboard
 
-You can see everything the fleet does, from anywhere, in two ways:
+You can see everything your Hive fleet (the team of AI agents working on your repository)
+does, from anywhere, in two ways:
 
-- **`hive watch`** follows agents' live output in a terminal.
-- **The web dashboard** on the server shows the whole fleet at once (agents, tasks, leases,
-  decisions, approvals, updates, reports and live output), and lets you steer it.
+- **`hive watch`** follows the agents' **live output** in a terminal: everything each agent
+  writes and every tool it calls, as it works.
+- **The web dashboard**, a web page the Hive server shows at its address, gives the whole
+  fleet at once and lets you steer it. It shows the agents, their [tasks](COORDINATION.md#tasks),
+  their [leases](INTEGRATION.md#leases) (locks on files), [decisions](GLOSSARY.md#decision)
+  waiting for you, [approvals](PERMISSIONS.md) of risky commands, the orchestrator's status
+  updates, the agents' [reports](COORDINATION.md#reports), and the live output.
 
-Workers' live output is **visible to you only**. The server refuses it to every agent token,
-including the orchestrator's. Agents learn about each other through messages and reports,
-never through raw output, which keeps their context small and keeps anything secret an agent
-printed away from other agents.
+Both need your admin login ([Log in as admin](SERVER.md#log-in-as-admin)).
+
+Live output is **visible to you only**. The server refuses it to every agent, including the
+orchestrator (the agent that coordinates the others). Agents learn about each other through
+messages and reports, never through raw output. That keeps what each agent has to read
+short, and keeps anything secret an agent printed away from other agents.
 
 ---
 
@@ -17,14 +24,14 @@ printed away from other agents.
 
 ```sh
 hive watch                 # all agents, follows new lines (Ctrl+C to stop)
-hive watch claude-2        # one agent
+hive watch claude-2        # one agent (claude-2 is an example agent name)
 hive watch -n 1000         # start with the last 1000 lines (default 200)
 hive watch --no-follow     # print and exit
 ```
 
 `hive watch` works on any computer where you're logged in as admin. It is the easiest way to
-see workers running on your orchestrator's machine, whose terminal belongs to the
-orchestrator's CLI.
+see agents running on the same computer as the orchestrator: there, `hive up` gives its
+terminal to your chat with the orchestrator, so the others' output isn't shown.
 
 **Line format:** each line starts with the agent's name in its own colour, then a `│`
 separator, then:
@@ -35,11 +42,11 @@ separator, then:
 | `→ tool {input}` | blue | a tool call |
 | `← result` | gray | a tool result |
 | `× error` | red | a failed tool call or an error |
-| `· …` | magenta, italic | session, wake and turn markers |
+| `· …` | magenta, italic | Hive's notes: a new conversation (*session*) started, the agent was started for some work (a *wake*) and why, a run (*turn*) ended |
 
 - **Retention:** the server keeps the latest 20,000 lines per agent.
-- **Raw output:** every turn's complete unformatted output is also appended to
-  `~/.hive/logs/<slot>.log` on the worker's machine.
+- **Raw output:** every run's complete unformatted output is also appended to
+  `~/.hive/logs/<agent name>.log` on the computer that runs the agent.
 - **Dashboard:** the same lines appear in the dashboard's *Live output* panel, which updates
   every 1.5 s.
 
@@ -47,26 +54,28 @@ separator, then:
 
 ## The web dashboard
 
-Open the server's root URL (`https://…/`) and sign in with the admin token. For another
-project, open its URL, `https://…/p/<project>/`, and sign in with that project's admin token
-or the server's. Signed in with the server's token, the ⋯ menu lists every project to switch
-between. If you tick *Remember on this device*, the token stays in the browser's local
-storage until you sign out (⋯ menu); otherwise it's forgotten when the tab closes.
+Open the server's address in a browser (for example `http://127.0.0.1:8765/` for a local
+trial) and sign in with the admin token. If the server hosts [several projects](PROJECTS.md),
+each has its own address, `https://…/p/<project>/`; sign in there with that project's admin
+token or the server's. Signed in with the server's token, the ⋯ (three dots) menu at the top
+right lists every project to switch between. If you tick *Remember on this device*, the token
+stays saved in this browser until you sign out (⋯ menu); otherwise it's forgotten when the
+tab closes.
 
 ### Areas
 
 | Area | Contents |
 |---|---|
-| Top bar | Fleet state, goal, orchestrator, `main` commit, and a *Live* / *Reconnecting…* indicator. *Pause* or *Resume*, whichever applies. A theme button that cycles light → dark → system. The ⋯ menu has the theme, *Archives…* (below), *Reset fleet…* (asks for confirmation) and *Sign out*. |
-| Decisions | Shown across the top while one is open. Each has its context, one button per option, a free-text answer and a note. A queued decision is shown as *Up next*. In `setup`, this area holds the goal box and *Start fleet* instead. |
-| Agents | One card per agent: colour, vendor, roles, state (idle, working, interactive, offline, out of quota), last seen and current task. Click a card to show only that agent's output. |
-| Leases | Holder, path globs and time left (amber when under 2 minutes). *Revoke* takes the files away from the holder after a confirmation; its next merge of them is refused. |
+| Top bar | The [fleet state](LIFECYCLE.md) (the phase the team is in), the goal, which agent is the orchestrator, the latest commit on `main`, and a *Live* / *Reconnecting…* indicator. *Pause* or *Resume*, whichever applies ([Pausing](LIFECYCLE.md#pausing-resuming-resetting)). A theme button that cycles light → dark → system. The ⋯ menu has the theme, *Archives…* (below), *Reset fleet…* (asks for confirmation) and *Sign out*. |
+| Decisions | Shown across the top while one is open. Each has its context, one button per option, a free-text answer and a note. A decision waiting behind the current one is shown as *Up next*. Before the fleet has a goal (state `setup`), this area holds the goal box and *Start fleet* instead. |
+| Agents | One card per agent: colour, CLI (Claude Code, Gemini CLI or Codex), [roles](ROLES.md), state (idle, working, interactive, offline, or out of quota: its account has used up its allowance for now), last seen and current task. Click a card to show only that agent's output. |
+| Leases | Who holds each file lock, which paths it covers (as patterns such as `src/api/**`), and time left (amber when under 2 minutes). *Revoke* takes the files away from the holder after a confirmation; its next attempt to merge them into `main` is refused. |
 | Live output | All agents' formatted output in one scrolling panel; see below. |
 | Tasks | Filter by *Active*, *Review*, *Finished* or *All* (with counts). Click a row for its spec, notes, result, paths, dependencies, branch and reviewer. |
-| Orchestrator | The `#user` conversation. Enter sends; Shift+Enter starts a new line. |
-| Updates | The status feed, newest first. Alerts are tinted; long bodies fold behind *Show more*. |
-| Approvals | Commands workers asked to run. You can approve (after a confirmation showing the exact command) or deny with a note, just as the orchestrator can. The tab shows how many are waiting. |
-| Reports | Report requests and filed reports. |
+| Orchestrator | Your conversation with the orchestrator (the `#user` channel). Enter sends; Shift+Enter starts a new line. |
+| Updates | The orchestrator's status updates, newest first. Alerts are tinted; long ones fold behind *Show more*. |
+| Approvals | Dangerous shell commands agents asked to run ([how approvals work](PERMISSIONS.md#how-approval-works-for-workers)). You can approve (after a confirmation showing the exact command) or deny with a note, just as the orchestrator can. The tab shows how many are waiting. |
+| Reports | The orchestrator's requests for reports, and the reports agents filed. |
 
 Everything you can do from the CLI as admin (start, pause, resume, reset, answer decisions,
 message the orchestrator) you can also do from the dashboard. That makes it the easiest way
@@ -80,8 +89,8 @@ to steer the fleet from a phone.
   combine several). The filter box (shortcut `/`) narrows to matching lines and marks the
   matches.
 - **Highlighting:** done in the browser, with no extra requests or prompting. It marks tool
-  calls, errors, failure and success words, file paths, URLs, commit hashes, `#task`
-  references, quoted strings, Hive tool names, and agent names.
+  calls, errors, failure and success words, file paths, URLs, commit hashes, task numbers
+  (`#4`), quoted strings, the names of Hive's tools, and agent names.
 - **Toggles:** *Results* hides tool results, *Wrap* switches between wrapping long lines and
   scrolling sideways (inside the panel only), and *Follow* keeps the newest line in view.
   Scrolling up pauses *Follow*, and a *N new lines* button takes you back down.
@@ -90,29 +99,32 @@ to steer the fleet from a phone.
 
 ### Archives
 
-**⋯ → *Archives…*** keeps a run's history without letting it pile up in the live view.
+**⋯ → *Archives…*** keeps a run's history without letting it pile up in the live view. A
+*run* is everything from giving the fleet a goal until you clear it.
 - **Save snapshot** writes everything the dashboard shows to an archive file on the server:
-  fleet and goal, agents (without their tokens), tasks, decisions, all messages (including
-  agent-to-agent ones), updates, reports, command approvals with their output, leases and the
-  recorded agent output. Nothing is removed.
+  fleet and goal, agents (without their passwords, the agent tokens), tasks, decisions, all
+  messages (including agent-to-agent ones), updates, reports, command approvals with their
+  output, leases and the recorded agent output. Nothing is removed.
 - **Archive & clear…** does the same, then removes all of that from the database and puts the
-  fleet back in `setup`, ready for a new goal. Agents, their tokens, the uploaded `hive.toml`,
-  the orchestrator assignment and `main`'s commit are kept, so machines keep running without
-  re-joining. It's refused unless the fleet is paused (or in `setup`) and nothing is in flight:
-  no leased files, no waiting or approved commands, no merge into `main` in progress. The
-  dialog says which of these is in the way; revoke leases from the Leases panel.
+  fleet back in `setup`, ready for a new goal. Agents, their tokens, the project settings
+  uploaded from `hive.toml`, which agent is orchestrator, and the latest `main` commit are
+  kept, so computers running agents carry on without being set up again (`hive join`). It's
+  refused unless the fleet is paused (or in `setup`) and nothing is in progress: no leased
+  files, no waiting or approved commands, no merge into `main` under way. The dialog says
+  which of these is in the way; revoke leases from the Leases panel.
 - **Open** shows an archive in the normal layout, read-only: an *Archive* banner with its
   decisions and their answers, the agents, tasks (all of them), the recorded output (with the
   usual filters and search), every message with where it went, updates, approvals and
   reports. *Back to live* returns to the live view. Archives with more than 5,000 output lines
   show the newest 5,000; picking an agent or searching works on all of them.
-- **Download** saves the archive as `hive-archive-<id>.json.gz` (gzip-compressed JSON).
+- **Download** saves the archive as `hive-archive-<id>.json.gz` (JSON data, compressed with
+  gzip).
   *Open a file…*, or *Open an archive file* on the sign-in page, opens such a file (or a plain
   `.json`) in the browser without signing in; nothing is uploaded.
 - **Delete** removes an archive from the server for good.
-- **Where the files are:** see `HIVE_ARCHIVE_DIR` in the
-  [configuration reference](CONFIGURATION.md#environment-variables). Archives are history, not
-  backups: they can't be loaded back into the live database. For backups, see
+- **Where the files are:** on the server, in the folder set by the `HIVE_ARCHIVE_DIR`
+  environment variable ([configuration reference](CONFIGURATION.md#environment-variables)).
+  Archives are history, not backups: they can't be loaded back into the live database. For backups, see
   [DEPLOYMENT.md §10](DEPLOYMENT.md#10-backups-and-restore).
 
 ### Other behaviour
@@ -120,9 +132,9 @@ to steer the fleet from a phone.
 - **Theme:** light by default; the choice is remembered in the browser.
 - **Small screens:** the layout stacks into one column on phones.
 - **Tab title:** shows how many decisions and approvals are waiting, e.g. `(2) Hive · Frozen`.
-- **Refresh rate:** the dashboard refreshes every 4 s and live output every 1.5 s. A hidden
-  tab slows to 30 s and 10 s, to spare the server. While the server is unreachable, it retries
-  with back-off.
+- **Refresh rate:** the dashboard refreshes every 4 s and live output every 1.5 s. A tab
+  you're not looking at slows to 30 s and 10 s, to spare the server. While the server is
+  unreachable, it retries, waiting longer between attempts.
 - **Typing is safe:** text you're typing in a decision or approval isn't lost when the data
   refreshes.
 
@@ -134,7 +146,7 @@ For a one-shot summary instead of a live view:
 
 ```sh
 hive status          # fleet state, waiting decision, agents, tasks, leases, last updates
-hive status -v       # with the bodies of status updates
+hive status -v       # with the full text of status updates
 hive status --all    # include finished tasks
 hive decisions       # what's waiting for you
 ```

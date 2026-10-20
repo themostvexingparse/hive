@@ -2,16 +2,17 @@
 
 This page covers what each computer in a Hive setup needs, and how to put the `hive` command
 on it. Hive is a single Python package. The same `hive` command runs the server, sets up
-repositories, runs agent machines and steers the fleet, so you install the same thing
-everywhere.
+repositories, runs agents and steers the **fleet** (the team of AI agents working on your
+repository), so you install the same thing everywhere. Terms are explained in the
+[glossary](GLOSSARY.md); [How Hive works](ARCHITECTURE.md) shows how the parts fit together.
 
 There are three places you may install Hive:
 
 | Where | Why it needs Hive |
 |---|---|
-| **The server** | Runs `hive server` or the WSGI app. For public hosting, follow [DEPLOYMENT.md](DEPLOYMENT.md) instead of this page. |
-| **Your computer** | Runs admin commands (`hive admin …`, `hive start`, `hive decide`, …). Usually also hosts the orchestrator. |
-| **Every agent machine** | Runs `hive join` and `hive up`, and the agent CLIs call `hive mcp` and `hive hook`. |
+| **The server** | The one program that holds the fleet's shared state. It runs as `hive server`, or as a Python web app ([WSGI](GLOSSARY.md#wsgi)) on a web host. For public hosting, follow [DEPLOYMENT.md](DEPLOYMENT.md) instead of this page. |
+| **Your computer** | Runs admin commands, the ones you use to control the fleet (`hive admin …`, `hive start`, `hive decide`, …). Usually also runs the orchestrator, the agent you chat with. |
+| **Every agent machine** | Any computer that runs agents. It runs `hive join` (adds an agent to the computer) and `hive up` (runs them). The agents' CLIs also call `hive mcp` and `hive hook` themselves, to get Hive's tools and automatic checks. |
 
 For a first trial, all three can be the same computer.
 
@@ -21,13 +22,16 @@ For a first trial, all three can be the same computer.
 
 | What | Where | Notes |
 |---|---|---|
-| Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/) (or pip) | every machine and the server | |
-| git | every agent machine | Each slot gets its own worktree. |
-| Claude Code CLI (`claude`) | machines hosting Claude slots | Each Claude slot logs into its own Claude account once. |
-| Gemini CLI (`gemini`) | machines hosting Gemini slots | Each Gemini slot logs into its own Google account once. |
-| Codex CLI (`codex`) | machines hosting Codex slots | Each Codex slot logs into its own ChatGPT account once (`codex login`). |
-| A git remote (`origin`) | the repository | GitHub or any remote all machines can push to. |
-| A reachable server URL | | `http://127.0.0.1:8765` for single-machine trials; a public HTTPS URL otherwise. |
+| Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/) (or pip) | every machine and the server | uv and pip are Python package installers; uv is faster and keeps `hive` isolated. |
+| git | every agent machine | Each agent gets its own [worktree](GLOSSARY.md#worktree): a separate working folder of the repository. |
+| Claude Code CLI (`claude`) | machines running Claude agents | Each Claude agent logs into its own Claude account once. |
+| Gemini CLI (`gemini`) | machines running Gemini agents | Each Gemini agent logs into its own Google account once. |
+| Codex CLI (`codex`) | machines running Codex agents | Each Codex agent logs into its own ChatGPT account once (`codex login`). |
+| A git remote (`origin`) | the repository | The shared copy of the repository that every machine pushes to: GitHub or any remote all machines can reach. |
+| A reachable server URL | | The address of the Hive server: `http://127.0.0.1:8765` (your own computer) for single-machine trials; a public HTTPS address otherwise. |
+
+On a machine, each agent lives in a **slot**: its own private CLI settings folder (holding its
+account login) plus its own worktree ([Setting up machines](MACHINES.md)).
 
 You only need the CLIs for the vendors you actually use. A fleet of only Claude Code agents
 needs no Gemini or Codex installed anywhere.
@@ -42,10 +46,11 @@ Agent machines can run **Windows, macOS or Linux**, mixed freely in one fleet.
 - **Paths:** `~/.hive` means `%USERPROFILE%\.hive` on Windows.
 - **Commands in this documentation:** they work in bash and in PowerShell unless both
   variants are shown.
-- **Agents' shells:** agents use bash (Git Bash on Windows, which comes with Git for
-  Windows), PowerShell or cmd.exe. Hive's permission rules and approval checks cover all
-  three ([Shell-command permissions](PERMISSIONS.md)).
-- **The server:** any WSGI host, usually Linux.
+- **Agents' shells:** agents run commands in bash ([Git Bash](GLOSSARY.md#git-bash) on
+  Windows, which comes with Git for Windows), PowerShell or cmd.exe. Hive's rules about which
+  commands agents may run, and its approval checks for dangerous ones, cover all three
+  ([Shell-command permissions](PERMISSIONS.md)).
+- **The server:** any host that can run a Python web app, usually Linux.
 
 ---
 
@@ -54,9 +59,13 @@ Agent machines can run **Windows, macOS or Linux**, mixed freely in one fleet.
 On **every** agent machine (and wherever you run admin commands):
 
 ```sh
-uv tool install /path/to/hive          # puts the `hive` command on PATH
+uv tool install /path/to/hive          # /path/to/hive: where you downloaded Hive's source
 hive --version
 ```
+
+`uv tool install` installs `hive` in its own isolated environment and puts the command on
+your [PATH](GLOSSARY.md#path), the list of folders your shell searches for commands, so
+`hive` works in any terminal.
 
 ### With the installer scripts
 
@@ -69,7 +78,7 @@ The project folder also has installer scripts:
 | Linux | `./install.sh` (or `sh install.sh`) | – |
 
 They all install or re-install Hive cleanly. They:
-- check for uv (offering to install it with its official installer) and git;
+- check for uv and git (offering to install uv with its official installer);
 - deal with running Hive processes, after asking:
   - **Windows:** stops `hive.exe`, since Windows can't replace a running executable;
   - **macOS and Linux:** offers to stop them, because running processes keep the old version
@@ -88,25 +97,31 @@ They all install or re-install Hive cleanly. They:
 redirected. With no terminal at all (e.g. over `ssh host 'sh install.sh'`), every question
 is answered no unless you pass `--yes`.
 
-**On a PythonAnywhere server,** use `install-pa-server.sh` instead. It re-installs Hive
+**On a [PythonAnywhere](GLOSSARY.md#pythonanywhere) server** (a Python web host where you
+can put the Hive server online), use `install-pa-server.sh` instead. It re-installs Hive
 without touching the WSGI file, secrets, database or archives
 ([DEPLOYMENT.md §4.7](DEPLOYMENT.md#47-updating-the-code-later)).
 
 ### `hive` must be on PATH
 
-The agent CLIs launch `hive mcp` and `hive hook …` **by name**, from inside their own
-processes. If those processes can't find `hive`, agents get no Hive tools and their file
-writes are refused. If `hive` can't be on PATH, run
+The agent CLIs launch `hive mcp` (the program giving agents Hive's tools, through
+[MCP](GLOSSARY.md#mcp-mcp-server-mcp-tool)) and `hive hook …` (Hive's
+[hooks](GLOSSARY.md#hook), automatic checks the CLI runs before and after each action)
+**by name**, from inside their own processes. If those processes can't find `hive`, agents get
+no Hive tools and their file writes are refused. If `hive` can't be on PATH, run
 `hive init --hive-cmd /full/path/to/hive` ([Preparing the repository](REPOSITORY.md)) so the
-bundles use an absolute path.
+files `hive init` generates for the CLIs (the [bundles](GLOSSARY.md#bundle-plugin-extension-profile))
+call it by its full path instead.
 
 A version mismatch matters too. If the `hive` an agent CLI finds is older than the one
-running `hive up`, hooks can fail in confusing ways. Re-install on every machine after
+running `hive up` (the command that runs a machine's agents), hooks can fail in confusing
+ways. Re-install on every machine after
 upgrading ([Troubleshooting](TROUBLESHOOTING.md)).
 
 ### For development
 
-`uv sync` in this repository gives you `uv run hive …` without installing anything globally.
+In a clone of Hive's own source, `uv sync` sets up a development environment and
+`uv run hive …` runs that copy, without installing anything globally.
 See [Development](DEVELOPMENT.md).
 
 ---
@@ -115,7 +130,8 @@ See [Development](DEVELOPMENT.md).
 
 1. Start a server: [Running the server](SERVER.md).
 2. Prepare your repository: [Preparing the repository](REPOSITORY.md).
-3. Add agents and machines: [Enrolling agents and setting up machines](MACHINES.md).
+3. Add agents and the computers that run them:
+   [Enrolling agents and setting up machines](MACHINES.md).
 
 Or follow the whole sequence at once in [Getting started](GETTING_STARTED.md).
 

@@ -1,9 +1,18 @@
 # Known limitations and verification status
 
-Hive drives three vendors' CLIs through their documented features, and those CLIs change
-often. This page records which integration points have been verified, against which
-versions and how, which haven't been exercised yet, and the limitations you should know about
-today.
+Hive's agents are three vendors' command-line programs (CLIs): Claude Code, Gemini CLI and
+Codex. Hive drives them through their documented features, and those CLIs change often. This
+page records which of those features have been verified, against which versions and how,
+which haven't been tried yet, and the limitations you should know about today.
+
+The first sections are a technical record. The options and parts they mention are explained
+elsewhere: how Hive starts each CLI, with which options, in
+[Running the fleet](RUNNING.md#how-an-agent-is-launched-for-a-headless-turn-wake); the
+plugin, extension and profile (Hive's package for each CLI) in
+[Preparing the repository](REPOSITORY.md#what-it-creates); the MCP server (Hive's tools) and
+hooks (Hive's automatic checks inside the CLI) in [What the agents see](AGENT_INTERFACE.md);
+and the `.rules` files in [Shell-command permissions](PERMISSIONS.md). If you only want to
+know what doesn't work yet, skip to [Current limitations](#current-limitations).
 
 ---
 
@@ -18,8 +27,9 @@ today.
 
 ## Verified with Codex CLI 0.163
 
-Driven end to end by a scripted model server in place of the OpenAI API
-(`tests/test_codex_e2e.py`, which runs when `codex` is installed):
+Driven end to end by an automated test (`tests/test_codex_e2e.py`, which runs when `codex` is
+installed) in which a scripted stand-in replaces the real AI model, so no account is
+needed:
 - `codex exec --json` and `exec resume <id>` with `-p hive`; the JSONL events Hive formats;
   the session id from `thread.started`.
 - The `hive` MCP server starts from the profile, receives the forwarded `HIVE_*` variables,
@@ -33,7 +43,7 @@ Driven end to end by a scripted model server in place of the OpenAI API
 
 ## Not yet exercised with a live, logged-in session
 
-These would use account quota:
+These need a real, logged-in account, and would use up some of its allowance:
 - Claude: that `--plugin-dir` loads the plugin's hooks and MCP server, and the tool name prefix
   `mcp__plugin_hive_hive__`.
 - Gemini: `--resume <uuid>` (Gemini documents `latest` or an index; see
@@ -47,16 +57,18 @@ These would use account quota:
 
 ## Current limitations
 
-- Typing into the orchestrator while it waits needs **Esc** first
-  ([Chatting in its terminal](ORCHESTRATOR.md#chatting-in-its-terminal)).
-- The orchestrator isn't yet told to answer `#user` messages in `#user`, so replies to
-  dashboard or `hive say` messages may appear only in its terminal.
-- Plans written to `.hive/plans/` aren't synchronized between machines; plans reach you
-  through the approval decision and reach programmers through task specs.
-- No detection of agents messaging each other in loops, and no push notifications yet.
-- Lease overlap checks are conservative ([Leases](INTEGRATION.md#leases)).
-- Shell commands can't be inspected reliably by hooks; the git `pre-commit` hook is the
-  backstop.
+- Typing to the orchestrator (the agent you chat with) while it's waiting for news needs
+  **Esc** first ([Chatting in its terminal](ORCHESTRATOR.md#chatting-in-its-terminal)).
+- The orchestrator isn't yet told to reply in the `#user` channel to messages you send there,
+  so replies to messages from the dashboard or `hive say` may appear only in its terminal.
+- Plans the orchestrator writes to `.hive/plans/` aren't copied between computers; the plan
+  reaches you in the approval question, and reaches programmers in their task descriptions.
+- Hive doesn't yet notice agents messaging each other in an endless loop, and can't send you
+  push notifications (e.g. to your phone).
+- The check whether two file locks ([leases](INTEGRATION.md#leases)) overlap is cautious, so
+  it sometimes refuses two locks whose files don't really overlap.
+- Hive's checks can't always tell in advance which files a shell command will change; the git
+  `pre-commit` hook, which re-checks every agent commit, catches what they miss.
 
 ---
 

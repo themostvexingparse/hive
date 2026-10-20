@@ -1,10 +1,22 @@
 # Using the `hive` command
 
 `hive` is the one command for everything in Hive: running the server, setting up a
-repository, adding agents, running machines, and steering the fleet. This guide shows each
-command with examples. [§15](#15-command-summary) is the one-table summary of every command
-and option; the [configuration reference](CONFIGURATION.md) has every config file and
-environment variable.
+repository, adding agents, running the computers that host them, and steering the **fleet**
+(the team of AI agents working on your repository). This guide shows each command with
+examples. [§15](#15-command-summary) is the one-table summary of every command and option;
+the [configuration reference](CONFIGURATION.md) has every config file and environment
+variable. If Hive is new to you, read [How Hive works](ARCHITECTURE.md) first; the
+[glossary](GLOSSARY.md) explains every term.
+
+**Names used in the examples:**
+- `~/code/myapp`: your local copy (clone) of the repository the agents work on;
+- `orch`, `dev`, `claude-2`, `gemini-1`, `codex-1`: example agent names (`orch` is the
+  orchestrator, the agent that plans and that you chat with; the others are workers);
+- `hive.example.com`: your Hive server's address;
+- `acme`, `beta`: example [projects](PROJECTS.md) on a server that hosts several
+  repositories; `~/code/acme-app` is `acme`'s repository;
+- `<…>` and `…`: a value you fill in, such as a token. Agent tokens (an agent's password,
+  printed when you create it) start with `hv_`; project admin tokens with `hp_`.
 
 ---
 
@@ -33,21 +45,26 @@ environment variable.
 
 | Where | Who | Commands |
 |---|---|---|
-| The server | the host (you) | `hive server` (for trials; production uses a WSGI host) |
-| Your computer | you, as admin | `hive admin …`, `hive init`, `hive overview`, `hive prompts`, `hive start`, `hive status`, `hive decisions`, `hive decide`, `hive say`, `hive watch`, `hive pause`, `hive resume`, `hive reset` |
-| Each agent machine | you, once per slot | `hive join`, `hive up`, `hive chat` |
-| Inside agent sessions | the agent CLIs | `hive mcp`, `hive hook` (you never run these) |
+| The server | the host (you) | `hive server` (for trials; online, the server runs as a Python web app on a web host instead, see [DEPLOYMENT.md](DEPLOYMENT.md)) |
+| Your computer | you, as admin (the person controlling the fleet) | `hive admin …`, `hive init`, `hive overview`, `hive prompts`, `hive start`, `hive status`, `hive decisions`, `hive decide`, `hive say`, `hive watch`, `hive pause`, `hive resume`, `hive reset` |
+| Each computer that runs agents | you, once per agent | `hive join`, `hive up`, `hive chat` |
+| Inside agents' sessions | the agents' CLIs (Claude Code, Gemini CLI, Codex) | `hive mcp`, `hive hook` (you never run these) |
 
-Your computer can be an agent machine too. That's the usual setup for the orchestrator.
+On a computer, each agent lives in a **slot**: its own working folder of the repository (a
+[git worktree](GLOSSARY.md#worktree)) and its own logged-in CLI account
+([Setting up machines](MACHINES.md)). Your computer can run agents too. That's the usual setup
+for the orchestrator.
 
-Examples below use POSIX shell syntax. They work the same in PowerShell and cmd, except
-where a section shows Windows variants.
+Examples below are written for bash or zsh (macOS, Linux, Git Bash on Windows). They work the
+same in PowerShell and cmd, except where a section shows Windows variants.
 
 ---
 
 ## 2. A first run, start to finish
 
-A complete trial on one machine: one server, one orchestrator, one programmer.
+A complete trial on one computer: one server, one orchestrator, one programmer (an agent
+that writes code). [Getting started](GETTING_STARTED.md) walks through the same steps with
+explanations.
 
 ```sh
 # 1. Start a server (keep this terminal open)
@@ -63,11 +80,11 @@ hive init
 git add hive.toml .hive && git commit -m "Wire for Hive" && git push
 hive admin push-config
 
-# 4. Enroll two agents (each prints a token and a ready-made `hive join` line)
+# 4. Create (enroll) two agents (each prints a token and a ready-made `hive join` line)
 hive admin enroll orch --vendor claude --roles orchestrator
 hive admin enroll dev  --vendor claude --roles programmer
 
-# 5. Add both as slots on this machine
+# 5. Add both to this computer (as slots), using the tokens from step 4
 hive join orch --vendor claude --token <orch token> --repo ~/code/myapp
 hive join dev  --vendor claude --token <dev token>  --repo ~/code/myapp
 
@@ -78,12 +95,12 @@ hive up
 
 # 8. In another terminal: give the fleet a goal, then approve the plan
 hive start "Add CSV export to the reports page"
-hive decisions
+hive decisions          # shows the plan as decision number 1
 hive decide 1 approve
 ```
 
-From here, follow along with `hive status` and `hive watch`, and answer decisions as they
-come.
+From here, follow along with `hive status` and `hive watch`, and answer decisions (questions
+the orchestrator asks you) as they come.
 
 ---
 
@@ -93,7 +110,7 @@ come.
 |---|---|
 | `--version` | Print Hive's version. |
 | `--color auto\|always\|never` | Colour the output. `auto` (default) colours only on a terminal. Also `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR`. |
-| `--project NAME` | Which project admin commands act on (§10). Can go anywhere on the line. Also `HIVE_PROJECT`. |
+| `--project NAME` | Which [project](PROJECTS.md) admin commands act on, when a server hosts several (§10). Can go anywhere on the line. Also the `HIVE_PROJECT` environment variable. |
 | `-h`, `--help` | Help for any command or subcommand, e.g. `hive join --help`. |
 
 ```sh
@@ -110,26 +127,28 @@ hive admin project --help
 hive server [--host H] [--port P] [--db URL] [--sqlite-journal wal|delete|truncate] [--admin-token T]
 ```
 
-This is the development server: good for trials and a LAN. For a public server, deploy the
-WSGI app instead ([DEPLOYMENT.md](DEPLOYMENT.md)).
+This is a simple built-in web server: good for trials and a local network. For a server on
+the internet, deploy Hive as a web app on a proper host instead
+([DEPLOYMENT.md](DEPLOYMENT.md)). The admin token is the password for the whole fleet; you make
+it up (see §2). `$HIVE_ADMIN_TOKEN` and `$TOKEN` below are shell variables holding it.
 
 ```sh
 # Local trial: SQLite file in the current folder, port 8765
 hive server --admin-token "$HIVE_ADMIN_TOKEN"
 
-# Reachable from other machines on your LAN, with the database somewhere specific
+# Reachable from other computers on your local network, with the database file somewhere specific
 hive server --host 0.0.0.0 --port 9000 --db sqlite:////srv/hive/hive.db --admin-token "$TOKEN"
 
-# MySQL instead of SQLite
+# A MySQL database instead of a SQLite file (user hive, password secret, server db.local)
 hive server --db "mysql+pymysql://hive:secret@db.local/hive" --admin-token "$TOKEN"
 ```
 
 | Option | Default | Notes |
 |---|---|---|
-| `--host` | `127.0.0.1` | `0.0.0.0` to accept other machines. |
+| `--host` | `127.0.0.1` | `127.0.0.1` accepts only this computer; `0.0.0.0` accepts other computers too. |
 | `--port` | `8765` | |
-| `--db` | `sqlite:///hive.db` | Ignored if `HIVE_DATABASE_URL` is set. On Windows write SQLite paths as `sqlite:///C:/path/hive.db`. |
-| `--sqlite-journal` | `wal` | Use `delete` on network filesystems. |
+| `--db` | `sqlite:///hive.db` | Where to store data ([database URL](GLOSSARY.md#sqlite-mysql-postgres-database-url)). Ignored if `HIVE_DATABASE_URL` is set. On Windows write SQLite paths as `sqlite:///C:/path/hive.db`. |
+| `--sqlite-journal` | `wal` | How SQLite writes its file. Use `delete` if the file is on a network drive. |
 | `--admin-token` | `HIVE_ADMIN_TOKEN` | Required one way or the other. |
 
 On start it prints the address, the dashboard URL, the database and the projects it serves.
@@ -142,15 +161,17 @@ On start it prints the address, the dashboard URL, the database and the projects
 hive admin login --server URL --token TOKEN
 ```
 
-Every admin command needs a login. It checks the token against the server and saves it in
-`~/.hive/admin.toml` (readable only by you).
+Every admin command needs a login. It checks the admin token against the server and saves it
+in `~/.hive/admin.toml` (readable only by you). On a server that hosts several
+[projects](PROJECTS.md), each project has its own address (`…/p/<project>`) and its own admin
+token, besides the server's own.
 
 ```sh
 # The server's admin token: admin of the whole server, every project
 hive admin login --server https://hive.example.com --token <HIVE_ADMIN_TOKEN>
 # → Logged in to https://hive.example.com as the server's admin (all projects).
 
-# A single project's admin token (§10)
+# A single project's admin token (§10); acme is an example project
 hive admin login --server https://hive.example.com/p/acme --token <acme's admin token>
 # → Logged in to https://hive.example.com/p/acme as admin of project acme.
 ```
@@ -174,19 +195,22 @@ hive admin login --server https://hive.example.com/p/acme --token <acme's admin 
 hive init [PATH] [--server URL] [--main BRANCH] [--hive-cmd CMD]
 ```
 
-Run once in a clone of the project (and again after upgrading Hive). It writes `hive.toml`
-and the agent bundles under `.hive/agent/`, and prints what to do next.
+Run once in a clone of the repository (and again after upgrading Hive). It writes `hive.toml`
+(the project's Hive settings) and, under `.hive/agent/`, the *bundles*: for each CLI, the
+tools, automatic checks and instructions Hive attaches to agents
+([Preparing the repository](REPOSITORY.md)). It prints what to do next.
 
 ```sh
 cd ~/code/myapp
 hive init                                         # server from your admin login
-hive init --main develop                          # the integration branch isn't `main`
+hive init --main develop                          # finished work goes into `develop`, not `main`
 hive init --server https://hive.example.com/p/acme   # a project on a shared server (§10)
 hive init ../other-repo                           # another folder
 hive init --hive-cmd /opt/hive/bin/hive           # agents' tools must call this exact `hive`
 ```
 
-Commit and push what it wrote (`hive.toml`, `.hive/`), so every machine gets it.
+Commit and push what it wrote (`hive.toml`, `.hive/`), so every agent's copy of the
+repository gets it.
 
 ### `hive admin push-config`: upload `hive.toml`
 
@@ -195,28 +219,30 @@ cd ~/code/myapp
 hive admin push-config
 ```
 
-The server keeps its own copy of `hive.toml` (roles, permissions, review policy). Upload it
-after every change. `hive start` also uploads it when run inside the repository.
+The server keeps its own copy of `hive.toml`, because it enforces the [roles](ROLES.md), the
+[shell-command permissions](PERMISSIONS.md) and the [review](INTEGRATION.md#reviews) setting
+in it. Upload it after every change. `hive start` also uploads it when run inside the
+repository.
 
 ### `hive overview`: check the whole setup
 
 ```sh
 hive overview              # this repository
 hive overview ../myapp     # another one
-hive overview --offline    # don't contact the server or the local daemon
+hive overview --offline    # don't contact the server, or the local daemon (the program hive up runs)
 ```
 
-It describes the repository, configuration, permissions, roles, prompt files, this machine's
-slots and the fleet. It ends with a list of **problems, each with the command that fixes it**.
+It describes the repository, configuration, permissions, roles, prompt files (your additions
+to the agents' instructions), this computer's slots and the fleet. It ends with a list of **problems, each with the command that fixes it**.
 Run it whenever something seems off.
 
 ### `hive prompts`: see what agents are told
 
 ```sh
-hive prompts                                         # a programmer
+hive prompts                                         # what a programmer is told
 hive prompts --role orchestrator
-hive prompts --role programmer,tester --slot dev --vendor gemini
-hive prompts --role reviewer --full                  # include the built-in skill text
+hive prompts --role programmer,tester --slot dev --vendor gemini   # as agent dev, on Gemini CLI
+hive prompts --role reviewer --full                  # include the built-in instructions (skill)
 hive prompts --path ../myapp
 ```
 
@@ -226,8 +252,8 @@ Use it after editing `.hive/prompts/` ([Customising what agents are told](PROMPT
 
 ## 7. Adding agents
 
-Adding an agent has two steps: **enroll** it on the server (your computer), then **join**
-it on the machine that will run it.
+Adding an agent has two steps: **enroll** (create) it on the server, from your computer, then
+**join** it on the computer that will run it ([Setting up machines](MACHINES.md)).
 
 ### `hive admin enroll`: create an agent
 
@@ -242,9 +268,11 @@ hive admin enroll gemini-1 --vendor gemini --roles reviewer,planner
 hive admin enroll codex-1  --vendor codex  --roles programmer,tester
 ```
 
-It prints the agent's **token, once**, and the full `hive join` command to run on the agent's
-machine (with the right `--server`, including the project if there is one). Names must match
-`^[a-z][a-z0-9-]{1,31}$`. `orchestrator` can't be combined with a coding role.
+`--vendor` is the CLI the agent runs; `--roles` says what it does ([Roles](ROLES.md)). It
+prints the agent's **token** (its password) **once**, and the full `hive join` command to run
+on the agent's computer (with the right `--server`, including the project if there is one).
+Names are 2 to 32 lowercase letters, digits and hyphens, starting with a letter
+(`^[a-z][a-z0-9-]{1,31}$`). `orchestrator` can't be combined with a role that writes code.
 
 ### `hive admin roles`: change an agent's roles
 
@@ -252,8 +280,8 @@ machine (with the right `--server`, including the project if there is one). Name
 hive admin roles claude-2 programmer,reviewer
 ```
 
-While the fleet is active, some changes become a decision for you to approve; Hive prints the
-`hive decide` command for it.
+This replaces the agent's roles. While the fleet is active, some changes become a decision
+(a question for you) to approve; Hive prints the `hive decide` command for it.
 
 ### `hive join`: add a slot to a machine
 
@@ -269,16 +297,18 @@ hive join claude-2 --vendor claude --token hv_… --server https://hive.example.
 # Choose the worktree's location
 hive join claude-2 --vendor claude --token hv_… --repo ~/code/myapp --worktree /fast-disk/myapp-c2
 
-# A Codex slot on a specific model, sandboxed to its worktree
+# A Codex agent on a specific AI model, allowed to write only inside its own folder
 hive join codex-1 --vendor codex --token hv_… --repo ~/code/myapp \
                   --model <model-name> --permission-mode workspace-write
 
-# Re-join to replace a lost or rotated token: server and worktree are kept
+# Re-join with a new token (after losing or replacing the old one): server and worktree are kept
 hive join claude-2 --vendor claude --token hv_new… --repo ~/code/myapp
 ```
 
-What it does: checks the token, creates the worktree on branch `hive/NAME`, installs the git
-pre-commit hook, creates the slot's private CLI config folder, and saves the slot to
+What it does: checks the token, creates the agent's working folder (a git worktree, next to
+your clone) on branch `hive/NAME`, installs a git `pre-commit` hook (a check git runs before
+each commit, refusing agents' commits of files they haven't locked), creates the agent's
+private CLI settings folder, and saves the slot to this computer's list,
 `~/.hive/machine.toml`. At the end it prints how to **log the slot's CLI account in once**,
 for your shell. For example, on Windows:
 
@@ -292,10 +322,10 @@ cd "C:\code\myapp-claude-2"; $env:CLAUDE_CONFIG_DIR = "C:\Users\you\.hive\accoun
 | `--repo PATH` | Your clone; the worktree goes next to it. |
 | `--worktree PATH` | Explicit worktree path. |
 | `--config-dir PATH` | The CLI account folder (default `~/.hive/accounts/NAME`). |
-| `--permission-mode MODE` | Claude: `acceptEdits` (default), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default), `read-only`, `danger-full-access`, `yolo`. |
-| `--model MODEL` | The model this slot's CLI uses (default: the account's). |
+| `--permission-mode MODE` | The CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default), `read-only`, `danger-full-access`, `yolo`. The defaults allow file edits; the others allow less or everything ([details](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)). |
+| `--model MODEL` | The AI model this agent's CLI uses (default: the account's). |
 | `--hive-cmd CMD` | How the git hook calls `hive`. |
-| `--replace` | Move an existing slot of this name to another server or project. Its local state is reset. |
+| `--replace` | Move an existing slot of this name to another server or project. What it remembers locally (messages seen, its conversation) is reset. |
 
 ---
 
@@ -304,17 +334,18 @@ cd "C:\code\myapp-claude-2"; $env:CLAUDE_CONFIG_DIR = "C:\Users\you\.hive\accoun
 ### `hive up`: run every slot on this machine
 
 ```sh
-hive up                # orchestrator slot (if any) opens interactively in this terminal
-hive up --headless     # run the orchestrator headless too (e.g. on a server box)
-hive up -v             # debug logging in ~/.hive/logs/daemon.log
+hive up                # the orchestrator (if it lives here) opens in this terminal for you to chat with
+hive up --headless     # run the orchestrator without a terminal too, like the workers (e.g. on a remote computer)
+hive up -v             # detailed logging in ~/.hive/logs/daemon.log
 ```
 
 - **On the orchestrator's machine,** the terminal becomes the orchestrator's chat. Workers on
   the same machine run in the background. When the session ends, Hive asks whether to
   relaunch it.
-- **On a worker machine,** the terminal streams every slot's live output. Stop with Ctrl+C.
-- **Slots of several servers or projects** run together; the start-up table then shows each
-  slot's server.
+- **On a computer with only workers,** the terminal shows what every agent does as it works.
+  Stop with Ctrl+C.
+- **Slots of several servers or projects** run together; the table `hive up` prints when it
+  starts then shows each slot's server.
 
 ### `hive chat`: take over a slot interactively
 
@@ -323,9 +354,10 @@ hive chat claude-2            # resume the slot's current session in its native 
 hive chat claude-2 --fresh    # start a new session
 ```
 
-Useful to log a CLI in, to look over an agent's shoulder, or to help it by hand. While you're
-attached, the daemon doesn't wake that slot headlessly. `hive up` should be running on that
-machine, otherwise Hive's tools and hooks won't work in the session.
+This opens the agent's own CLI in your terminal, continuing its conversation. Useful to log
+a CLI in, to look over an agent's shoulder, or to help it by hand. While you're attached,
+Hive doesn't start that agent in the background. `hive up` should be running on that
+computer, otherwise Hive's tools and automatic checks won't work in the session.
 
 ---
 
@@ -338,13 +370,14 @@ cd ~/code/myapp
 hive start "Add CSV export to the reports page, with tests"
 ```
 
-It uploads `hive.toml` (when run inside the repository) and moves the fleet to *planning*.
-The orchestrator plans, then asks you to approve the plan as a decision.
+It uploads `hive.toml` (when run inside the repository) and moves the fleet to the
+*planning* state ([The fleet lifecycle](LIFECYCLE.md)). The orchestrator plans, then asks you
+to approve the plan as a decision.
 
 ### `hive status`: what's going on
 
 ```sh
-hive status           # fleet, waiting decision, agents, open tasks, leases, recent updates
+hive status           # fleet state, waiting decision, agents, open tasks, leases (file locks), recent updates
 hive status --all     # include finished and cancelled tasks
 hive status -n 30     # the last 30 status updates (default 5)
 hive status -v        # status updates with their full bodies
@@ -363,8 +396,9 @@ hive decide 3 reject --note "Split the migration into its own task first"
 hive decide 7 "Use PostgreSQL; we already run it"     # free-text answer
 ```
 
-`hive decisions` prints a ready `hive decide` line for each option. In the orchestrator's own
-terminal you can answer without leaving it: `! hive decide 3 approve`.
+The number is the decision's, as `hive decisions` shows it. `hive decisions` prints a ready
+`hive decide` line for each option. In the orchestrator's own terminal you can answer without
+leaving it: `! hive decide 3 approve` (in Claude Code and Gemini CLI, `!` runs a shell command).
 
 ### `hive say`: message the orchestrator
 
@@ -372,7 +406,8 @@ terminal you can answer without leaving it: `! hive decide 3 approve`.
 hive say "Prioritise the API; the UI can wait until tomorrow"
 ```
 
-It posts to `#user` with high priority, which wakes the orchestrator within seconds.
+It posts to `#user`, the channel between you and the orchestrator, with high priority, which
+gets the orchestrator's attention within seconds.
 
 ### `hive watch`: follow live output
 
@@ -383,35 +418,38 @@ hive watch -n 1000        # start with the last 1000 lines
 hive watch --no-follow    # print and exit
 ```
 
-Only admins can read live output; agents can't, not even the orchestrator.
+Live output is what agents print while they work. Only admins can read it; agents can't, not
+even the orchestrator ([Watching the fleet](MONITORING.md)).
 
 ### `hive pause`, `hive resume`, `hive reset`
 
 ```sh
-hive pause     # stop every agent; lease timers pause too
+hive pause     # stop every agent; the clocks on file locks (leases) pause too
 hive resume    # back to the state before the pause
-hive reset     # emergency: back to setup; keeps agents, tasks and history
+hive reset     # emergency: back to the setup state; keeps agents, tasks and history
 ```
 
-To end a run and start over cleanly, use the dashboard's *Archives… → Archive & clear…*
+To end a run and start over cleanly, use the web dashboard's *Archives… → Archive & clear…*
 instead of `reset` ([Monitoring](MONITORING.md#archives)).
 
 ---
 
 ## 10. Several projects on one server
 
-One server can host several projects, each with its own fleet, agents and database. A project
-lives at `https://host/p/NAME`. The server's own address is the `default` project. See
+One server can host several projects (separate repositories), each with its own fleet,
+agents and database. A project lives at `https://host/p/NAME` (`host` being your server's
+address). The server's own address is the `default` project. The examples use two made-up
+projects, `acme` and `beta`. See
 [Several projects on one server](PROJECTS.md) for how it works.
 
 ### Managing projects (server admin only)
 
 ```sh
 hive admin project create acme --name "Acme Corp"          # prints its URL and admin token
-hive admin project create beta --db-url "mysql+pymysql://u:pw@db/u\$hive_beta"
+hive admin project create beta --db-url "mysql+pymysql://u:pw@db/u\$hive_beta"   # its own MySQL database
 hive admin project list
 hive admin project set acme --name "Acme Corporation"
-hive admin project set acme --github-token-env HIVE_GITHUB_TOKEN_ACME
+hive admin project set acme --github-token-env HIVE_GITHUB_TOKEN_ACME   # GitHub mode, see INTEGRATION.md
 hive admin project set acme --archive        # stop serving it; data is kept
 hive admin project set acme --unarchive
 hive admin project rotate acme               # new admin token; the old one stops working
@@ -445,7 +483,7 @@ hive admin push-config                          # goes to acme: hive.toml names 
 hive admin enroll orch --vendor claude --roles orchestrator
 hive admin enroll dev  --vendor codex  --roles programmer
 
-# On each agent machine (enroll printed these lines, with --server …/p/acme)
+# On each computer that runs agents (enroll printed these lines, with --server …/p/acme)
 hive join orch --vendor claude --token hv_… --server https://hive.example.com/p/acme --repo ~/code/acme-app
 hive up
 ```
@@ -463,7 +501,8 @@ hive join dev --vendor claude --token hv_… --server https://hive.example.com/p
 
 ### Handing a project to someone else
 
-Give them the project's admin token (from `create` or `rotate`). They log in with it:
+Give them the project's admin token (printed by `hive admin project create` or
+`hive admin project rotate`; it starts with `hp_`). They log in with it:
 
 ```sh
 hive admin login --server https://hive.example.com/p/acme --token hp_…
@@ -482,21 +521,22 @@ hive admin backup -o ~/backups/hive.db
 hive admin backup --project acme -o acme.db # one project's database
 ```
 
-This makes a consistent copy of a **SQLite** database inside the server process and
-downloads it. For MySQL or Postgres, use the database's own dump tool
+This makes a copy of a **SQLite** database file, taken safely while the server keeps running,
+and downloads it to your computer. For MySQL or Postgres, use the database's own backup
+(dump) tool
 ([DEPLOYMENT.md §10](DEPLOYMENT.md#10-backups-and-restore)).
 
 ---
 
 ## 12. Commands the agent CLIs run
 
-You don't run these yourself. They are listed so you recognise them in configs and process
-lists.
+You don't run these yourself. They are listed so you recognise them in configuration files and
+lists of running programs.
 
 | Command | Run by |
 |---|---|
-| `hive mcp [--slot S]` | Each agent CLI, to get Hive's MCP tools (stdio). |
-| `hive hook EVENT [--vendor V]` | The CLIs' hooks: message delivery and write enforcement. |
+| `hive mcp [--slot S]` | Each agent CLI, to get Hive's tools. It's an [MCP server](GLOSSARY.md#mcp-mcp-server-mcp-tool) (the standard way to give these CLIs extra tools), talking to the CLI over its standard input and output. |
+| `hive hook EVENT [--vendor V]` | The CLIs' [hooks](GLOSSARY.md#hook), automatic checks at fixed moments: they deliver messages and refuse edits the agent isn't allowed to make. |
 | `hive hook git-pre-commit` | The git pre-commit hook installed by `hive join`. |
 
 ---
@@ -513,7 +553,10 @@ hive overview
 hive join claude-2 --vendor claude --token <new token> --server https://new.example.com --replace
 ```
 
-**An agent's token was lost.** Rotate it with the admin token, then re-join with the new one:
+**An agent's token was lost.** Ask the server for a new one (*rotate* it; the old one stops
+working), then re-join with the new one. There's no `hive` command for this yet, so the first
+line calls the server's web API directly with `curl`, using your admin token; it prints the
+new token:
 ```sh
 curl -X POST -H "Authorization: Bearer $HIVE_ADMIN_TOKEN" https://hive.example.com/api/v1/agents/claude-2/token
 hive join claude-2 --vendor claude --token <new token> --repo ~/code/myapp
@@ -527,8 +570,8 @@ for p in acme beta; do hive --project "$p" status --color never; done
 **The orchestrator is waiting and you want to talk to it now.** In its terminal press **Esc**,
 then type. From anywhere else: `hive say "…"`.
 
-**End a run and keep its history.** Dashboard → ⋯ → *Archives…* → *Archive & clear…*, then
-`hive start "<next goal>"`.
+**End a run and keep its history.** Dashboard → ⋯ menu → *Archives…* → *Archive & clear…*
+([Archives](MONITORING.md#archives)), then `hive start "<next goal>"`.
 
 ---
 
@@ -542,7 +585,7 @@ then type. From anywhere else: `hive say "…"`.
 | `token belongs to 'x', not 'y'` | The token is for another agent; check the name you passed to `hive join`. |
 | `this machine already has a slot named 'dev', for …` | Another server or project's slot has that name. Use another name, or `--replace` to move the slot. |
 | `no slots on this machine; run hive join first` | `hive up` has nothing to run. |
-| `could not reach the Hive server for …` | `hive up` couldn't confirm a slot's identity. Check the server is up and the tokens in `~/.hive/machine.toml` are valid; `hive overview` helps. |
+| `could not reach the Hive server for …` | `hive up` couldn't check with the server which agent a slot is. Check the server is up and the tokens in `~/.hive/machine.toml` are valid; `hive overview` helps. |
 | `no project named 'x' on this server` | Wrong project name in the URL, or the project was archived (`hive admin project list`). |
 | `no hive.toml found (run hive init)` | Run the command inside a repository prepared with `hive init`. |
 
@@ -608,12 +651,15 @@ and Linux:
 - **Agent output:** in `hive up` and `hive watch`, tool calls, results, errors and session
   notes each get their own colour.
 
-Hive's ANSI colours work in Windows Terminal, PowerShell and cmd.exe on Windows 10+, where Hive
-switches the console's VT mode on itself, and in any macOS or Linux terminal. If a console font
-can't show a symbol, or the output encoding can't represent it, Hive falls back to ASCII.
+Hive's colours (standard terminal colour codes, called ANSI codes) work in Windows Terminal,
+PowerShell and cmd.exe on Windows 10 and later, where Hive switches on the console's support
+for them itself, and in any macOS or Linux terminal. If a console font can't show a symbol, or
+the output's character encoding can't represent it, Hive uses plain ASCII characters
+instead.
 
-Colour is used only when the output is a terminal. Pipes, files, git hooks and agent CLIs get
-plain text, and the MCP and hook protocols are never coloured. To force colour on or off,
+Colour is used only when the output is a terminal. Output sent to another program (a pipe),
+a file, a git hook or an agent's CLI is plain text, and what Hive's tools and hooks send to
+the agents is never coloured. To force colour on or off,
 these settings are checked in order and the first one set wins:
 
 1. `hive --color always|never|auto ...` (before the subcommand);
@@ -621,8 +667,8 @@ these settings are checked in order and the first one set wins:
 3. `NO_COLOR=1` (off);
 4. `FORCE_COLOR=1` (on).
 
-Git Bash's default terminal (mintty) doesn't present itself as a console to Windows programs,
-so set `HIVE_COLOR=always` there. The installers (`install.bat`, `install.sh`) are coloured
+The terminal window Git Bash opens by default (called mintty) doesn't present itself to
+Windows programs as a console, so set `HIVE_COLOR=always` there. The installers (`install.bat`, `install.sh`) are coloured
 too and respect `NO_COLOR`; `install.sh` uses no colour when its output isn't a terminal.
 
 ---

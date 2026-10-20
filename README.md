@@ -8,24 +8,31 @@
 
 **Turn several subscription-based coding agents into one coordinated team.**
 
-Hive connects **Claude Code**, **Gemini CLI** and **Codex** agents, each running as the
-vendor's official CLI on a computer you own and logged in to its own account, into one fleet
-that works on one repository. A non-coding **orchestrator** plans the work and keeps you
-informed; **workers** pick up tasks, lock the files they edit, and merge their work into
-`main` once your checks pass. You stay in charge throughout: you approve the plan, answer
-the questions only you can answer, and watch everything live.
+Hive connects AI coding agents (**Claude Code**, **Gemini CLI** and **Codex**) into one
+team, called a **fleet**, that works on one git repository. Each agent is the vendor's
+official command-line program (CLI), running on a computer you own and logged in to its own
+subscription account. One agent, the **orchestrator**, plans the work and keeps you
+informed but never writes code. The others, the **workers**, pick up tasks, lock the files
+they edit, and merge their work into the repository's `main` branch once your tests pass.
+You stay in charge throughout: you approve the plan, answer the questions only you can
+answer, and watch everything live.
+
+New to the terms? The [glossary](docs/GLOSSARY.md) explains every one in plain words.
 
 ---
 
 ## What it does
 
-- **One shared repository.** Every agent works in its own git worktree and branch. Finished
-  work is committed, rebased, checked and pushed to `main` automatically, and every other
-  agent syncs to the new `main`.
+- **One shared repository.** Every agent works in its own
+  [git worktree](docs/GLOSSARY.md#worktree) (a separate working folder of the same
+  repository) on its own branch. Finished work is committed,
+  [rebased](docs/GLOSSARY.md#rebase) onto the latest `main`, tested and pushed
+  automatically, and every other agent syncs to the new `main`.
 - **A task board with automatic assignment.** The orchestrator splits your goal into tasks;
   the server hands each one to an idle agent whose role fits it.
 - **File leases.** An agent must lock (lease) every path it edits, so two agents never edit
-  the same files at once. Hooks refuse any other write.
+  the same files at once. [Hooks](docs/GLOSSARY.md#hook), checks Hive runs inside the agent's
+  CLI before every action, refuse any other write.
 - **A message board.** Channels, direct messages and priorities, up to interrupts that reach
   an agent in the middle of its turn.
 - **Roles.** Orchestrator, programmer, planner, reviewer and tester are built in. You can
@@ -34,11 +41,14 @@ the questions only you can answer, and watch everything live.
   `rm -rf`, `sudo`, …) need the orchestrator's approval; and commands that would let an agent
   act as you are impossible.
 - **Live visibility, for you only.** Follow every agent's output from anywhere with
-  `hive watch` or the web dashboard. Agents never see each other's output, only reports.
+  `hive watch` in a terminal or the server's web dashboard. Agents never see each other's
+  output, only the written reports they file.
 - **Mixed fleets.** Windows, macOS and Linux machines, and several accounts per machine. One
   server can host several projects.
-- **Cheap to host.** The server is a plain WSGI app with no background workers: it runs on a
-  PythonAnywhere plan or any small VPS.
+- **Cheap to host.** The Hive server is a plain Python web app
+  ([WSGI](docs/GLOSSARY.md#wsgi)) with no background processes: it runs on a
+  [PythonAnywhere](docs/GLOSSARY.md#pythonanywhere) plan or any small rented Linux server
+  ([VPS](docs/GLOSSARY.md#vps)).
 
 ### Two rules that always hold
 
@@ -46,12 +56,15 @@ the questions only you can answer, and watch everything live.
 2. **When an agent is stuck and only you can resolve it, the whole fleet freezes until you
    answer.**
 
-Both are enforced by the server and by hooks, not by asking the models nicely.
+Both are enforced in code, by the server and by hooks, not by asking the AI models nicely.
 
 ### No API keys
 
-Hive uses no vendor API keys. It drives the official CLIs through their documented features:
-interactive and headless modes, MCP servers, hooks, and plugins/extensions. It never extracts
+Hive uses no vendor API keys (the paid, per-request access some vendors sell). It drives the
+official CLIs through their documented features: interactive and
+[headless](docs/GLOSSARY.md#headless-and-interactive) modes,
+[MCP servers](docs/GLOSSARY.md#mcp-mcp-server-mcp-tool) (a standard way to give agents extra
+tools), hooks, and plugins/extensions. It never extracts
 or proxies account credentials, and each account is used only by its own CLI. Check each
 vendor's terms for your own situation, for example how many accounts one person may run.
 
@@ -70,12 +83,15 @@ vendor's terms for your own situation, for example how many accounts one person 
                                git origin (main)
 ```
 
-- **The server** is the single source of truth: agents, tasks, messages, leases, fleet state,
-  decisions, reports, live output, and the web dashboard.
-- **A daemon** on each machine (`hive up`) polls the server, wakes its agents when something
-  concerns them, and runs their git work.
+- **The server** (`hive server`) is the single source of truth: agents, tasks, messages,
+  leases, fleet state, decisions (questions for you), reports, live output, and the web
+  dashboard. It runs once, on your computer for a trial or on a web host.
+- **A daemon**, a background program started by `hive up`, runs on each computer that hosts
+  agents. It asks the server every few seconds whether anything concerns its agents, starts
+  them when it does, and runs their git work.
 - **The agents** are the unmodified vendor CLIs. Hive attaches its tools, hooks and
-  instructions to the sessions it launches, and to no others.
+  instructions to the sessions it launches, and to no others: a `claude` you open yourself is
+  unaffected.
 
 ➜ The full picture, a glossary, and the path from a goal to commits on `main`:
 [How Hive works](docs/ARCHITECTURE.md).
@@ -84,7 +100,12 @@ vendor's terms for your own situation, for example how many accounts one person 
 
 ## Quick start
 
-A trial on one computer, with one orchestrator and one programmer:
+A trial on one computer, with one orchestrator and one programmer. You need Hive
+([installation](docs/INSTALLATION.md)), git, a repository you can push to, and Claude Code
+with two accounts. `<token>` is a password you make up for the server (the *admin token*);
+`~/code/myapp` stands for your repository's folder; `orch` and `dev` are names you choose for
+the two agents. Each `hive admin enroll` prints the agent's own token for the `hive join`
+line below it.
 
 ```sh
 hive server --admin-token <token>                                 # 1. a local server
@@ -97,7 +118,7 @@ hive admin enroll orch --vendor claude --roles orchestrator       # 4. two agent
 hive admin enroll dev  --vendor claude --roles programmer
 hive join orch --vendor claude --token <orch token> --repo ~/code/myapp
 hive join dev  --vendor claude --token <dev token>  --repo ~/code/myapp
-#   log each slot's account in once (hive join prints the command)
+#   log each agent's account in once (hive join prints the command)
 
 hive up                                                           # 5. the orchestrator opens here
 hive start "Add CSV export to the reports page"                   # 6. in another terminal
@@ -115,7 +136,8 @@ hive decide 1 approve                                             #    approve t
 | Guide | What it covers |
 |---|---|
 | [Getting started](docs/GETTING_STARTED.md) | A first fleet on one computer, from installing to approving the first plan, with what each step does. |
-| [How Hive works](docs/ARCHITECTURE.md) | The server, daemons and agents; a glossary; how a goal becomes commits on `main`; how rules are enforced. |
+| [How Hive works](docs/ARCHITECTURE.md) | The server, daemons and agents; how a goal becomes commits on `main`; how rules are enforced. |
+| [Glossary](docs/GLOSSARY.md) | Every term in plain words, and the example names used in these docs. |
 | [Requirements and installation](docs/INSTALLATION.md) | What each machine needs, the installer scripts and their options, and why `hive` must be on PATH. |
 
 ### Setting up
@@ -126,13 +148,13 @@ hive decide 1 approve                                             #    approve t
 | [Deploying the server](docs/DEPLOYMENT.md) | Hosting on PythonAnywhere or a VPS: capacity planning with measured numbers, upgrades, backups, monitoring and hardening. |
 | [Several projects on one server](docs/PROJECTS.md) | Hosting several repositories and fleets on one server, each with its own database and admin token. |
 | [Preparing the repository](docs/REPOSITORY.md) | What `hive init` creates and why it doesn't affect your own CLI sessions; checking everything with `hive overview`. |
-| [Enrolling agents and setting up machines](docs/MACHINES.md) | Creating agents, adding them to machines as slots with their own worktrees, and logging their accounts in. |
+| [Enrolling agents and setting up machines](docs/MACHINES.md) | Creating agents, adding them to computers as *slots* (an agent's own working folder and account), and logging their accounts in. |
 
 ### Running a fleet
 
 | Guide | What it covers |
 |---|---|
-| [Running the fleet](docs/RUNNING.md) | `hive up` on the orchestrator's machine and on workers; how a headless turn is launched; taking over a slot with `hive chat`. |
+| [Running the fleet](docs/RUNNING.md) | `hive up` on the orchestrator's computer and on workers' computers; how a worker is started for a piece of work; taking over an agent with `hive chat`. |
 | [Working with the orchestrator](docs/ORCHESTRATOR.md) | Chatting with it, answering its decisions, its status updates, and what it can and can't do. |
 | [Watching the fleet](docs/MONITORING.md) | Live output with `hive watch`, and the web dashboard: every panel, filters, and archives of past runs. |
 | [The fleet lifecycle](docs/LIFECYCLE.md) | Fleet states from `setup` to `running`: plan approval, freezing on stuck agents, pausing and resetting. |
@@ -149,7 +171,7 @@ hive decide 1 approve                                             #    approve t
 
 | Guide | What it covers |
 |---|---|
-| [What the agents see](docs/AGENT_INTERFACE.md) | The MCP tools each role gets, the hooks that deliver messages and enforce leases, and the skills. |
+| [What the agents see](docs/AGENT_INTERFACE.md) | The tools each role gets, the hooks that deliver messages and enforce leases, and the written procedures (skills) agents follow. |
 | [Shell-command permissions](docs/PERMISSIONS.md) | The three command tiers (allowed, approved by the orchestrator, never), how approvals work, and how to customise them. |
 | [Customising what agents are told](docs/PROMPTS.md) | Adding your project's conventions to the agents' instructions with `.hive/prompts/`, placeholders, and previewing the result. |
 | [Security model](docs/SECURITY.md) | Tokens and what each can do, who sees what, secrets in output, prompt injection, and a checklist. |
@@ -170,6 +192,6 @@ hive decide 1 approve                                             #    approve t
 ## Status
 
 Hive is under active development. The server, daemon, leases, git integration and dashboard
-are covered by unit and end-to-end tests, and Codex support is tested end to end against the
+are covered by automated unit and end-to-end tests, and Codex support is tested end to end against the
 real CLI. Some integration points haven't yet been exercised with live, logged-in accounts;
 [Known limitations](docs/LIMITATIONS.md) lists them.

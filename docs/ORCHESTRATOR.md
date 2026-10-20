@@ -1,9 +1,11 @@
 # Working with the orchestrator
 
-The orchestrator is the only agent you normally talk to. It is a regular Claude Code, Gemini
-CLI or Codex session with the `orchestrator` role: it plans the work, splits it into tasks,
-assigns them, answers workers' questions, approves their risky commands, checks their
-reports, and keeps you informed. It never writes code itself.
+A Hive fleet is a team of AI coding agents working on one repository. The orchestrator is
+the one agent in it that you normally talk to. It is a regular Claude Code, Gemini CLI or
+Codex session given the `orchestrator` [role](ROLES.md): it plans the work, splits it into
+[tasks](COORDINATION.md#tasks), assigns them, answers the other agents' (the **workers'**)
+questions, approves their risky shell commands, checks the **reports** they write about
+their work, and keeps you informed. It never writes code itself.
 
 Think of it as a project lead you chat with. You give it the goal and your preferences; it
 comes back to you with a plan to approve, questions only you can answer, and regular status
@@ -14,28 +16,40 @@ can't do.
 
 ## Chatting in its terminal
 
-The terminal where `hive up` launched the orchestrator **is** the chat
+On the computer that hosts the orchestrator, `hive up` opens its CLI in your terminal. That
+terminal **is** the chat
 ([Running the fleet](RUNNING.md#the-machine-with-the-orchestrator-your-computer)).
 - **When the orchestrator is working or replying,** just type, as in any session.
-- **When it's waiting in `await_events`** (a long-running tool call), press **Esc** to cancel
-  the wait, then type. If you type without Esc, the message is most likely queued until the
-  wait returns, which can take up to 10 minutes.
-- **After replying,** it goes back to `await_events` on its own, as its skill instructs.
+- **When it's idle,** it is waiting inside `await_events`, one of the tools Hive gives it.
+  Your CLI shows this as a tool call that's still running. Press **Esc** to cancel the wait,
+  then type. If you type without Esc, the message is most likely queued until the wait
+  returns, which can take up to 10 minutes.
+- **After replying,** it goes back to `await_events` on its own, as its
+  [skill](GLOSSARY.md#skill) (its written operating procedure) instructs.
 
-`await_events` is how the orchestrator waits without spending tokens. It blocks inside the
-daemon and returns as soon as something needs attention: an urgent event within about 3
-seconds, routine events after the batching window (`debounce_seconds`, 90 s by default)
-([MCP tools](AGENT_INTERFACE.md#mcp-tools-hive-server)).
+`await_events` is how the orchestrator waits without using any of its account's model usage.
+It waits inside the [daemon](GLOSSARY.md#daemon) (the background program `hive up` runs) and
+returns as soon as something needs attention:
+- **urgent events** (your messages, finished or failed tasks, stuck agents, …) within about 3
+  seconds;
+- **routine events** (progress notes, ordinary messages) collected over a short window, 90 s
+  by default (`debounce_seconds` in [`hive.toml`](CONFIGURATION.md#hivetoml)), so they arrive
+  together.
+
+It then returns a summary (*digest*) of what happened. See
+[MCP tools](AGENT_INTERFACE.md#await_events) for details.
 
 ---
 
 ## Chatting from anywhere else
 
 - **Dashboard:** the *Orchestrator* panel ([The web dashboard](MONITORING.md#the-web-dashboard)).
-- **CLI:** `hive say "Prioritise the API before the UI"` from any machine logged in as admin.
+- **CLI:** `hive say "Prioritise the API before the UI"` from any computer where you've run
+  `hive admin login` ([Log in as admin](SERVER.md#log-in-as-admin)).
 
-Both post to the `#user` channel. That **ends the orchestrator's wait within seconds**, and
-your message is in the digest it receives.
+Both post to the `#user` channel, the message channel between you and the orchestrator
+([Messages](COORDINATION.md#messages-and-priorities)). That **ends the orchestrator's wait
+within seconds**, and your message is in the digest it receives.
 
 **Caveat:** its replies may appear only in its terminal. The skill doesn't yet tell it to
 answer `#user` messages in `#user` ([Known limitations](LIMITATIONS.md)).
@@ -44,43 +58,48 @@ answer `#user` messages in `#user` ([Known limitations](LIMITATIONS.md)).
 
 ## Answering decisions
 
-A **decision** is a question the orchestrator raises for you, with options and context. The
-orchestrator can **ask** you things but can never **answer** for you: answering needs the
-admin token, which agents don't have. There are three kinds:
+A **decision** is a question the orchestrator raises for you, with options and context.
+Each has a number. The orchestrator can **ask** you things but can never **answer** for you:
+answering needs the admin token (your password for the server), which agents don't have.
+There are three kinds:
 
 | Kind | Raised when | Effect while open |
 |---|---|---|
 | Start approval | The plan is ready ([Planning and approval](LIFECYCLE.md#planning-and-approval)) | Nobody codes until you approve. |
-| Stuck | An agent is blocked and only you can unblock it ([Stuck agents and freezing](LIFECYCLE.md#stuck-agents-and-freezing)) | The whole fleet freezes. |
-| Question | Anything else it wants your view on, such as a role change | Nothing is blocked. |
+| Stuck | An agent is blocked and only you can unblock it ([Stuck agents and freezing](LIFECYCLE.md#stuck-agents-and-freezing)) | The whole fleet freezes: every agent stops until you answer. |
+| Question | Anything else it wants your view on, such as changing an agent's role | Nothing is blocked. |
 
-Ways to answer:
+Ways to answer (in these examples, `3` is the decision's number, shown by `hive decisions`):
 
 | Where | How |
 |---|---|
 | Orchestrator's terminal | `! hive decide 3 approve` (the `!` prefix runs a shell command in Claude Code and Gemini CLI) |
-| Any admin terminal | `hive decisions` to read; `hive decide 3 approve --note "keep it small"` to answer |
+| Any terminal where you're logged in as admin | `hive decisions` to read; `hive decide 3 approve --note "keep it small"` to answer |
 | Dashboard | the *Decisions* panel: option buttons plus a note field |
 
-The note is passed to the orchestrator with your answer. Use it to explain a rejection or to
-add constraints.
+The answer can be one of the offered options or any text. The note is passed to the
+orchestrator with your answer. Use it to explain a rejection or to add constraints.
 
 ---
 
 ## How it keeps you informed
 
 - After handling a batch of events it **publishes a status update**: a one-line summary of
-  what changed since the last update, details in the body, and a level of `fyi`,
-  `decision-needed` or `alert`.
+  what changed since the last update, details in the body, and a level: `fyi` (for your
+  information), `decision-needed` (you need to answer a decision) or `alert` (something
+  went wrong).
 - Status updates appear in `hive status`, `hive status -v` (with bodies), and the dashboard's
   *Updates* panel.
-- It keeps its memory in `.hive/orchestrator/state.md` in its worktree (git-ignored), so it
-  can resume after restarts and new sessions.
-- It learns what workers did from their **reports**, not from their raw output, and checks
-  their claims against the repository ([Reports](COORDINATION.md#reports)).
+- It keeps notes in `.hive/orchestrator/state.md` in its own working folder of the
+  repository (its [worktree](GLOSSARY.md#worktree)); git ignores the file, so it's never
+  committed. That lets it pick up where it left off after a restart or a fresh conversation.
+- It learns what workers did from their **reports**, not from their raw output (everything
+  they printed), and checks their claims against the repository
+  ([Reports](COORDINATION.md#reports)).
 
-You can shape how it reports to you (length, frequency, what to lead with) in
-`.hive/prompts/orchestrator.md` ([Customising what agents are told](PROMPTS.md)).
+You can shape how it reports to you (length, frequency, what to lead with) by writing
+instructions in `.hive/prompts/orchestrator.md` in the repository
+([Customising what agents are told](PROMPTS.md)).
 
 ---
 
@@ -88,26 +107,32 @@ You can shape how it reports to you (length, frequency, what to lead with) in
 
 **Can:**
 - create, assign, reassign and cancel tasks;
-- message anyone, including `interrupt` priority;
+- message anyone, including with `interrupt` priority, which makes the recipient stop and
+  handle it first ([Messages](COORDINATION.md#messages-and-priorities));
 - raise decisions;
 - request reports and read every report;
 - approve or deny workers' dangerous shell commands ([Shell-command permissions](PERMISSIONS.md));
-- revoke stale leases;
-- propose role changes (changes to mandatory roles need your approval);
+- take away [leases](INTEGRATION.md#leases) (agents' locks on files) that an agent no longer
+  needs or can't release, e.g. because its computer died;
+- propose role changes (changes to required roles, `orchestrator` and `programmer`, need
+  your approval);
 - pause and resume the fleet;
 - read the repository and run read-only commands;
-- review work when there is no reviewer.
+- review work when no agent has the `reviewer` role ([Reviews](INTEGRATION.md#reviews)).
 
 **Can't:**
-- edit source files (only `.hive/**` is writable for it, and not `.hive/prompts/`);
+- edit source files (it may only write inside the repository's `.hive/` folder, and not in
+  `.hive/prompts/`);
 - take leases or commit;
 - answer decisions;
 - see agents' live output.
 
-These limits are enforced by the server and hooks, not just by its instructions
+These limits are enforced by the server and by Hive's [hooks](GLOSSARY.md#hook) (automatic
+checks inside the agent's CLI), not just by its instructions
 ([How roles are enforced](ROLES.md#how-roles-are-enforced)).
 
-If the orchestrator runs out of quota or goes offline, a **standby** can take over
+If the orchestrator's account runs out of usage or its computer goes offline, a **standby**
+(another agent you named in `hive.toml` in advance) can take over
 ([Changing roles](ROLES.md#changing-roles)).
 
 ---

@@ -1,19 +1,23 @@
 # Development
 
 This page is for working on Hive itself: running the tests, finding your way around the
-source, and the documents that record its design and reviews.
+source, and the documents that record its design and reviews. If you're new to how Hive's
+parts fit together (server, daemon, agents), read [How Hive works](ARCHITECTURE.md) first;
+the [glossary](GLOSSARY.md) explains the terms.
 
 ---
 
 ## Setting up
 
+In a clone of Hive's source, with [uv](GLOSSARY.md#uv) installed:
+
 ```sh
-uv sync
-uv run pytest -q
-uv run hive --version        # the development copy, without installing it
+uv sync                      # create a private Python environment with Hive and its dependencies
+uv run pytest -q             # run the test suite (pytest)
+uv run hive --version        # run the development copy, without installing it
 ```
 
-To try a change in a real fleet, re-install it on each machine with the installer scripts
+To try a change with real agents, re-install it on each computer with the installer scripts
 ([Installation](INSTALLATION.md)); `install.bat /test` or `install.sh --test` runs the suite
 first and installs only if it passes.
 
@@ -40,8 +44,9 @@ first and installs only if it passes.
 | `tests/test_daemon.py` | daemon and CLI robustness |
 | `tests/test_ui.py` | coloured terminal output |
 
-The end-to-end tests use `tests/fake_agent.py`, a scripted stand-in for a vendor CLI, so
-they need no accounts and use no quota.
+The end-to-end tests run the real server, daemon and git, and use `tests/fake_agent.py`, a
+scripted stand-in for an AI coding CLI, so they need no accounts and use none of an
+account's allowance.
 
 ---
 
