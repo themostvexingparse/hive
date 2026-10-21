@@ -1,8 +1,8 @@
 #!/bin/bash
 # ===========================================================================
-#  Hive server installer for PythonAnywhere: removes the previous Hive install
-#  (its virtualenv, and stray `pip install --user` copies) and installs this
-#  project directory fresh, then reloads the web app.
+#  Hive server installer for PythonAnywhere: installs this project directory
+#  into the web app's virtualenv (removing stray `pip install --user` copies),
+#  then reloads the web app and cleans up what earlier installs left behind.
 #
 #  Run it in a PythonAnywhere Bash console, from this project's folder:
 #
@@ -15,9 +15,17 @@
 #  dashboard archives. The WSGI file is only copied to a private backup folder
 #  and touched to reload the web app.
 #
-#  Safe swap: the old virtualenv is moved aside, a new one is built and tested,
-#  and only then is the web app reloaded. If anything fails, or the reloaded
-#  site doesn't answer its health check, the old virtualenv is put back.
+#  In place (default): the virtualenv is updated, so packages it already has are
+#  kept and only new or changed ones are downloaded; pip's download cache is kept
+#  until an install succeeds, so a retry doesn't download them again. The
+#  previous Hive package and package list are saved first. With --fresh (or a
+#  Python version change), the old virtualenv is moved aside and a new one built,
+#  which needs room for both.
+#
+#  Free space is checked before anything changes. If anything fails, or the
+#  reloaded site doesn't answer its health check, the previous installation is
+#  put back. After a successful install, replaced virtualenvs, older WSGI backups
+#  and pip's download cache are removed (never the database or the archives).
 # ===========================================================================
 set -u
 
@@ -48,15 +56,19 @@ ${B}Usage:${R} ./install-pa-server.sh [options]
   --url URL          site to health-check after reloading (default: from the WSGI
                      file name, e.g. https://USER.pythonanywhere.com)
   --extra "PKGS"     more pip packages to install into the virtualenv
-  --no-reload        install only; reload on the Web tab yourself
-  --keep-old         keep the previous virtualenv as <venv>.previous-<time>
+  --no-reload        install only; reload on the Web tab yourself (implies --keep-old)
+  --fresh            build a new virtualenv instead of updating it (needs room for two)
+  --keep-old         keep the previous virtualenv as <venv>.previous-<time> (implies --fresh)
+  --quota MB         your disk quota, for the free-space check (default: detected;
+                     PythonAnywhere's free plan has 512)
+  --skip-space-check don't check free disk space first
   --skip-pa-check    run even if this doesn't look like PythonAnywhere
 EOF
     exit "${1:-0}"
 }
 
 ASSUME_YES=0; VENV="$HOME/.virtualenvs/hive"; PYARG=""; WSGI=""; URL=""; EXTRA=""
-RELOAD=1; KEEP_OLD=0; PA_CHECK=1
+RELOAD=1; KEEP_OLD=0; PA_CHECK=1; FRESH=0; QUOTA_MB=""; SPACE_CHECK=1
 need_val() { [ $# -ge 2 ] && [ -n "$2" ] || { err "$1 needs a value."; usage 1; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,6 +80,10 @@ while [ $# -gt 0 ]; do
         --extra)         need_val "$@"; EXTRA="$2"; shift ;;
         --no-reload)     RELOAD=0; KEEP_OLD=1 ;;  # unchecked live: keep a way back
         --keep-old)      KEEP_OLD=1 ;;
+        --fresh)         FRESH=1 ;;
+        --quota)         need_val "$@"; QUOTA_MB="$2"; shift
+                         [[ "$QUOTA_MB" =~ ^[0-9]+$ ]] || { err "--quota needs a number of MB."; exit 1; } ;;
+        --skip-space-check) SPACE_CHECK=0 ;;
         --skip-pa-check) PA_CHECK=0 ;;
         -h|--help)       usage ;;
         *) err "Unknown option: $1"; usage 1 ;;
@@ -91,6 +107,55 @@ vbin() { if [ -d "$1/Scripts" ] && [ ! -d "$1/bin" ]; then echo "$1/Scripts"; el
 # inside PATH DIR: is PATH (which need not exist yet) DIR itself or somewhere below it?
 canon() { realpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; }
 inside() { case "$(canon "$1")/" in "$(canon "$2")"/*) return 0 ;; esac; return 1; }
+
+# --- Disk space -----------------------------------------------------------------------
+kb_of() { du -sk -- "$@" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
+human() { awk -v k="$1" 'BEGIN { if (k >= 1048576) printf "%.1f GB", k / 1048576;
+                                 else if (k >= 1024) printf "%.0f MB", k / 1024;
+                                 else printf "%d KB", k }'; }
+PIP_CACHE="${PIP_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pip}"
+# Sets FREE_KB (empty if unknown) and FREE_SRC (where the number comes from).
+read_free() {
+    local used
+    if [ -n "$QUOTA_MB" ]; then
+        used=$(kb_of "$HOME")
+        FREE_KB=$(( QUOTA_MB * 1024 - used ))
+        FREE_SRC="--quota $QUOTA_MB MB, $(human "$used") used"
+        return
+    fi
+    # A per-user filesystem quota, if the quota tool is installed: used KB, soft and hard limits.
+    FREE_KB=$(quota -w 2>/dev/null | awk 'NF >= 4 && $2 ~ /^[0-9]+\*?$/ {
+        u = $2; sub(/\*/, "", u); l = ($4 > 0 ? $4 : $3); if (l > 0) { print l - u; exit } }')
+    if [ -n "$FREE_KB" ]; then FREE_SRC="disk quota"; return; fi
+    FREE_KB=$(df -Pk "$HOME" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    FREE_SRC="free space on the disk"
+}
+
+# Leftovers of earlier installs: replaced or failed virtualenvs, older WSGI backups and, with
+# $1 = cache, pip's download cache. $2 is the backup folder to keep (default: the newest).
+# Never the database, the dashboard archives, the project folder or the live virtualenv.
+cleanup_leftovers() {
+    local p keep="${2:-}" items=()
+    for p in "$VENV".previous-* "$VENV".broken-*; do
+        [ -e "$p" ] && [ "$p" != "$OLD" ] && items+=("$p")  # $OLD: kept on purpose this run
+    done
+    if [ -d "$HOME/hive-install-backups" ]; then
+        [ -n "$keep" ] || keep=$(ls -1d "$HOME"/hive-install-backups/*/ 2>/dev/null | sort | tail -n 1)
+        keep="${keep%/}"
+        for p in "$HOME"/hive-install-backups/*; do
+            [ -d "$p" ] && [ "$p" != "$keep" ] && items+=("$p")
+        done
+    fi
+    [ "${1:-}" = cache ] && [ -d "$PIP_CACHE" ] && items+=("$PIP_CACHE")
+    if [ "${#items[@]}" -eq 0 ]; then ok "Nothing to clean up."; return 0; fi
+    for p in "${items[@]}"; do kv "$(human "$(kb_of "$p")")" "$p"; done
+    confirm "Delete these?" || { note "Kept."; return 0; }
+    for p in "${items[@]}"; do
+        rm -rf -- "$p" 2>/dev/null
+        [ -e "$p" ] && warn "Could not fully remove $p (files still in use?); delete it later."
+    done
+    ok "Cleaned up."
+}
 
 cd "$(dirname "$0")" 2>/dev/null || { err "Could not change to the script's folder."; exit 1; }
 PROJECT=$(pwd -P)
@@ -222,11 +287,24 @@ esac
 # shellcheck disable=SC2206
 [ -n "$EXTRA" ] && PKGS+=($EXTRA)
 
+# In place unless asked otherwise, or the old virtualenv can't be reused (none, broken, or
+# another Python version).
+INPLACE=1
+if [ "$FRESH" = 1 ] || [ "$KEEP_OLD" = 1 ] || [ -z "$OLD_VER" ] || [ "$OLD_VER" != "$NEW_VER" ] \
+        || ! "$OLD_BIN/python" -m pip --version >/dev/null 2>&1; then
+    INPLACE=0
+fi
+OLD=""  # with a new virtualenv: where the previous one was moved; empty if there was none
+
 # --- 5. Summary and safety checks -------------------------------------------------------
 step "What will happen"
 kv "web app" "$URL"
 kv "WSGI file" "$WSGI  ${DIM}(config ${HOW%% (*})${R}"
-kv "virtualenv" "$VENV  ${DIM}(rebuilt with Python $NEW_VER${OLD_VER:+; was $OLD_VER})${R}"
+if [ "$INPLACE" = 1 ]; then
+    kv "virtualenv" "$VENV  ${DIM}(updated in place; installed packages are reused)${R}"
+else
+    kv "virtualenv" "$VENV  ${DIM}(rebuilt with Python $NEW_VER${OLD_VER:+; was $OLD_VER})${R}"
+fi
 kv "install" "${PKGS[*]/#./$PROJECT}"
 kv "database" "$SHOWN  ${DIM}(kept)${R}"
 kv "archives" "$ARCHIVES  ${DIM}(kept)${R}"
@@ -260,6 +338,41 @@ fi
 if [ -n "$OLD_VER" ] && [ "$OLD_VER" != "$NEW_VER" ]; then
     warn "Python changes from $OLD_VER to $NEW_VER: set the same version on the Web tab"
     note "(Code section, Python version) before reloading, or the web app won't start."
+fi
+
+# Free space, before anything changes. Updating in place needs room for new or changed packages
+# and pip's build files; a new virtualenv needs room for a whole second copy.
+if [ "$SPACE_CHECK" = 1 ]; then
+    NEED_KB=$(( 100 * 1024 ))
+    if [ "$INPLACE" = 0 ]; then
+        OLD_KB=$(kb_of "$VENV"); [ "$OLD_KB" -gt 0 ] || OLD_KB=$(( 250 * 1024 ))
+        NEED_KB=$(( NEED_KB + OLD_KB ))
+    fi
+    read_free
+    if [ -z "$FREE_KB" ]; then
+        warn "Couldn't measure free disk space; continuing without the check."
+    else
+        kv "disk" "$(human "$FREE_KB") free ${DIM}($FREE_SRC)${R}; about $(human "$NEED_KB") needed"
+        if [ "$FREE_SRC" = "free space on the disk" ] && [ -n "${PYTHONANYWHERE_DOMAIN:-}${PYTHONANYWHERE_SITE:-}" ]; then
+            note "${DIM}That is the shared disk, not your account's quota (512 MB on the free plan,"
+            note "shown on the Files tab). Pass --quota MB to check against your quota.${R}"
+        fi
+        if [ "$FREE_KB" -lt "$NEED_KB" ]; then
+            warn "Not enough free space. Leftovers from earlier installs:"
+            cleanup_leftovers
+            read_free
+            if [ "${FREE_KB:-0}" -lt "$NEED_KB" ]; then
+                err "Still not enough free space: $(human "${FREE_KB:-0}") free, about $(human "$NEED_KB") needed."
+                note "Largest folders in your home:"
+                du -sk "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | sort -n | tail -n 8 \
+                    | while read -r k p; do kv "$(human "$k")" "$p"; done
+                [ -d "$PIP_CACHE" ] && note "pip's download cache ($PIP_CACHE) can go too, at the cost of downloading again."
+                note "Free some space and run this again. Nothing was changed."
+                exit 1
+            fi
+            ok "Now $(human "$FREE_KB") free."
+        fi
+    fi
 fi
 echo
 note "Tip: back up the database first, from your computer: hive admin backup"
@@ -296,39 +409,117 @@ for py in python3.11 python3.12 python3.13 python3.14 python3; do
 done
 [ "$STRAY" = 0 ] && ok "None found."
 
-# --- 8. Swap in a fresh virtualenv ----------------------------------------------------
-OLD=""          # where the previous virtualenv was moved; empty if there was none
+# --- 8. Install ------------------------------------------------------------------------
+STASH="$BACKUP/previous-hive.zip"  # in place: the previous Hive package's files
+OLD_REQS="$BACKUP/old-packages.txt"
 RELOADED=0
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+pkg_names() { sed -E 's/[ =@<>~!;[].*//; s/[_.]+/-/g' | tr 'A-Z' 'a-z' | grep -v '^$'; }
+
+restore_in_place() {  # put back the saved Hive files and the previous package versions
+    local py="$OLD_BIN/python" added
+    # Packages this run added, by name (the saved list is non-empty: checked before installing).
+    added=$("$py" -m pip freeze 2>/dev/null | pkg_names | grep -vxFf <(pkg_names < "$OLD_REQS"))
+    # shellcheck disable=SC2086
+    [ -n "$added" ] && "$py" -m pip uninstall -y -q $added >/dev/null 2>&1
+    "$py" -m pip uninstall -y -q hive >/dev/null 2>&1
+    if [ -s "$STASH" ] && "$py" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.prefix)' "$STASH"; then
+        ok "Previous Hive package restored."
+    else
+        warn "Could not restore the previous Hive package from $STASH."
+        return 1
+    fi
+    # Changed packages back to their previous versions (pip's cache saves downloading them again).
+    grep -Eiv '^hive( |=|@)' "$OLD_REQS" > "$BACKUP/restore-requirements.txt"
+    if "$py" -m pip install -q -r "$BACKUP/restore-requirements.txt"; then
+        ok "Previous package versions restored in $VENV."
+    else
+        warn "Some packages could not be put back to their previous versions; see $OLD_REQS."
+        return 1
+    fi
+}
+
+restore_old_venv() {  # put the moved-aside virtualenv back
+    # The new one must be gone first: `mv` into an existing folder would move the old
+    # virtualenv inside it instead of back into place.
+    rm -rf "$VENV" 2>/dev/null
+    [ -e "$VENV" ] && mv "$VENV" "$VENV.broken-$STAMP" 2>/dev/null \
+        && note "The failed virtualenv couldn't be deleted; moved to $VENV.broken-$STAMP (cleaned up next time)."
+    if [ -e "$VENV" ]; then
+        err "Could not remove the new virtualenv; the previous one is still at $OLD."
+        note "Put it back by hand: rm -rf \"$VENV\" && mv \"$OLD\" \"$VENV\""
+        return 1
+    fi
+    mv "$OLD" "$VENV" && [ -x "$(vbin "$VENV")/python" ] && ok "Previous virtualenv restored at $VENV."
+}
+
 rollback() {
     trap - INT TERM
     printf '\n%s==>%s Restoring the previous installation...\n' "$Y" "$R"
-    rm -rf "$VENV"
-    if [ -n "$OLD" ] && [ -d "$OLD" ]; then
-        mv "$OLD" "$VENV" && ok "Previous virtualenv restored at $VENV."
-        if [ "$RELOADED" = 1 ]; then touch "$WSGI" && ok "Web app reloaded with it."; fi
+    local restored=0
+    if [ "$INPLACE" = 1 ]; then
+        restore_in_place && restored=1
+    elif [ -n "$OLD" ] && [ -d "$OLD" ]; then
+        restore_old_venv && restored=1
     else
+        rm -rf "$VENV" 2>/dev/null
         note "There was no previous virtualenv to restore."
+        restored=-1
     fi
+    if [ "$restored" = 1 ] && [ "$RELOADED" = 1 ]; then touch "$WSGI" && ok "Web app reloaded with it."; fi
+    [ "$restored" = 0 ] && err "The previous installation was NOT fully restored; the web app may be down."
     note "Database, archives and WSGI file were not touched."
+    [ -d "$PIP_CACHE" ] && note "Downloaded packages stay in pip's cache, so a retry won't download them again."
 }
 abort() { err "$1"; rollback; exit 1; }
-trap 'printf "\n"; abort "Interrupted."' INT TERM
 
-step "Building a new virtualenv (Python $NEW_VER)..."
-if [ -e "$VENV" ]; then
-    OLD="$VENV.previous-$STAMP"
-    mv "$VENV" "$OLD" || { err "Could not move the old virtualenv aside; nothing was changed."; exit 1; }
-    ok "Old virtualenv moved aside to $OLD"
+if [ "$INPLACE" = 1 ]; then
+    step "Saving the installed Hive package (to put back if anything fails)..."
+    [ -s "$OLD_REQS" ] || { err "Could not list the installed packages; nothing was changed. Try --fresh."; exit 1; }
+    # Every file pip installed for Hive (its package, metadata and the `hive` command), stored
+    # relative to the virtualenv so it can be extracted back into it.
+    SAVED=$("$OLD_BIN/python" - "$STASH" <<'PY'
+import os, sys, zipfile
+from importlib.metadata import PackageNotFoundError, distribution
+try:
+    files = distribution("hive").files or []
+except PackageNotFoundError:
+    files = []
+paths = [p for p in (os.path.abspath(f.locate()) for f in files)
+         if os.path.isfile(p) and os.path.commonpath([p, sys.prefix]) == sys.prefix]
+if paths:
+    with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as z:
+        for p in paths:
+            z.write(p, os.path.relpath(p, sys.prefix))
+print(len(paths))
+PY
+    ) || { err "Could not save the installed Hive package; nothing was changed. Try --fresh."; exit 1; }
+    if [ "$SAVED" = 0 ]; then
+        err "Hive isn't installed in $VENV; nothing was changed. Run with --fresh."
+        exit 1
+    fi
+    ok "Saved $SAVED files ($(human "$(kb_of "$STASH")"))."
+    NEW_BIN="$OLD_BIN"
+    trap 'printf "\n"; abort "Interrupted."' INT TERM
+else
+    step "Building a new virtualenv (Python $NEW_VER)..."
+    if [ -e "$VENV" ]; then
+        OLD="$VENV.previous-$STAMP"
+        mv "$VENV" "$OLD" || { err "Could not move the old virtualenv aside; nothing was changed."; exit 1; }
+        ok "Old virtualenv moved aside to $OLD"
+    fi
+    trap 'printf "\n"; abort "Interrupted."' INT TERM
+    mkdir -p "$(dirname "$VENV")"
+    "$PYTHON" -m venv "$VENV" || abort "Could not create the virtualenv."
+    NEW_BIN=$(vbin "$VENV")
+    "$NEW_BIN/python" -m pip install --quiet --upgrade pip || abort "Could not upgrade pip."
 fi
-mkdir -p "$(dirname "$VENV")"
-"$PYTHON" -m venv "$VENV" || abort "Could not create the virtualenv."
-NEW_BIN=$(vbin "$VENV")
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-"$NEW_BIN/python" -m pip install --quiet --upgrade pip || abort "Could not upgrade pip."
 
 step "Installing Hive from $PROJECT ..."
-# --no-cache-dir: always rebuild from this folder, never reuse an older build of the same version.
-"$NEW_BIN/python" -m pip install --no-cache-dir "${PKGS[@]}" \
+# Packages already installed are kept, and anything pip downloads stays in its cache until the
+# install succeeds, so a retry after a failure downloads nothing twice. Hive itself is always
+# rebuilt from this folder (pip never reuses a build of a local folder).
+"$NEW_BIN/python" -m pip install "${PKGS[@]}" \
     || abort "pip install failed (see above). Free accounts can only reach PyPI and GitHub."
 
 # --- 9. Verify before the web app sees it ----------------------------------------------
@@ -391,19 +582,32 @@ if [ "$RELOAD" = 1 ]; then
         warn "Couldn't reach $URL from this console to check it. Open it in a browser;"
         note "if it fails, read /var/log/$DOMAIN.error.log."
         KEEP_OLD=1
-        note "The old virtualenv is kept until you've checked: $OLD"
+        if [ "$INPLACE" = 1 ]; then
+            note "The previous Hive package is kept until you've checked: $STASH"
+        else
+            note "The old virtualenv is kept until you've checked: $OLD"
+        fi
     fi
 fi
 trap - INT TERM
 
 # --- 11. Clean up ---------------------------------------------------------------
+step "Cleaning up..."
 if [ -n "$OLD" ]; then
     if [ "$KEEP_OLD" = 1 ]; then
         note "Previous virtualenv kept at $OLD (delete it with: rm -rf \"$OLD\")"
     else
-        rm -rf "$OLD" && ok "Removed the previous virtualenv."
+        rm -rf "$OLD" 2>/dev/null
+        if [ -e "$OLD" ]; then warn "Could not fully remove $OLD (files still in use?); the next run cleans it up."
+        else ok "Removed the previous virtualenv."; fi
+        OLD=""
     fi
 fi
+if [ "$INPLACE" = 1 ] && [ "$KEEP_OLD" = 0 ]; then
+    rm -f "$STASH" && ok "Removed the saved copy of the previous Hive package."
+fi
+# Leftovers of earlier runs, and pip's download cache (only needed to retry a failed install).
+cleanup_leftovers cache "$BACKUP"
 
 printf '\n%s%s=== Hive %s installed on the server ===%s\n' "$B" "$G" "$VERSION" "$R"
 [ "$RELOAD" = 1 ] || printf '%sNOTE:%s reload the web app on the Web tab to start using it.\n' "$Y" "$R"
