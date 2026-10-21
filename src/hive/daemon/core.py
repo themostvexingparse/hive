@@ -52,7 +52,8 @@ AGY_WRITE_TOOLS = {"write_file", "edit_file", "write_to_file", "replace_file_con
 AGY_PATH_ARGS = ("Path", "TargetFile", "AbsolutePath", "File")
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS", "read_file", "read_many_files", "glob",
                    "search_file_content", "list_directory", "grep", "view_file", "list_dir",
-                   "grep_search", "find_by_name"}
+                   "grep_search", "find_by_name",
+                   "Skill"}  # Claude Code: loading a skill only reads its instructions
 SHELL_TOOLS = {"Bash", "PowerShell", "run_shell_command", "run_command"}
 class StreamSink:
     """Shows a worker's formatted output locally and uploads it (admin-only view) in batches."""
@@ -753,6 +754,12 @@ class Daemon:
         if not rt.active:
             if tool in READ_ONLY_TOOLS:
                 return {}
+            if rt.is_orchestrator:
+                # Nobody wakes an interactive session: ending the turn would leave it idle
+                # when the fleet starts. await_events returns as soon as it does.
+                return {"deny": f"Hive fleet is {state}; the orchestrator must not act now. "
+                                "Don't end your turn: call await_events, which returns as soon "
+                                "as the user starts or resumes the fleet."}
             return {"deny": f"Hive fleet is {state}; your roles ({', '.join(rt.roles)}) must "
                             "not act now. End your turn; you will be woken when it is your turn."}
         if tool in SHELL_TOOLS:

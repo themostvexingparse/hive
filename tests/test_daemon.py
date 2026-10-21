@@ -251,3 +251,26 @@ def test_git_hook_ignores_user_commits_and_fails_closed_for_agents(tmp_path):
     # Refreshing keeps a custom command.
     hook = install_git_hook(repo)
     assert "exec hive-not-on-path hook git-pre-commit" in hook.read_text()
+
+
+def test_orchestrator_waits_instead_of_ending_its_turn_before_the_fleet_starts(tmp_path):
+    # Reported from a live session: in setup, Claude Code's Skill tool was refused and the
+    # orchestrator was told to end its turn, though nothing wakes an interactive session.
+    slot = Slot(name="orch", vendor="claude", token="t", worktree=str(tmp_path))
+    d = core.Daemon(MachineConfig(server_url=UNREACHABLE, slots=[slot]),
+                    Store(tmp_path / "state.db"), echo=False)
+    rt = d.slots["orch"]
+    rt.me = {"roles": ["orchestrator"], "active": False, "can_code": False, "write_globs": []}
+
+    def pre(tool, **ti):
+        return d._pre_tool(rt, "setup", {"tool_name": tool, "tool_input": ti})
+
+    assert pre("Skill", skill="hive:hive-orchestrator") == {}
+    assert pre("mcp__plugin_hive_hive__await_events") == {}
+    deny = pre("Bash", command="git status")["deny"]
+    assert "await_events" in deny and "End your turn" not in deny
+    assert "await_events" in wake.orchestrator_guidance({"state": "setup"})
+    assert "await_events" in wake.orchestrator_guidance({"state": "paused"})
+    # Headless workers are woken when it is their turn, so they still end it.
+    rt.me = {**rt.me, "roles": ["programmer"]}
+    assert "End your turn" in pre("Bash", command="git status")["deny"]

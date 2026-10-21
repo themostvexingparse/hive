@@ -166,6 +166,11 @@ def build_prompt(slot: str, me: dict, fleet: dict, triggers: list[dict], message
 def orchestrator_guidance(fleet: dict) -> str:
     """Short state-specific reminder; the full procedure lives in the hive-orchestrator skill."""
     state = fleet.get("state")
+    if state in ("setup", "paused"):
+        return {"setup": "The fleet is in SETUP: no goal yet. Don't plan or explore; wait "
+                         "with await_events until the user starts the fleet.",
+                "paused": "The fleet is PAUSED by the user; only communicate, and wait with "
+                          "await_events until it resumes."}[state]
     return {
         "planning": f"The fleet is PLANNING. Goal: {fleet.get('goal') or '(see #user)'}. Create "
                     "draft tasks, then decision_request(kind='start_approval').",

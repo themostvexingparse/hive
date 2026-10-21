@@ -106,6 +106,8 @@ The user can type to you at any time; that interrupts the wait. Answer them, act
 say, then go back to `await_events`.
 
 ## By fleet state
+- **setup**: there is no goal yet, and you must not act. Wait with `await_events`; it returns
+  when the user starts the fleet (`hive start` or the dashboard).
 - **planning**: Study the repository and the goal. If something essential is ambiguous, ask
   the user (in chat, or `decision_request(kind="question")`). Split the work into tasks with
   `task_create`: precise spec, `deps`, `path_hints`, and `kind` (`code`, `test`, `docs`,
