@@ -798,9 +798,16 @@ class Daemon:
             shell = default_shell() if rt.cfg.vendor == "codex" else tool_shell(tool)
             command = command_text(ti.get("command") or ti.get("CommandLine") or "")
             verdict = self._check_shell(rt, command, shell)
-            if verdict or not agy:
+            if verdict:
                 return verdict
-            return self._agy_shell(rt, command, shell)
+            if agy:
+                return self._agy_shell(rt, command, shell)
+            # Claude Code's own rules only match a command's start, so they ask about compound
+            # commands (`a; b`) and full program paths that Hive's parser allows: approve those.
+            if rt.cfg.vendor == "claude" and \
+                    P.allowed(command, rt.rules[role_class(rt.roles)]["allow"]):
+                return {"allow": True}
+            return {}
         if agy and tool in AGY_WRITE_TOOLS:
             raw = next((ti[k] for k in AGY_PATH_ARGS if isinstance(ti.get(k), str)), "")
             if not raw:

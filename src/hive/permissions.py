@@ -57,6 +57,10 @@ READ_ONLY = [
     "Compare-Object", "Write-Output", "Write-Host",
     "python --version", "python3 --version", "py --version", "node --version",
     "npm --version", "dotnet --version",
+    # GitHub CLI, reading only
+    "gh repo view", "gh repo list", "gh pr view", "gh pr list", "gh pr diff", "gh pr checks",
+    "gh issue view", "gh issue list", "gh search", "gh release view", "gh release list",
+    "gh run view", "gh run list", "gh auth status",
 ]
 
 # Running a project's tests and static checks; every role (the orchestrator verifies reports
@@ -76,6 +80,8 @@ BUILD = [
     "yarn", "pnpm", "npx", "cargo build", "cargo run", "cargo fmt", "cargo clippy", "go build",
     "go run", "go fmt", "make", "cmake", "ninja", "dotnet build", "dotnet run", "msbuild",
     "mvn", "gradle", "gradlew", "ruff", "black", "prettier", "eslint",
+    # Browsers, e.g. headless screenshots to check a web page
+    "msedge", "chrome", "chromium", "chromium-browser", "google-chrome", "firefox",
     # POSIX file operations
     "mkdir", "touch", "cp", "mv", "rm", "rmdir",
     # cmd.exe file operations
@@ -198,7 +204,8 @@ def _tokenize(command: str) -> list[list[str]]:
             parts.append(words)
         words = []
 
-    for ch in command or "":
+    command = command or ""
+    for i, ch in enumerate(command):
         if quote:
             if ch == quote:
                 quote = None
@@ -207,6 +214,10 @@ def _tokenize(command: str) -> list[list[str]]:
             continue
         if ch in _QUOTES:
             quote, has_word = ch, True
+        elif ch == "&" and ((word and word[-1] in "<>") or command[i + 1:i + 2] == ">"):
+            # A redirection (`2>&1`, `>&2`, `&> file`), not a separator.
+            word.append(ch)
+            has_word = True
         elif ch in _SEPARATOR_CHARS:
             end_part()
         elif ch.isspace():
@@ -434,11 +445,19 @@ def needs_approval(command: str, approval_prefixes: list[str]) -> str | None:
 
 # ---------------------------------------------------------------------- per-CLI files
 
+# Reading the web (documentation, repositories, APIs) for every role; a headless turn can't
+# answer the CLI's question otherwise. Per CLI: Claude Code, Gemini CLI, agy.
+CLAUDE_WEB_TOOLS = ["WebFetch", "WebSearch"]
+GEMINI_WEB_TOOLS = ["web_fetch", "google_web_search"]
+AGY_WEB_RULES = ["read_url(*)", "execute_url(*)"]
+
+
 def claude_settings(rules: dict[str, list[str]], cls: str) -> dict:
     def tools(prefixes):
         return [f"{tool}({p} *)" for p in prefixes for tool in ("Bash", "PowerShell")]
 
-    perms = {"allow": ["mcp__plugin_hive_hive", "mcp__hive"] + tools(rules["allow"])}
+    perms = {"allow": ["mcp__plugin_hive_hive", "mcp__hive"] + CLAUDE_WEB_TOOLS
+             + tools(rules["allow"])}
     if cls == "orchestrator":  # interactive: dangerous commands ask the user
         perms["ask"] = tools(rules["approval"])
         perms["deny"] = tools(rules["forbidden"])
@@ -454,6 +473,7 @@ def gemini_policy(rules: dict[str, list[str]], cls: str) -> dict:
     `commandPrefix` / `mcpName` sufficient, so it is always set."""
     shell = "run_shell_command"
     rule = [{"mcpName": "hive", "toolName": "*", "decision": "allow", "priority": 800}]
+    rule += [{"toolName": t, "decision": "allow", "priority": 500} for t in GEMINI_WEB_TOOLS]
     if rules["forbidden"]:
         rule.append({"toolName": shell, "commandPrefix": rules["forbidden"], "decision": "deny",
                      "priority": 950,
@@ -487,7 +507,8 @@ def _agy_command(prefix: str) -> str:
 def agy_settings(rules: dict[str, list[str]], cls: str) -> dict:
     """The `permissions` block of agy's settings.json, written into the slot's private home
     at launch. Hive's hook decides first; these rules apply if it can't reach the daemon."""
-    perms = {"allow": [f"mcp({AGY_MCP_SERVER}/*)"] + [_agy_command(p) for p in rules["allow"]],
+    perms = {"allow": [f"mcp({AGY_MCP_SERVER}/*)"] + AGY_WEB_RULES
+             + [_agy_command(p) for p in rules["allow"]],
              "ask": [], "deny": [_agy_command(p) for p in rules["forbidden"]]}
     if cls == "orchestrator":  # interactive: dangerous commands ask the user
         perms["ask"] = [_agy_command(p) for p in rules["approval"]]

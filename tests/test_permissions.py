@@ -207,3 +207,29 @@ def test_init_writes_permission_files_and_launch_uses_them(tmp_path):
     assert "--policy" not in wake.build_command(
         Slot(name="o2", vendor="gemini", token="t", worktree=str(tmp_path / "nowhere")),
         "sid", False)
+
+
+def test_web_access_browsers_and_read_only_gh_are_granted_by_default():
+    # Workers were refused WebFetch, a headless Edge and `gh repo list` (all of them asked
+    # about, which a headless turn can't answer).
+    rules = P.build_rules({})
+    for cls in ("orchestrator", "worker"):
+        assert {"WebFetch", "WebSearch"} <= set(P.claude_settings(rules[cls], cls)["permissions"]["allow"])
+        assert {r["toolName"] for r in P.gemini_policy(rules[cls], cls)["rule"]
+                if r["decision"] == "allow"} >= {"web_fetch", "google_web_search"}
+        assert "read_url(*)" in P.agy_settings(rules[cls], cls)["permissions"]["allow"]
+    allow = rules["worker"]["allow"]
+    assert P.allowed(r'"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" '
+                     "--headless --screenshot=out.png site/index.html", allow)
+    assert P.allowed("gh repo list 0shen6 --limit 50 --json name,url", allow)
+    assert not P.allowed("gh repo delete x", allow) and not P.allowed("gh api -X DELETE x", allow)
+    assert P.allowed("git status", rules["orchestrator"]["allow"])
+    assert not P.allowed("chrome", rules["orchestrator"]["allow"])  # builds and runs: coders only
+
+
+def test_redirections_with_ampersand_are_not_command_separators():
+    assert P.subcommands("ls .hive/plans 2>&1; git log -3") == ["ls .hive/plans 2>&1", "git log -3"]
+    assert P.subcommands("npm test >out.txt 2>&1") == ["npm test >out.txt 2>&1"]
+    assert P.subcommands("make &> build.log") == ["make &> build.log"]
+    assert P.subcommands("a && b & c") == ["a", "b", "c"]  # real separators still split
+    assert P.needs_approval("git status 2>&1 && git push --force", P.APPROVAL)

@@ -182,7 +182,7 @@ def test_dangerous_command_runs_after_orchestrator_approval(world):
     assert "lease_release" in v["deny"]
     v = daemon.handle_hook("prog1", "pre_tool", {"tool_name": "Bash",
                                                  "tool_input": {"command": "git commit -m x"}})
-    assert v == {}  # ordinary git history work runs directly
+    assert v == {"allow": True}  # ordinary git history work runs directly, approved by Hive
     with pytest.raises(Exception):
         daemon.call_tool("prog1", "request_approval", {"command": "hive decide 1 approve",
                                                        "reason": "x"})

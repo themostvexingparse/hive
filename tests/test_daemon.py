@@ -307,3 +307,25 @@ def test_a_slot_that_is_not_logged_in_pauses_until_hive_chat_logs_it_in(tmp_path
     assert rt.login_needed
     local.post("/slot/w1/attach", json={"attached": False}, headers=hdr)
     assert not rt.login_needed
+
+
+def test_hive_approves_allowed_commands_that_claude_codes_own_rules_would_ask_about(tmp_path):
+    from hive.hooks import format_output
+    slot = Slot(name="w1", vendor="claude", token="t", worktree=str(tmp_path))
+    d = core.Daemon(MachineConfig(server_url=UNREACHABLE, slots=[slot]),
+                    Store(tmp_path / "state.db"), echo=False)
+    rt = d.slots["w1"]
+    rt.me = {"roles": ["programmer"], "active": True, "can_code": True, "write_globs": []}
+
+    def pre(command):
+        return d._pre_tool(rt, "running", {"tool_name": "Bash", "tool_input": {"command": command}})
+
+    # Seen live: Claude Code asked about both, and a headless turn can't answer.
+    for cmd in ('ls "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"',
+                "ls .hive/plans 2>&1; git log --oneline -3"):
+        assert pre(cmd) == {"allow": True}, cmd
+        out = format_output("claude", "PreToolUse", pre(cmd))
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert pre("curl https://example.com") == {}       # unlisted: left to Claude Code's rules
+    assert "request_approval" in pre("git status; git push origin x")["deny"]
+    assert format_output("codex", "PreToolUse", {"allow": True}) is None

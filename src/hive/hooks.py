@@ -80,6 +80,10 @@ def format_output(vendor: str, raw_event: str, verdict: dict) -> dict | None:
             return None
         return {"hookSpecificOutput": {"hookEventName": raw_event, "permissionDecision": "ask",
                                        "permissionDecisionReason": verdict["ask"]}}
+    if verdict.get("allow") and vendor == "claude":
+        return {"hookSpecificOutput": {"hookEventName": raw_event, "permissionDecision": "allow",
+                                       "permissionDecisionReason": "Allowed by the project's "
+                                                                   "Hive permissions."}}
     if "block" in verdict:
         if vendor == "gemini":
             return {"decision": "deny", "reason": verdict["block"]}

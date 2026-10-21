@@ -51,12 +51,21 @@ A *preset* is a ready-made starting set of rules; you choose it in `hive.toml`
 
 | Group | Examples | Orchestrator | Workers |
 |---|---|---|---|
-| Reading | `git status/diff/log/show/blame/fetch/reflog`, `ls`, `cat`, `grep`, `rg`, `find`, `tree`, PowerShell `Get-ChildItem`/`Get-Content`/`Select-String` | ✓ | ✓ |
+| Reading | `git status/diff/log/show/blame/fetch/reflog`, `ls`, `cat`, `grep`, `rg`, `find`, `tree`, PowerShell `Get-ChildItem`/`Get-Content`/`Select-String`, read-only GitHub CLI (`gh repo view/list`, `gh pr view/list/diff/checks`, `gh issue view/list`, `gh search`, …) | ✓ | ✓ |
 | Tests and checks | `pytest`, `python -m pytest`, `npm test`, `cargo test`, `go test`, `ruff check`, `mypy`, `tsc --noEmit`, plus every test command you listed under `checks` in `hive.toml` ([Checks](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)) | ✓ | ✓ |
 | Git history work | `git add`, `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `checkout`, `switch`, `restore`, `stash`, `tag`, `mv`, `rm`, `am`, `apply` | – | ✓ |
-| Building and running | `python`, `node`, `uv run`, `npm run`, `npm install`, `npx`, `make`, `cargo build`, `go build`, formatters and linters, `mkdir`, `touch`, `cp`, `mv`, plain `rm`, `Copy-Item`/`Move-Item`/`New-Item`/`Remove-Item` | – | ✓ |
+| Building and running | `python`, `node`, `uv run`, `npm run`, `npm install`, `npx`, `make`, `cargo build`, `go build`, formatters and linters, `mkdir`, `touch`, `cp`, `mv`, plain `rm`, `Copy-Item`/`Move-Item`/`New-Item`/`Remove-Item`, browsers (`msedge`, `chrome`, `chromium`, `firefox`, e.g. headless screenshots of a page) | – | ✓ |
 
 The orchestrator only reads and runs tests: it never codes.
+
+**Web access** is allowed for every role: Claude Code's `WebFetch` and `WebSearch`, Gemini
+CLI's `web_fetch` and `google_web_search`, and agy's `read_url` and browser actions
+(`execute_url`). Codex keeps its own network setting (see [Codex specifics](#codex-specifics)).
+
+**Hive approves allowed commands itself** (Claude Code and agy). The CLIs' own rules only match
+the start of a command, so they would ask about forms Hive's checks understand, such as
+`ls x 2>&1; git log`, or a program given by its full path. Hive's hook approves those when
+every part is allowed; a headless turn couldn't answer the question.
 
 ---
 
