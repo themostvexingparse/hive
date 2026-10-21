@@ -5,13 +5,14 @@
 </picture>
 
 <p align="center">
-  <img src="docs/images/vendors/claude-code.svg" alt="Claude Code" title="Claude Code" height="40">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/images/vendors/codex.svg" alt="Codex" title="Codex" height="40">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/images/vendors/antigravity.svg" alt="Antigravity CLI" title="Antigravity CLI" height="40">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/images/vendors/gemini-cli.svg" alt="Gemini CLI" title="Gemini CLI" height="40">
+  <br>
+  <img src="docs/images/vendors/claude-code.svg" alt="Claude Code" title="Claude Code" height="56">
+  &emsp;&emsp;&emsp;
+  <img src="docs/images/vendors/codex.svg" alt="Codex" title="Codex" height="56">
+  &emsp;&emsp;&emsp;
+  <img src="docs/images/vendors/antigravity.svg" alt="Antigravity CLI" title="Antigravity CLI" height="56">
+  &emsp;&emsp;&emsp;
+  <img src="docs/images/vendors/gemini-cli.svg" alt="Gemini CLI" title="Gemini CLI" height="56">
 </p>
 
 # Hive
