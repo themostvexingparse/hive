@@ -1,6 +1,7 @@
 # What the agents see: MCP tools, hooks and skills
 
-Hive's agents are ordinary AI coding CLIs: Claude Code, Gemini CLI and Codex. When `hive`
+Hive's agents are ordinary AI coding CLIs: Claude Code, Codex, Antigravity CLI (`agy`) and
+Gemini CLI. When `hive`
 starts one (with `hive up` or `hive chat`; see [Running the fleet](RUNNING.md)), it attaches
 three things for that session (that one conversation) only:
 
@@ -75,8 +76,14 @@ with their `tools` setting ([Custom roles](ROLES.md#custom-roles-and-overrides))
 
 Only the tools an agent's roles permit are offered to it at all. In the CLIs, and in the live
 output, the tools appear with a prefix the CLI adds: `mcp__plugin_hive_hive__<tool>` in
-Claude Code and `mcp__hive__<tool>` in Codex. They're pre-approved for the session, so the
-CLI never stops to ask whether the agent may use them.
+Claude Code and `mcp__hive__<tool>` in Codex. agy calls every MCP tool through its own
+`call_mcp_tool`, naming the server `hive_hive`; the live output shows these calls as
+`mcp__hive_hive__<tool>`. They're pre-approved for the session, so the CLI never stops to ask
+whether the agent may use them.
+
+In agy, a call to an MCP tool is cancelled after 3 minutes, so for agy agents Hive ends
+`await_events` after at most 150 s and lets `request_approval` wait at most 90 s for the
+decision (the agent then calls them again, or `run_approved` once it is woken).
 
 ### `await_events`
 
@@ -105,7 +112,7 @@ handles re-reads its whole conversation.
 
 The hooks ship inside the bundles and call `hive hook <event> --vendor <cli>`. Each CLI names
 the moments at which it runs hooks (*events*); Gemini uses different names for the same
-moments, and Codex uses Claude Code's names.
+moments, Codex uses Claude Code's names, and agy has its own set (last column).
 
 | Claude / Codex event | Gemini event | When | What Hive does |
 |---|---|---|---|
@@ -114,6 +121,16 @@ moments, and Codex uses Claude Code's names.
 | UserPromptSubmit | BeforeAgent | when a turn starts, or when you send a message in an interactive session | Adds unread messages and, in sessions you're typing in, a one-line reminder of who the agent is and fleet events since the last check. Adds nothing else in headless turns, whose wake prompt already says it. |
 | Stop | AfterAgent | when the agent tries to end its turn | Sends the agent back (at most 3 times per turn) if it has unhandled urgent messages, or, for the orchestrator in your terminal, urgent events waiting. Also if it has uncommitted changes in files it has leased and hasn't recorded a progress note this turn (`task_update` with a note, a handoff, or a stuck report): its next turn may start in a fresh session that only has the task and its notes. |
 | SessionStart | SessionStart | when a session starts | In sessions you're typing in: tells the agent who it is, its roles, the fleet state, and which skill to follow, plus its role prompt, except when an existing session is resumed (it already has them). Headless turns get all of this in their wake prompt instead. |
+
+**agy** (Antigravity CLI) has `PreToolUse`, `SessionStart` and `Stop` for the same purposes,
+and differs in two ways:
+- Its `PostToolUse` output is ignored, so urgent messages arrive through `PreInvocation`,
+  which runs before every request to the model. The first `PreInvocation` of a turn does
+  what `UserPromptSubmit` does. agy runs `SessionStart` only for new conversations.
+- In a headless turn agy refuses any tool call its own rules would ask about, and then
+  **ends the turn**. So Hive's `PreToolUse` hook decides instead: it approves Hive's tools and
+  the commands your [permissions](PERMISSIONS.md) allow, and refuses other commands with an
+  explanation the agent can act on (do it differently, or `request_approval`).
 
 When a hook denies something, the denial includes the reason and what to do instead (for
 example, "call `lease_acquire` first"). That is what you see in the live output as a failed

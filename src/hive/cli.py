@@ -341,10 +341,11 @@ def cmd_join(a):
     me = call(c.get, "/agents/me")
     if me["name"] != a.name:
         die(f"token belongs to {me['name']!r}, not {a.name!r}")
-    if a.vendor == "codex" and a.permission_mode:
-        from .daemon.wake import CODEX_MODES
-        if a.permission_mode not in CODEX_MODES:
-            die(f"codex --permission-mode must be one of {', '.join(CODEX_MODES)}")
+    if a.vendor in ("codex", "agy") and a.permission_mode:
+        from .daemon.wake import AGY_MODES, CODEX_MODES
+        modes = CODEX_MODES if a.vendor == "codex" else AGY_MODES
+        if a.permission_mode not in modes:
+            die(f"{a.vendor} --permission-mode must be one of {', '.join(modes)}")
     if a.worktree:
         wt = Path(a.worktree).resolve()
     elif a.repo:
@@ -377,14 +378,24 @@ def cmd_join(a):
         name=a.name, vendor=a.vendor, token=a.token, worktree=str(wt), config_dir=config_dir,
         permission_mode=a.permission_mode or "", model=a.model or "", server_url=server)]
     save_machine_config(cfg)
-    var = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}.get(a.vendor, "GEMINI_CLI_HOME")
     ui.ok(f"Slot {ui.agent(a.name)} ready.")
     ui.kv([("worktree", ui.path(wt)), ("account", ui.path(config_dir))]
           + ([("model", a.model)] if a.model else []))
-    ui.section("Log this slot's account in once (interactive)")
-    # Codex has a login command; `--device-auth` also works over SSH, without a local browser.
-    ui.out(login_instructions(var, config_dir, str(wt),
-                              "codex login" if a.vendor == "codex" else a.vendor))
+    if a.vendor == "agy":
+        # agy keeps its login in the OS keyring, not in its config folder.
+        others = [s.name for s in cfg.slots if s.vendor == "agy" and s.name != a.name]
+        ui.warn("agy keeps its Google login in this computer's keyring, so every agy slot on "
+                "it uses the same account and shares its usage limits"
+                + (f" (also {', '.join(others)})." if others else "."))
+        ui.section("Log agy in once on this computer, if you haven't (interactive)")
+        ui.out("  " + ui.cmd("agy"))
+    else:
+        var = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}.get(a.vendor,
+                                                                          "GEMINI_CLI_HOME")
+        ui.section("Log this slot's account in once (interactive)")
+        # Codex has a login command; `--device-auth` also works over SSH, without a browser.
+        ui.out(login_instructions(var, config_dir, str(wt),
+                                  "codex login" if a.vendor == "codex" else a.vendor))
     ui.out(f"  {ui.dim('or, while `hive up` runs:')}  {ui.cmd(f'hive chat {a.name}')}")
     ui.section("Then start the machine")
     ui.out("  " + ui.cmd("hive up"))
@@ -424,7 +435,7 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
         store.put(slot.name, "session_seen", {})
         store.put(slot.name, "session_task", None)
         store.put(slot.name, "last_context", 0)
-    if slot.vendor != "codex":  # Codex picks its own session id; it is read back afterwards
+    if slot.vendor not in wake.SELF_ID_VENDORS:  # those are read back afterwards
         session = session or str(uuid.uuid4())
         store.put(slot.name, "session", session)
     env = wake.slot_env(slot, cfg.local_url, cfg.local_secret)
@@ -441,8 +452,8 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
     if p.returncode != 0 and resume:
         # The stored session may be gone (e.g. different machine); start a fresh one next time.
         store.put(slot.name, "session", None)
-    if slot.vendor == "codex" and slot.config_dir:
-        found = wake.codex_latest_session(slot.config_dir, started)
+    if slot.vendor in wake.SELF_ID_VENDORS and slot.config_dir:
+        found = wake.latest_session(slot, started)
         if found:
             store.put(slot.name, "session", found)
         elif not resume:
@@ -851,7 +862,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--config-dir", help="CLI account config dir (default ~/.hive/accounts/NAME)")
     s.add_argument("--permission-mode", help="claude: acceptEdits|bypassPermissions|…; "
                                              "gemini: auto_edit|yolo; codex: workspace-write|"
-                                             "read-only|danger-full-access|yolo")
+                                             "read-only|danger-full-access|yolo; "
+                                             "agy: accept-edits|auto|plan")
     s.add_argument("--model", help="model for this slot's CLI (default: the "
                                    "account's default model)")
     s.add_argument("--hive-cmd", default="hive")

@@ -264,7 +264,7 @@ it). For example:
 {examples}
 
 Placeholders: {{{{main}}}}, {{{{review}}}}, {{{{checks}}}}, {{{{project}}}}, {{{{slot}}}} (the
-agent's name), {{{{roles}}}}, {{{{vendor}}}} (claude, gemini or codex).
+agent's name), {{{{roles}}}}, {{{{vendor}}}} (claude, gemini, codex or agy).
 Preview: hive prompts --role {role}
 -->
 """

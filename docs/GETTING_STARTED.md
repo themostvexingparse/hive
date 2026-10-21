@@ -21,8 +21,10 @@ computers. Nothing about the first setup changes.
 - git, and a repository whose `origin` remote (the shared copy you `git push` to, such as a
   GitHub repository) you can push to;
 - Claude Code (`claude`) installed, and **two** Claude accounts: one for the orchestrator,
-  one for the programmer. Gemini CLI (`gemini`) or Codex (`codex`) work the same way; change
-  `--vendor claude` to `--vendor gemini` or `--vendor codex`.
+  one for the programmer. Codex (`codex`), Antigravity CLI (`agy`) or Gemini CLI (`gemini`)
+  work the same way; change `--vendor claude` to `--vendor codex`, `--vendor agy` or
+  `--vendor gemini`. (agy has one login per computer, so two agy agents on one computer
+  share an account: [Accounts](MACHINES.md#log-each-slots-account-in-once).)
 
 **In the examples,** `~/code/myapp` is the folder where you cloned your repository; use your
 own path. `orch` and `dev` are the names given to the two agents; you can choose others.

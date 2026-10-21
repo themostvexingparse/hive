@@ -1,7 +1,7 @@
 # Enrolling agents and setting up machines
 
-An **agent** is one AI coding assistant in your Hive fleet: Claude Code, Gemini CLI or Codex,
-logged in to its own account. It exists in two places:
+An **agent** is one AI coding assistant in your Hive fleet: Claude Code, Codex, Antigravity
+CLI (`agy`) or Gemini CLI, logged in to its own account. It exists in two places:
 - on the [server](SERVER.md), as a name with [roles](ROLES.md) (what it's for) and a
   **token** (its password for talking to the server);
 - on a **machine** (any computer that runs agents), as a **slot**: its own
@@ -46,7 +46,7 @@ hive admin enroll codex-1  --vendor codex  --roles programmer
   letter (`^[a-z][a-z0-9-]{1,31}$`). `user`, `system` and `admin` are reserved. Choose names
   you'll recognise in logs and the dashboard; the vendor in the name is a useful habit, not a
   requirement.
-- **Vendor** is the CLI the slot runs: `claude`, `gemini` or `codex`.
+- **Vendor** is the CLI the slot runs: `claude`, `codex`, `agy` or `gemini`.
 - **Roles** are comma-separated. The built-in ones are `orchestrator`, `programmer`,
   `planner` (helps plan), `reviewer` (checks others' work) and `tester` ([Roles](ROLES.md)).
   `orchestrator` can't be combined with a role that writes code. You can change roles later
@@ -104,7 +104,7 @@ half-finished changes, and your own clone stays yours. Agents can't edit files i
 | `--repo PATH` | Local clone; the worktree is created next to it. |
 | `--worktree PATH` | Explicit worktree path (use with or instead of `--repo`). |
 | `--config-dir PATH` | The account's CLI config folder (default `~/.hive/accounts/<name>`). |
-| `--permission-mode MODE` | Each CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default for workers: file edits allowed, other actions follow Hive's rules), `bypassPermissions` (everything allowed), …; Gemini: `auto_edit` (default, the same idea), `yolo` (everything allowed); Codex: `workspace-write` (default for workers: may write only inside its worktree, in Codex's sandbox), `read-only`, `danger-full-access`, `yolo`. See the [Security model](SECURITY.md#permissions). |
+| `--permission-mode MODE` | Each CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default for workers: file edits allowed, other actions follow Hive's rules), `bypassPermissions` (everything allowed), …; Gemini: `auto_edit` (default, the same idea), `yolo` (everything allowed); Codex: `workspace-write` (default for workers: may write only inside its worktree, in Codex's sandbox), `read-only`, `danger-full-access`, `yolo`; agy: `accept-edits` (default for workers), `auto`, `plan`. See the [Security model](SECURITY.md#permissions). |
 | `--model MODEL` | The AI model the slot's CLI uses; the names are the vendor's own. Default: the account's default model. |
 | `--server URL` | The Hive server's address, or a [project](PROJECTS.md)'s (`https://host/p/<project>`), saved for this slot only. Default: the slot's current one if re-joining, else this computer's default (set by the first `hive join`). |
 | `--replace` | Move an existing slot of the same name to another server or project. What the slot remembers locally (which events it has seen, its cached messages, its CLI conversation) is reset. Without it, `hive join` refuses, so another project's agent of the same name can't silently take over the slot. |
@@ -152,6 +152,14 @@ Close the window afterwards, so the variable doesn't leak into other commands.
 
 `--device-auth` makes Codex show a code to enter in a browser on any device, for computers
 where it can't open a browser itself.
+
+**agy (Antigravity CLI)** is different: it keeps its Google login in the computer's keyring
+(Windows Credential Manager, macOS Keychain), not in its settings folder. Log in once by
+running `agy` on that computer; every agy slot there then uses that account and shares its
+usage limits. To run agy agents on several accounts, put them on different computers (or
+different user accounts of one computer). Each agy slot still gets its own folder for its
+settings, Hive's plugin and its conversations; Hive passes that folder to agy as its home
+directory ([how](RUNNING.md#agy-home-folder)).
 
 Use a different account per slot. That is the point of separate folders. `hive overview`
 ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview))

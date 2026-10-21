@@ -4,11 +4,22 @@
   <img alt="Hive: several coding agents, one coordinated team" src="docs/images/banner-light.png" width="100%">
 </picture>
 
+<p align="center">
+  <img src="docs/images/vendors/claude-code.svg" alt="Claude Code" title="Claude Code" height="40">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/images/vendors/codex.svg" alt="Codex" title="Codex" height="40">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/images/vendors/antigravity.svg" alt="Antigravity CLI" title="Antigravity CLI" height="40">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/images/vendors/gemini-cli.svg" alt="Gemini CLI" title="Gemini CLI" height="40">
+</p>
+
 # Hive
 
 **Turn several subscription-based coding agents into one coordinated team.**
 
-Hive connects AI coding agents (**Claude Code**, **Gemini CLI** and **Codex**) into one
+Hive connects AI coding agents (**Claude Code**, **Codex**, **Antigravity CLI** and
+**Gemini CLI**) into one
 team, called a **fleet**, that works on one git repository. Each agent is the vendor's
 official command-line program (CLI), running on a computer you own and logged in to its own
 subscription account. One agent, the **orchestrator**, plans the work and keeps you

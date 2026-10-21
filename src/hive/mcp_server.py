@@ -15,6 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .local import LocalDaemon
 
 Priority = Literal["info", "normal", "high", "interrupt"]
+AGY_MAX_WAIT = 150  # seconds; agy's MCP calls time out after 180
 
 
 def slim_schema(schema, nullable: bool = True):
@@ -71,6 +72,12 @@ def build_server(slot: str | None = None) -> MCPServer:
                       "before editing."))
 
     def call(name: str, **args) -> str:
+        if getattr(d, "vendor", "") == "agy":
+            # agy cancels an MCP call after 3 minutes: return in time, the agent calls again.
+            # An approved command runs inside request_approval's call, so it waits less.
+            for key, cap in (("timeout_seconds", AGY_MAX_WAIT), ("wait_seconds", AGY_MAX_WAIT - 60)):
+                if args.get(key) is not None:
+                    args[key] = min(args[key], cap)
         try:
             # Blocking tools wait up to their own limit, plus time to run an approved command.
             wait = float(args.get("timeout_seconds") or args.get("wait_seconds") or 0)

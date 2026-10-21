@@ -70,7 +70,8 @@ def test_finds_stale_bundles_and_explains_why(project):
     d = overview.collect(project, offline=True)
     assert d["repo"]["drift"] == ["claude/skills/hive-worker/SKILL.md",
                                   "gemini/skills/hive-worker/SKILL.md",
-                                  "codex/skills/hive-worker/SKILL.md"]
+                                  "codex/skills/hive-worker/SKILL.md",
+                                  "agy/skills/hive-worker/SKILL.md"]
     assert any("out of date" in m and ".hive/prompts/" in m for m in msgs(d))
     assert [r["status"] for r in d["prompts"] if r["file"] == "worker.md"] == ["active"]
     # Permission changes make the permission files stale too.
@@ -78,7 +79,7 @@ def test_finds_stale_bundles_and_explains_why(project):
                                        .replace('allow = []', 'allow = ["make docs"]'))
     drift = overview.collect(project, offline=True)["repo"]["drift"]
     assert "claude/settings/worker.json" in drift and "gemini/policies/worker.toml" in drift
-    assert "codex/rules/worker.rules" in drift
+    assert "codex/rules/worker.rules" in drift and "agy/settings/worker.json" in drift
 
 
 def test_roles_show_their_origin_and_prompt_sources(project):

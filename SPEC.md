@@ -266,10 +266,13 @@ Only one blocking (`freeze` or `start_approval`) decision may be open at a time;
 |---|---|---|
 | claude | `claude -p <prompt> --session-id <uuid> --output-format json --permission-mode <mode>` | `claude -p <prompt> --resume <uuid> …` |
 | gemini | `gemini -p <prompt> --session-id <uuid> -o json --approval-mode <mode>` | `gemini -p <prompt> --resume <uuid> …` (verify; configurable) |
+| agy | `agy --input-format stream-json --output-format stream-json --mode <mode>`, prompt on stdin as `{"event":"user","message":{"content":…}}`; agy picks the id (`init.conversation_id`) | `… --conversation <id>` |
 
   Command templates are configurable per slot (`{prompt}`, `{session}` placeholders).
-  Environment: `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` set to the slot's config dir,
-  `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET`.
+  Environment: `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` / `CODEX_HOME` set to the slot's config
+  dir (agy: `USERPROFILE`/`HOME`, since agy has no config-dir setting; plus
+  `GIT_CONFIG_GLOBAL` = the user's `~/.gitconfig`), `HIVE_SLOT`, `HIVE_DAEMON_URL`,
+  `HIVE_LOCAL_SECRET`, `HIVE_HOME`.
 - Wake prompt = role reminder + fleet state + digest of pending events/messages + current task
   (in a resumed session, only notes it hasn't seen yet).
 - Sessions: a worker resumes its session while it works on the same task and starts a fresh
@@ -299,7 +302,15 @@ the slot comes from `HIVE_SLOT`, which the launcher sets. Hooks must answer with
 | Stop / AfterAgent | Block (once per reason, ≤3 times) if unacked high/interrupt messages or the slot holds a lease on uncommitted work. Allow when frozen. |
 | SessionStart | Interactive sessions: role prompt, fleet state, skill pointer (not on `resume`). Headless wakes: nothing beyond messages (the wake prompt has it). |
 
-Write tools: `Edit, Write, MultiEdit, NotebookEdit` (Claude), `write_file, replace` (Gemini).
+agy: `PreToolUse`, `SessionStart` and `Stop` as above; `PreInvocation` (before every model
+request) delivers high/interrupt messages, and its first call in a turn acts as
+UserPromptSubmit. A headless agy turn ends when a tool needs confirmation, so for agy
+PreToolUse also *approves* (`auto_approve`) Hive's tools (`call_mcp_tool` on server
+`hive_hive`) and allowed commands, and denies other commands with directions.
+
+Write tools: `Edit, Write, MultiEdit, NotebookEdit` (Claude), `write_file, replace` (Gemini),
+`write_file, edit_file` and agy's other edit tools (agy; path in `Path`, unknown paths
+denied).
 Shell writes are not fully enforceable; the git `pre-commit` hook re-checks staged paths against
 leases.
 
@@ -457,6 +468,7 @@ on its own:
 | Bundle | Contents | Attached by |
 |---|---|---|
 | `.hive/agent/claude/` (Claude Code plugin) | `.claude-plugin/plugin.json`, `.mcp.json` (hive MCP server), `hooks/hooks.json`, `skills/hive-orchestrator`, `skills/hive-worker` | `claude --plugin-dir .hive/agent/claude --settings '<allow hive tools>'` |
+| `.hive/agent/agy/` (Antigravity CLI plugin) | `plugin.json`, `mcp_config.json`, `hooks.json`, the same skills, `settings/{orchestrator,worker}.json` (permission rules) | copied into `<slot home>/.gemini/config/plugins/hive/` and enabled; the role's rules and worktree trust merged into `<slot home>/.gemini/antigravity-cli/settings.json` |
 | `.hive/agent/gemini/` (Gemini CLI extension) | `gemini-extension.json` (MCP server with a 30-min timeout, `HIVE.md` context), `hooks/hooks.json`, the same skills | linked into the slot's private `GEMINI_CLI_HOME` (`gemini extensions link --consent`), selected with `-e hive` |
 
 `hive init` also removes hive entries written by v0.1 to auto-loaded files (`.mcp.json`,
@@ -469,12 +481,12 @@ on its own:
 | Slot | `hive up` behaviour |
 |---|---|
 | orchestrator | native interactive CLI in the terminal (resume or new session, initial prompt pointing to the skill); relaunch prompt on exit; workers on the same machine run in the background without terminal output |
-| worker | headless wakes with `--output-format stream-json` (Claude, plus `--verbose`) or `-o stream-json` (Gemini), formatted live in the terminal |
+| worker | headless wakes with `--output-format stream-json` (Claude, plus `--verbose`) or `-o stream-json` (Gemini; agy: `--output-format stream-json`), formatted live in the terminal |
 
 `hive chat <slot>` attaches interactively to any slot, pausing its headless wakes.
 
 **Live streams (admin only).** The daemon formats each stream-json event into readable lines
-(assistant text, `→ tool input`, `← result`, `· turn done`; Gemini text deltas are joined). It
+(assistant text, `→ tool input`, `← result`, `· turn done`; Gemini and agy text deltas are joined). It
 uploads them in batches every second (`POST /agents/me/stream`, max 500 lines/batch,
 4000 chars/line). The server keeps the last 20,000 lines per agent. `GET /streams` requires
 the admin token; agent tokens, including the orchestrator's, get 403. Views: `hive watch

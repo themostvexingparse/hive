@@ -45,9 +45,15 @@ AUTO_RELEASE_MAX_WAIT = 1800  # wait at most this long for a running turn to fin
 CLAUDE_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 GEMINI_WRITE_TOOLS = {"write_file", "replace", "edit"}
 CODEX_PATCH_TOOLS = {"apply_patch"}  # one patch may add, update, delete and move many files
+# agy names hook tools after its step types (write_file, edit_file), its model-facing names
+# differ (write_to_file, replace_file_content, ...); both are listed. The file is in `Path`.
+AGY_WRITE_TOOLS = {"write_file", "edit_file", "write_to_file", "replace_file_content",
+                   "multi_replace_file_content", "sed_file", "notebook_edit"}
+AGY_PATH_ARGS = ("Path", "TargetFile", "AbsolutePath", "File")
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS", "read_file", "read_many_files", "glob",
-                   "search_file_content", "list_directory", "grep"}
-SHELL_TOOLS = {"Bash", "PowerShell", "run_shell_command"}
+                   "search_file_content", "list_directory", "grep", "view_file", "list_dir",
+                   "grep_search", "find_by_name"}
+SHELL_TOOLS = {"Bash", "PowerShell", "run_shell_command", "run_command"}
 class StreamSink:
     """Shows a worker's formatted output locally and uploads it (admin-only view) in batches."""
 
@@ -549,8 +555,8 @@ class Daemon:
                                on_start=started, on_lines=rt.sink.write)
             if res.session_id:
                 session = res.session_id
-            elif rt.cfg.vendor == "codex" and not resume:
-                session = None  # Codex never reported its new session: nothing to resume
+            elif rt.cfg.vendor in wake.SELF_ID_VENDORS and not resume:
+                session = None  # the CLI never reported its new session: nothing to resume
             self.store.put(rt.name, "session", session)
             self.store.put(rt.name, "wakes_in_session", wakes + 1)
             self.store.put(rt.name, "last_wake", time.time())
@@ -739,21 +745,33 @@ class Daemon:
 
     def _pre_tool(self, rt: SlotRuntime, state: str, data: dict) -> dict:
         tool = data.get("tool_name", "")
-        if is_hive_tool(tool):
-            return {}
+        ti = data.get("tool_input") or {}
+        agy = rt.cfg.vendor == "agy"
+        if is_hive_tool(tool) or (agy and is_hive_mcp_call(tool, ti)):
+            # agy asks before MCP calls, and a headless turn ends when nobody can answer.
+            return {"allow": True} if agy else {}
         if not rt.active:
             if tool in READ_ONLY_TOOLS:
                 return {}
             return {"deny": f"Hive fleet is {state}; your roles ({', '.join(rt.roles)}) must "
                             "not act now. End your turn; you will be woken when it is your turn."}
-        ti = data.get("tool_input") or {}
         if tool in SHELL_TOOLS:
             # Codex reports every shell as "Bash" but runs the user's shell (PowerShell on
             # Windows).
             shell = default_shell() if rt.cfg.vendor == "codex" else tool_shell(tool)
-            verdict = self._check_shell(rt, command_text(ti.get("command", "")), shell)
-            if verdict:
+            command = command_text(ti.get("command") or ti.get("CommandLine") or "")
+            verdict = self._check_shell(rt, command, shell)
+            if verdict or not agy:
                 return verdict
+            return self._agy_shell(rt, command, shell)
+        if agy and tool in AGY_WRITE_TOOLS:
+            raw = next((ti[k] for k in AGY_PATH_ARGS if isinstance(ti.get(k), str)), "")
+            if not raw:
+                # Fail closed: a write Hive can't place would otherwise skip lease checks.
+                return {"deny": f"Hive could not find which file this {tool} call writes, so "
+                                "it can't check your leases. Use write_file or edit_file with "
+                                "the file's path."}
+            return self._check_write(rt, raw)
         if tool in CLAUDE_WRITE_TOOLS or tool in GEMINI_WRITE_TOOLS:
             raw = ti.get("file_path") or ti.get("notebook_path") or ti.get("path") or ""
             return self._check_write(rt, raw) if raw else {}
@@ -772,6 +790,21 @@ class Daemon:
                 if verdict:
                     return verdict
         return {}
+
+    def _agy_shell(self, rt: SlotRuntime, command: str, shell: str) -> dict:
+        """agy: a command that passed the hard limits. In a headless turn agy refuses anything
+        its rules would ask about and then ends the turn, so Hive approves the project's
+        allowed commands itself and refuses the rest with what to do instead. The
+        orchestrator's interactive session asks the user."""
+        if P.allowed(command, rt.rules[role_class(rt.roles)]["allow"]):
+            return {"allow": True}
+        if rt.is_orchestrator:
+            return {}
+        return {"deny": "This command isn't on the project's list of commands agents may run "
+                        "without asking ([permissions] in hive.toml), and nobody can confirm "
+                        "it during your turn. Do it another way, or, if you need exactly this "
+                        f"command, call request_approval(command={command!r}, shell={shell!r}, "
+                        "reason=<why it is needed and what it affects>)."}
 
     def _check_write(self, rt: SlotRuntime, raw: str) -> dict:
         """Verdict for writing the file `raw` (absolute or relative to the worktree)."""
@@ -1219,6 +1252,12 @@ def is_hive_tool(tool: str) -> bool:
         return True
     head, _, name = tool.rpartition("__")
     return name in HIVE_TOOL_NAMES and "hive" in head
+
+
+def is_hive_mcp_call(tool: str, tool_input: dict) -> bool:
+    """agy calls every MCP tool through `call_mcp_tool`; the plugin's server is hive_hive."""
+    return (tool == "call_mcp_tool" and "hive" in str(tool_input.get("ServerName") or "")
+            and tool_input.get("ToolName") in HIVE_TOOL_NAMES)
 
 
 _PATCH_FILE = re.compile(

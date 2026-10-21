@@ -13,14 +13,17 @@ Three tiers, so the fleet needs as little human intervention as possible while s
 * **forbidden**: Hive's user/admin commands. Never run by an agent, approval or not.
 
 Two layers enforce this:
-1. Per-CLI permission files (`--settings` / `--policy` / Codex `.rules`) use command
-   *prefixes*: "git diff" -> Claude Bash(git diff *), PowerShell(git diff *); Gemini
-   commandPrefix; Codex prefix_rule(pattern=["git", "diff"]).
+1. Per-CLI permission files (`--settings` / `--policy` / Codex `.rules` / agy settings.json)
+   use command *prefixes*: "git diff" -> Claude Bash(git diff *), PowerShell(git diff *);
+   Gemini commandPrefix; Codex prefix_rule(pattern=["git", "diff"]); agy
+   command(regex:^git\\s+diff(\\s.*)?$).
 2. Hive's PreToolUse hook parses the command itself: it splits compound commands, unwraps
    nested shells (`bash -c`, `cmd /c`, `powershell -Command`, including -EncodedCommand),
    normalises program names (`C:\\...\\git.exe` -> git) and recognises dangerous *flags in any
    position* (`Remove-Item x -Recurse`, `del /s /q`, `rm -fr`). The hook is authoritative;
-   prefixes alone can't express flags that come after a path.
+   prefixes alone can't express flags that come after a path. For agy it also approves the
+   allowed commands itself (`allowed()`), because a headless agy turn ends as soon as a
+   command needs a confirmation nobody can give.
 
 Neither layer is a security boundary against a determined agent (the CLIs' docs say the same
 of their rules). The hard protections are server-side checks and the daemon's checks before it
@@ -334,12 +337,25 @@ def matches(command: str, prefixes: list[str]) -> str | None:
     """The first prefix matching any simple command inside `command`, or None. Matching is
     case-insensitive (PowerShell and cmd.exe are) and on whole words."""
     for words in _split(command):
-        low = " ".join(words).lower()
-        for p in prefixes:
-            pw = p.split()
-            pl = " ".join([program(pw[0])] + pw[1:]).lower()
-            if low == pl or low.startswith(pl + " "):
-                return p
+        hit = _match(words, prefixes)
+        if hit:
+            return hit
+    return None
+
+
+def allowed(command: str, prefixes: list[str]) -> bool:
+    """Whether every simple command inside `command` matches one of `prefixes`."""
+    parts = _split(command)
+    return bool(parts) and all(_match(words, prefixes) for words in parts)
+
+
+def _match(words: list[str], prefixes: list[str]) -> str | None:
+    low = " ".join(words).lower()
+    for p in prefixes:
+        pw = p.split()
+        pl = " ".join([program(pw[0])] + pw[1:]).lower()
+        if low == pl or low.startswith(pl + " "):
+            return p
     return None
 
 
@@ -456,6 +472,28 @@ def gemini_policy(rules: dict[str, list[str]], cls: str) -> dict:
         rule.append({"toolName": shell, "commandPrefix": rules["allow"], "decision": "allow",
                      "priority": 500})
     return {"rule": rule}
+
+
+AGY_MCP_SERVER = "hive_hive"  # agy names a plugin's MCP server <plugin>_<server>
+
+
+def _agy_command(prefix: str) -> str:
+    """An agy `command(...)` rule for a prefix. agy 1.4.4 didn't match plain prefix rules
+    against commands with more arguments; its `regex:` rules work."""
+    words = [re.sub(r"([\\.+*?()|\[\]{}^$])", r"\\\1", w) for w in prefix.split()]
+    return "command(regex:^" + r"\s+".join(words) + r"(\s.*)?$)"
+
+
+def agy_settings(rules: dict[str, list[str]], cls: str) -> dict:
+    """The `permissions` block of agy's settings.json, written into the slot's private home
+    at launch. Hive's hook decides first; these rules apply if it can't reach the daemon."""
+    perms = {"allow": [f"mcp({AGY_MCP_SERVER}/*)"] + [_agy_command(p) for p in rules["allow"]],
+             "ask": [], "deny": [_agy_command(p) for p in rules["forbidden"]]}
+    if cls == "orchestrator":  # interactive: dangerous commands ask the user
+        perms["ask"] = [_agy_command(p) for p in rules["approval"]]
+    else:  # headless: blocked here, run via request_approval instead
+        perms["deny"] += [_agy_command(p) for p in rules["approval"]]
+    return {"permissions": perms}
 
 
 def codex_rules(rules: dict[str, list[str]], cls: str) -> str:

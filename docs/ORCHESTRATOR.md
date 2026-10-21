@@ -1,8 +1,8 @@
 # Working with the orchestrator
 
 A Hive fleet is a team of AI coding agents working on one repository. The orchestrator is
-the one agent in it that you normally talk to. It is a regular Claude Code, Gemini CLI or
-Codex session given the `orchestrator` [role](ROLES.md): it plans the work, splits it into
+the one agent in it that you normally talk to. It is a regular Claude Code, Codex, agy or
+Gemini CLI session given the `orchestrator` [role](ROLES.md): it plans the work, splits it into
 [tasks](COORDINATION.md#tasks), assigns them, answers the other agents' (the **workers'**)
 questions, approves their risky shell commands, checks the **reports** they write about
 their work, and keeps you informed. It never writes code itself.
