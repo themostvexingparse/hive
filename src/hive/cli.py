@@ -476,6 +476,32 @@ def refresh_git_hooks(cfg) -> None:
             pass
 
 
+def pick_orchestrator(d, cfg, name: str | None):
+    """The orchestrator slot `hive up` attaches this terminal to; the others run headless.
+    With several projects' orchestrators on this machine, the one of the project this command
+    is about: --project (or $HIVE_PROJECT), else the repository it runs in."""
+    orchs = [rt for rt in d.slots.values() if rt.is_orchestrator]
+    if name:
+        return next((rt for rt in orchs if rt.name == name), None) or die(
+            f"{name} is not an orchestrator slot on this machine")
+    if len(orchs) <= 1:
+        return orchs[0] if orchs else None
+
+    def project_of(url: str) -> str:
+        return split_project_url(url)[1] or "default"
+
+    project = PROJECT or os.environ.get("HIVE_PROJECT", "")
+    if not project and (root := find_repo_root()):
+        url = load_repo_config(root).get("server", {}).get("url", "")
+        project = project_of(url) if url else ""
+    found = [rt for rt in orchs if project and project_of(cfg.url_for(rt.cfg)) == project]
+    if len(found) == 1:
+        return found[0]
+    listed = ", ".join(f"{rt.name} ({project_of(cfg.url_for(rt.cfg))})" for rt in orchs)
+    die(f"this machine has several orchestrators: {listed}. Run `hive up` inside a project's "
+        "repository, or choose one with --project NAME or --orchestrator NAME")
+
+
 def cmd_up(a):
     from .daemon.core import Daemon
     from .daemon.localapi import serve
@@ -496,8 +522,7 @@ def cmd_up(a):
         where = ", ".join(f"{n} ({cfg.url_for(cfg.slot(n))})" for n in missing)
         die(f"could not reach the Hive server for {where} "
             "(is it running, and are the tokens in ~/.hive/machine.toml valid?)")
-    orch = None if a.headless else next(
-        (rt for rt in d.slots.values() if rt.is_orchestrator), None)
+    orch = None if a.headless else pick_orchestrator(d, cfg, a.orchestrator)
     if orch:
         # Mark it attached before the wake loop starts, so no headless turn can race the
         # interactive session on the same conversation.
@@ -876,6 +901,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("-v", "--verbose", action="store_true")
     s.add_argument("--headless", action="store_true",
                    help="drive the orchestrator headlessly too (no interactive session)")
+    s.add_argument("--orchestrator", metavar="NAME",
+                   help="the orchestrator slot to attach to, if this machine has several "
+                        "(default: the one of --project, or of the repository you're in)")
     s.set_defaults(fn=cmd_up)
 
     s = sub.add_parser("watch", help="follow agents' live output (admin only)")
