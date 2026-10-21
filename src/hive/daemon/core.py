@@ -30,6 +30,8 @@ log = logging.getLogger("hive.daemon")
 ORCH_BATCHED = {"message.normal", "task.progress", "task.completed", "report.submitted",
                 "review.verdict"}
 UNFINISHED_TASK_STATES = "open,claimed,in_progress,review,blocked"
+FINISH_FIELDS = ("result", "report_summary", "report_body")
+FINISH_MAX_ATTEMPTS = 20  # retried with the heartbeat (every 20 s): several minutes of outage
 TASK_SUMMARY_FIELDS = ("id", "state", "kind", "priority", "assignee", "title", "deps",
                        "path_hints")
 ROSTER_FIELDS = ("name", "vendor", "roles", "online", "busy", "has_task", "exhausted",
@@ -248,6 +250,7 @@ class Daemon:
                                        {"busy": rt.running, "attached": rt.attached})
                     rt.fleet = r["fleet"]
                     self.resend_confirms(rt)
+                    self.retry_finishes(rt)
                     for l in list(rt.leases):
                         if l["expires_at"] - time.time() < 300:
                             l.update(rt.client.post(f"/leases/{l['id']}/extend", {"ttl": 600}))
@@ -342,6 +345,8 @@ class Daemon:
                     threading.Thread(target=self.auto_release, args=(rt, p["id"]),
                                      daemon=True).start()
                 else:
+                    # The result and report left for this task describe the rejected version.
+                    self.drop_finish(rt, p["id"])
                     self.store.add_notice(me, f"Review of task #{p['id']} requested changes: "
                                           f"{p['notes']}", "high")
                     self.trigger(rt, "review.verdict", f"Review of task #{p['id']} requested "
@@ -392,8 +397,9 @@ class Daemon:
             self.trigger(rt, t, summarize_event(ev))
 
     def my_open_tasks(self, rt: SlotRuntime) -> list[dict]:
-        """The agent's unfinished tasks, the one it's working on first."""
-        order = {"in_progress": 0, "review": 1, "claimed": 2, "blocked": 3}
+        """The agent's unfinished tasks, the ones it can work on first: a task waiting for
+        review needs nothing from it until the verdict."""
+        order = {"in_progress": 0, "claimed": 1, "blocked": 2, "review": 3}
         try:
             mine = [t for t in rt.client.get("/tasks", assignee=rt.name) if t["state"] in order]
         except HiveError:
@@ -431,11 +437,17 @@ class Daemon:
             res = self.release(rt, msg, task_id)
         finally:
             rt.releasing = False
-        if res["status"] in ("integrated", "integrated_unconfirmed") and res.get("finished"):
-            # The agent left its result and report with lease_release: nothing is left for it
-            # to do, so it isn't woken just to hear the news.
+        fin = res.get("finished")
+        if res["status"] in ("integrated", "integrated_unconfirmed") and fin:
+            # The agent left its result and report with lease_release. If both went through
+            # (or Hive is still retrying one), nothing is left for it to do: it isn't woken
+            # just to hear the news. finish_task wakes it itself if it had to give up.
+            if fin["done"]:
+                news = "the task was completed and your report filed"
+            else:
+                news = "Hive is still completing the task and filing your report"
             self.store.add_notice(rt.name, f"Review of task #{task_id} approved; it was "
-                                  f"integrated and {', '.join(res['finished'])}.", "normal")
+                                  f"integrated and {news}.", "normal")
             return
         self.store.add_notice(rt.name, f"Review of task #{task_id} approved; integration "
                               f"result: {res['status']}: {res['message']}", "high")
@@ -489,7 +501,7 @@ class Daemon:
             rt.noted = False
             self.refresh(rt)
             tasks = self.my_open_tasks(rt)
-            focus = tasks[0]["id"] if tasks else None
+            focus = self.session_focus(rt, tasks)
             session = self.store.get(rt.name, "session", None)
             wakes = self.store.get(rt.name, "wakes_in_session", 0)
             why_fresh = self.session_rotation(rt, session, wakes, focus)
@@ -500,7 +512,10 @@ class Daemon:
                 resume = True
                 seen = {int(k): v for k, v in
                         (self.store.get(rt.name, "session_seen", {}) or {}).items()}
-            handoff = self.handoff_note(rt, focus) if why_fresh in ("context", "wakes") else ""
+            # A fresh session picking up a task that is already under way gets what's on disk.
+            current = next((t for t in tasks if t["id"] == focus), None)
+            handoff = (self.handoff_note(rt, focus) if why_fresh and current
+                       and current["state"] in ("in_progress", "blocked") else "")
             msgs = self.store.undelivered(rt.name, "normal")
             prompt = wake.build_prompt(rt.name, rt.me, rt.fleet, trig, msgs, tasks,
                                        first_in_session=not resume,
@@ -524,7 +539,7 @@ class Daemon:
                 self.store.mark_injected(rt.name, [m["id"] for m in msgs])
                 self.store.put(rt.name, "session_seen", {
                     **{str(k): v for k, v in seen.items()},
-                    **{str(t["id"]): len(t.get("notes") or "") for t in tasks}})
+                    **{str(t["id"]): wake.notes_marker(t.get("notes") or "") for t in tasks}})
                 if focus is not None:
                     self.store.put(rt.name, "session_task", focus)
                 elif why_fresh:
@@ -543,6 +558,8 @@ class Daemon:
             if res.quota_hit:
                 rt.sink.write(["· usage limit reached; pausing this agent for an hour"])
                 rt.quota_until = time.time() + 3600
+                # The turn may have failed before the model read its prompt: resend it all.
+                self.store.put(rt.name, "session_seen", {})
                 try:
                     rt.client.post("/agents/me/quota", {"until": rt.quota_until,
                                                         "detail": res.output[-500:]})
@@ -583,6 +600,17 @@ class Daemon:
                 return "task"
         return None
 
+    def session_focus(self, rt: SlotRuntime, tasks: list[dict]):
+        """The task this turn is mainly about. The session's own task keeps the focus while
+        the agent can still work on it, so a second task (e.g. one assigned while the first
+        waits for review) doesn't flip the session back and forth; otherwise the first task
+        the agent can work on."""
+        last = self.store.get(rt.name, "session_task", None)
+        for t in tasks:
+            if t["id"] == last and t["state"] in ("in_progress", "claimed", "blocked"):
+                return last
+        return tasks[0]["id"] if tasks else None
+
     def handoff_note(self, rt: SlotRuntime, focus) -> str:
         """For a fresh session that continues a task begun in an earlier one: what's already
         on disk. The task's notes (in the prompt) say what was done and what's next."""
@@ -594,8 +622,8 @@ class Daemon:
                                f"origin/{rt.main}..HEAD", check=False).strip()
         except gitops.GitError:
             return ""
-        return (f"This is a fresh session continuing task #{focus}; the previous one grew "
-                f"large. Your task notes above are your record of it. In your worktree: "
+        return (f"This is a fresh session continuing task #{focus}, begun in an earlier one. "
+                f"Your task notes above are your record of it. In your worktree: "
                 f"{len(changed)} uncommitted file(s)"
                 + (f" ({', '.join(changed[:15])})" if changed else "")
                 + f", {ahead or 0} commit(s) not yet in {rt.main}. Check them, then continue.")
@@ -897,37 +925,86 @@ class Daemon:
         the task and files the report as soon as the work is integrated: now, or after an
         approved review (kept until then), so the agent needs no further calls or wake."""
         if finish is None and task_id is not None:
-            finish = self.store.get(rt.name, f"finish:{task_id}", None)
+            finish = self.get_finish(rt, task_id)
         res = self._release(rt, commit_message, task_id)
         if not finish or task_id is None:
             return res
         if res.get("status") == "review_pending":
-            self.store.put(rt.name, f"finish:{task_id}", finish)
+            self.put_finish(rt, task_id, {k: finish[k] for k in FINISH_FIELDS if k in finish})
             res["message"] += (" Your result and report are kept; Hive completes the task and "
                                "files them when the review approves it. End your turn.")
         elif res.get("status") in ("integrated", "integrated_unconfirmed"):
-            self.store.put(rt.name, f"finish:{task_id}", None)
-            res["finished"] = self.finish_task(rt, task_id, finish)
+            # Saved before the calls, so a failure (or a daemon restart) can't lose it.
+            self.put_finish(rt, task_id, dict(finish, integrated=True))
+            fin = res["finished"] = self.finish_task(rt, task_id)
+            if not fin["done"]:
+                res["message"] += (" Integrated, but " + "; ".join(fin["errors"]) + (
+                    ". Hive retries in the background." if fin["retrying"] else
+                    ". Do it yourself with task_complete / report_submit."))
         return res
 
-    def finish_task(self, rt: SlotRuntime, task_id: int, finish: dict) -> list[str]:
-        """Complete the task and file the report on the agent's behalf; returns what was done."""
-        done = []
-        try:
-            rt.client.post(f"/tasks/{task_id}/complete", {"result": finish.get("result", "")})
-            done.append("task completed")
-        except HiveError as e:
-            done.append(f"task_complete failed: {e}")
-        if finish.get("report_summary") or finish.get("report_body"):
+    # A finish left with lease_release: kept until the task is completed and the report filed,
+    # each step recorded as it succeeds so a retry only repeats what's missing.
+    def get_finish(self, rt: SlotRuntime, task_id: int) -> dict | None:
+        return (self.store.get(rt.name, "finishes", {}) or {}).get(str(task_id))
+
+    def put_finish(self, rt: SlotRuntime, task_id: int, finish: dict) -> None:
+        all_ = self.store.get(rt.name, "finishes", {}) or {}
+        all_[str(task_id)] = finish
+        self.store.put(rt.name, "finishes", all_)
+
+    def drop_finish(self, rt: SlotRuntime, task_id: int) -> None:
+        all_ = self.store.get(rt.name, "finishes", {}) or {}
+        if all_.pop(str(task_id), None) is not None:
+            self.store.put(rt.name, "finishes", all_)
+
+    def finish_task(self, rt: SlotRuntime, task_id: int) -> dict:
+        """Complete the task and file the report on the agent's behalf, doing only the steps
+        not done yet. Transient failures (server unreachable, busy, integration not confirmed
+        yet) keep the finish for a retry; a permanent one, or too many attempts, gives up and
+        wakes the agent to finish by hand."""
+        fin = self.get_finish(rt, task_id)
+        if not fin:
+            return {"done": True, "errors": [], "retrying": False}
+        errors, permanent = [], False
+        wants_report = bool(fin.get("report_summary") or fin.get("report_body"))
+        steps = [("completed", f"/tasks/{task_id}/complete", {"result": fin.get("result", "")})]
+        if wants_report:
+            steps.append(("reported", "/reports", {
+                "summary": fin.get("report_summary") or f"Task #{task_id} done",
+                "body": fin.get("report_body", ""), "task_id": task_id}))
+        for flag, path, body in steps:
+            if fin.get(flag):
+                continue
             try:
-                rt.client.post("/reports", {"summary": finish.get("report_summary") or
-                                            f"Task #{task_id} done",
-                                            "body": finish.get("report_body", ""),
-                                            "task_id": task_id})
-                done.append("report filed")
+                rt.client.post(path, body)
+                fin[flag] = True
             except HiveError as e:
-                done.append(f"report_submit failed: {e}")
-        return done
+                errors.append(f"{'task_complete' if flag == 'completed' else 'report_submit'} "
+                              f"failed ({e})")
+                permanent |= e.status in (400, 401, 403, 404)
+        done = fin.get("completed") and (fin.get("reported") or not wants_report)
+        fin["attempts"] = fin.get("attempts", 0) + 1
+        give_up = not done and (permanent or fin["attempts"] >= FINISH_MAX_ATTEMPTS)
+        if done or give_up:
+            self.drop_finish(rt, task_id)
+        else:
+            self.put_finish(rt, task_id, fin)
+        if give_up:
+            missing = [w for w, f in (("task_complete", "completed"), ("report_submit", "reported"))
+                       if not fin.get(f) and (f == "completed" or wants_report)]
+            self.store.add_notice(rt.name, f"Task #{task_id} is integrated, but Hive could not "
+                                  f"{' / '.join(missing)} for you: {'; '.join(errors)}. Call "
+                                  f"{' and '.join(missing)} yourself.", "high")
+            self.trigger(rt, "task.assigned", f"Task #{task_id} is integrated but needs you to "
+                         f"call {' and '.join(missing)}.")
+        return {"done": bool(done), "errors": errors, "retrying": not done and not give_up}
+
+    def retry_finishes(self, rt: SlotRuntime) -> None:
+        """Retry finishes whose task was integrated but not yet completed and reported."""
+        for tid, fin in list((self.store.get(rt.name, "finishes", {}) or {}).items()):
+            if fin.get("integrated"):
+                self.finish_task(rt, int(tid))
 
     def _release(self, rt: SlotRuntime, commit_message: str, task_id: int | None) -> dict:
         with rt.lock:
@@ -1006,14 +1083,17 @@ class Daemon:
         # agent already has): task_get is there for the details.
         if name == "task_claim":
             return task_ack(c.post(f"/tasks/{int(a['task_id'])}/claim"))
-        if name in ("task_update", "task_handoff", "report_stuck") and                 (a.get("note") or a.get("notes") or a.get("details")):
-            rt.noted = True
+        # A progress note counts (for the stop hook) only once the server has saved it.
         if name == "task_update":
-            return task_ack(c.patch(f"/tasks/{int(a['task_id'])}", {"state": a.get("state"),
-                                                                   "note": a.get("note", "")}))
+            r = task_ack(c.patch(f"/tasks/{int(a['task_id'])}", {"state": a.get("state"),
+                                                                "note": a.get("note", "")}))
+            rt.noted = rt.noted or bool(a.get("note"))
+            return r
         if name == "task_handoff":
-            return task_ack(c.post(f"/tasks/{int(a['task_id'])}/handoff",
-                                   {"to": a["to"], "notes": a.get("notes", "")}))
+            r = task_ack(c.post(f"/tasks/{int(a['task_id'])}/handoff",
+                                {"to": a["to"], "notes": a.get("notes", "")}))
+            rt.noted = rt.noted or bool(a.get("notes"))
+            return r
         if name == "task_complete":
             return task_ack(c.post(f"/tasks/{int(a['task_id'])}/complete",
                                    {"result": a.get("result", "")}))
@@ -1023,7 +1103,9 @@ class Daemon:
         if name == "task_assign":
             return task_ack(c.post(f"/tasks/{int(a['task_id'])}/assign", {"to": a["to"]}))
         if name == "report_stuck":
-            return c.post("/stuck", {"task_id": a.get("task_id"), "details": a["details"]})
+            r = c.post("/stuck", {"task_id": a.get("task_id"), "details": a["details"]})
+            rt.noted = True
+            return r
         if name == "lease_acquire":
             r = c.post("/leases", {"globs": a["globs"], "reason": a.get("reason", ""),
                                    "ttl": int(a.get("ttl", 600)), "task_id": a.get("task_id")})

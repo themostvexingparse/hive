@@ -135,7 +135,8 @@ def build_server(slot: str | None = None) -> MCPServer:
     def task_list(state: str | None = None, assignee: str | None = None, mine: bool = False,
                   since_id: int = 0, limit: int = 50) -> str:
         """Task summaries (no spec or notes; use task_get). Default: unfinished tasks only.
-        state: comma-separated states, or "all". since_id: only tasks with a higher id."""
+        state: comma-separated states, or "all". since_id pages through a long list (tasks
+        with a higher id); it does not show changes to older tasks."""
         limit = max(1, min(int(limit), 200))
         out = call("task_list", state=state, assignee=assignee, mine=mine, since_id=since_id,
                    limit=limit + 1)

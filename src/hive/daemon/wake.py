@@ -76,12 +76,43 @@ task_update(note=...). Your next turn may start in a fresh session that only has
 - If you are blocked, call report_stuck rather than guessing; then end your turn."""
 
 
+NOTES_MARKER_CHARS = 200
+NOTES_SHOWN_CHARS = 2000
+
+
+def notes_marker(notes: str) -> str:
+    """What a session remembers of a task's notes: their last characters. Notes are only ever
+    appended to (and trimmed at the front past 20,000 characters), so the notes added since
+    are whatever follows this text."""
+    return notes[-NOTES_MARKER_CHARS:]
+
+
+def new_notes(notes: str, marker) -> str | None:
+    """Notes added since the session saw `marker`; None if that can't be told (old format,
+    or the marker is gone), in which case the caller resends the notes rather than risk
+    leaving something out."""
+    if not isinstance(marker, str):
+        return None
+    if not marker:
+        return notes
+    pos = notes.find(marker)  # the first match errs towards repeating notes, never dropping
+    return None if pos < 0 else notes[pos + len(marker):]
+
+
+def _notes_tail(notes: str) -> str:
+    """The newest notes, saying so when older ones are left out."""
+    notes = notes.strip()
+    if len(notes) <= NOTES_SHOWN_CHARS:
+        return notes
+    return "(earlier notes cut; task_get has them all) …" + notes[-NOTES_SHOWN_CHARS:]
+
+
 def build_prompt(slot: str, me: dict, fleet: dict, triggers: list[dict], messages: list[dict],
                  tasks: list[dict], first_in_session: bool, project_prompt: str = "",
-                 seen: dict[int, int] | None = None, handoff: str = "") -> str:
+                 seen: dict[int, str] | None = None, handoff: str = "") -> str:
     """`project_prompt`: the project's role files (.hive/prompts/roles/), added once per
     session next to the role prompt. `seen`: tasks this session was already shown, mapped to
-    how much of their notes it saw; only what's new about them is sent again. `handoff`: what
+    the notes it saw (notes_marker); only what's new about them is sent again. `handoff`: what
     a fresh session needs to pick up work begun in an earlier one."""
     seen = seen or {}
     roles = ", ".join(me.get("roles", []))
@@ -102,16 +133,21 @@ def build_prompt(slot: str, me: dict, fleet: dict, triggers: list[dict], message
             lines.append(f"- Task #{t['id']} [{t['state']}] ({t['kind']}): {t['title']}")
             notes = t.get("notes") or ""
             if t["id"] in seen:  # this session has the spec already: only new notes
-                new = notes[seen[t["id"]]:].strip()
-                lines.append("  (Spec as before in this session.)" + (
-                    "\n  New notes: " + new[-2000:].replace("\n", "\n  ") if new else ""))
+                new = new_notes(notes, seen[t["id"]])
+                if new is None:
+                    extra = "\n  Notes (latest): " + _notes_tail(notes).replace("\n", "\n  ")
+                else:
+                    new = new.strip()
+                    extra = ("\n  New notes: " + _notes_tail(new).replace("\n", "\n  ")
+                             if new else "")
+                lines.append("  (Spec as before in this session.)" + extra)
                 continue
             if t.get("spec"):
                 lines.append("  Spec: " + t["spec"].strip().replace("\n", "\n  ")[:4000])
             if t.get("path_hints"):
                 lines.append(f"  Path hints: {', '.join(t['path_hints'])}")
             if notes:
-                lines.append("  Notes: " + notes[-2000:].replace("\n", "\n  "))
+                lines.append("  Notes: " + _notes_tail(notes).replace("\n", "\n  "))
         parts.append("Your tasks:\n" + "\n".join(lines))
     if handoff:
         parts.append(handoff)

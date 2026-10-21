@@ -11,7 +11,9 @@ import pytest
 from hive import cli, mcp_server, roles
 from hive.config import MachineConfig, Slot
 from hive.daemon import core, wake
+from hive.daemon.client import HiveError
 from hive.daemon.store import Store
+from hive.server.service import ADMIN, Actor, create_hive
 
 UNREACHABLE = "http://127.0.0.1:9"
 
@@ -242,7 +244,7 @@ def test_resumed_wake_prompts_send_only_whats_new(tmp_path):
     first = wake.build_prompt("s1", me, {"state": "running"}, [], [], [t], True)
     assert "S" * 100 in first and "ROLE" in first
     again = wake.build_prompt("s1", me, {"state": "running"}, [], [], [t], False,
-                              seen={7: len("first note. ")})
+                              seen={7: wake.notes_marker("first note.")})
     assert "S" * 100 not in again and "Spec as before" in again
     assert "second note." in again and "first note." not in again
     handoff = wake.build_prompt("s1", me, {"state": "running"}, [], [], [t], True,
@@ -337,7 +339,8 @@ def test_one_call_finish_completes_and_reports_after_integration(tmp_path):
     d, rt = make_daemon(tmp_path)
     d._release = lambda rt_, msg, tid: {"status": "integrated", "message": "ok"}
     res = d.release(rt, "msg", 7, {"result": "done", "report_summary": "S", "report_body": "B"})
-    assert res["finished"] == ["task completed", "report filed"]
+    assert res["finished"] == {"done": True, "errors": [], "retrying": False}
+    assert d.get_finish(rt, 7) is None
     posted = [(c[1], c[2]) for c in rt.client.calls if c[0] == "POST"]
     assert ("/tasks/7/complete", {"result": "done"}) in posted
     assert ("/reports", {"summary": "S", "body": "B", "task_id": 7}) in posted
@@ -353,7 +356,7 @@ def test_after_approved_review_the_task_finishes_without_waking_the_agent(tmp_pa
     d.auto_release(rt, 7, max_wait=0)
     assert any(c[1] == "/tasks/7/complete" for c in rt.client.calls)
     assert d.store.pending_triggers("s1") == []          # nobody was woken
-    assert d.store.get("s1", "finish:7") is None
+    assert d.get_finish(rt, 7) is None
 
 
 def test_routine_events_are_batched_for_the_orchestrator(tmp_path):
@@ -363,3 +366,159 @@ def test_routine_events_are_batched_for_the_orchestrator(tmp_path):
     d.trigger(rt, "agent.stuck", "s2 is stuck")
     urgency = {t["kind"]: t["urgent"] for t in d.store.pending_triggers("s1")}
     assert urgency == {"task.completed": False, "agent.stuck": True}
+
+
+# ------------------------------------------------------------------ audit fixes
+
+def _fleet_with_task():
+    import tempfile
+    hive = create_hive(f"sqlite:///{tempfile.mkdtemp()}/t.db", tick_interval=0)
+    hive.enroll(ADMIN, "orch", "claude", ["orchestrator"])
+    hive.enroll(ADMIN, "p1", "claude", ["programmer"])
+    o, p = Actor("agent", "orch", ["orchestrator"]), Actor("agent", "p1", ["programmer"])
+    hive.heartbeat(o), hive.heartbeat(p)
+    hive.start_fleet(ADMIN, "goal")
+    t = hive.create_task(o, "T", spec="S" * 100)
+    d = hive.request_decision(o, "start_approval", "ok?")
+    hive.answer_decision(ADMIN, d["id"], "approve")
+    hive.tick(force=True)
+    return hive, p, t["id"]
+
+
+def test_new_notes_still_arrive_once_notes_are_trimmed_at_20k():
+    """Notes keep only their last 20,000 characters; past that their length stops growing,
+    which used to hide every later note from a resumed session."""
+    hive, p, tid = _fleet_with_task()
+    for i in range(60):
+        hive.update_task(p, tid, "in_progress", f"note {i} " + "x" * 400)
+    seen = {tid: wake.notes_marker(hive.get_task(tid)["notes"])}
+    hive.update_task(p, tid, "in_progress", "IMPORTANT NEW NOTE")
+    task = hive.get_task(tid)
+    assert len(task["notes"]) == 20000
+    prompt = wake.build_prompt("p1", {"roles": ["programmer"]}, {"state": "running"}, [], [],
+                               [task], False, seen=seen)
+    assert "IMPORTANT NEW NOTE" in prompt and "Spec as before" in prompt
+
+
+def test_unknown_or_lost_notes_marker_resends_notes_rather_than_dropping_them():
+    t = dict(TASK, notes="alpha. beta. gamma.")
+    me, fleet = {"roles": ["programmer"]}, {"state": "running"}
+    for marker in (300, "text that is no longer there"):   # old format; marker trimmed away
+        prompt = wake.build_prompt("s1", me, fleet, [], [], [t], False, seen={7: marker})
+        assert "Notes (latest): alpha. beta. gamma." in prompt
+
+
+def test_long_notes_say_they_were_cut():
+    t = dict(TASK, notes="n" * 5000)
+    prompt = wake.build_prompt("s1", {"roles": ["programmer"]}, {"state": "running"}, [], [],
+                               [t], True)
+    assert "earlier notes cut; task_get has them all" in prompt
+
+
+def test_finish_keeps_what_failed_and_retries_only_that(tmp_path):
+    d, rt = make_daemon(tmp_path)
+    d._release = lambda rt_, msg, tid: {"status": "integrated", "message": "ok"}
+    real_post, down = rt.client.post, {"reports": True}
+
+    def post(path, body=None):
+        if path == "/reports" and down["reports"]:
+            raise HiveError(0, "unreachable", "network blip")
+        return real_post(path, body)
+
+    rt.client.post = post
+    res = d.release(rt, "msg", 7, {"result": "done", "report_summary": "S", "report_body": "B"})
+    assert res["finished"]["done"] is False and res["finished"]["retrying"] is True
+    assert "retries in the background" in res["message"]
+    kept = d.get_finish(rt, 7)
+    assert kept["completed"] is True and not kept.get("reported")
+    down["reports"] = False
+    completes = sum(1 for c in rt.client.calls if c[1] == "/tasks/7/complete")
+    d.retry_finishes(rt)                                   # the heartbeat's retry
+    assert d.get_finish(rt, 7) is None
+    assert sum(1 for c in rt.client.calls if c[1] == "/tasks/7/complete") == completes
+    assert any(c[1] == "/reports" for c in rt.client.calls)
+
+
+def test_finish_gives_up_on_a_permanent_error_and_wakes_the_agent(tmp_path):
+    d, rt = make_daemon(tmp_path)
+    d.store.put("s1", "session", None)
+    d._release = lambda rt_, msg, tid: {"status": "integrated", "message": "ok"}
+    real_post = rt.client.post
+
+    def post(path, body=None):
+        if path.endswith("/complete"):
+            raise HiveError(403, "not_assignee", "task #7 is not assigned to you")
+        return real_post(path, body)
+
+    rt.client.post = post
+    res = d.release(rt, "msg", 7, {"result": "done", "report_summary": "S"})
+    assert res["finished"]["retrying"] is False and "yourself" in res["message"]
+    assert d.get_finish(rt, 7) is None
+    assert any("task_complete" in t["summary"] for t in d.store.pending_triggers("s1"))
+
+
+def test_failed_finish_after_review_does_not_pass_as_done(tmp_path):
+    d, rt = make_daemon(tmp_path)
+    outcome = iter([{"status": "review_pending", "message": "in review."},
+                    {"status": "integrated", "message": "ok"}])
+    d._release = lambda rt_, msg, tid: next(outcome)
+    d.release(rt, "msg", 7, {"result": "done", "report_summary": "S", "report_body": "B"})
+    real_post = rt.client.post
+
+    def post(path, body=None):
+        if path == "/reports":
+            raise HiveError(0, "unreachable", "network blip")
+        return real_post(path, body)
+
+    rt.client.post = post
+    d.auto_release(rt, 7, max_wait=0)
+    assert d.get_finish(rt, 7)["completed"] is True        # kept for the retry
+    notices = " ".join(n["body"] for n in d.store.undelivered("s1", "info"))
+    assert "still completing the task" in notices
+
+
+def test_requested_changes_discard_the_kept_finish(tmp_path):
+    d, rt = make_daemon(tmp_path)
+    d._release = lambda rt_, msg, tid: {"status": "review_pending", "message": "in review."}
+    d.release(rt, "msg", 7, {"result": "old result", "report_summary": "old report"})
+    assert d.get_finish(rt, 7)
+    d.handle_event(rt, {"type": "review.verdict", "actor": "rev", "seq": 1, "payload": {
+        "id": 7, "assignee": "s1", "approve": False, "notes": "fix the tests"}})
+    assert d.get_finish(rt, 7) is None
+
+
+def test_completing_a_done_task_records_the_result_without_a_second_event():
+    hive, p, tid = _fleet_with_task()
+    hive.complete_task(p, tid, "first")
+    events = len(hive.list_events(ADMIN, 0, 1000)["events"])
+    t = hive.complete_task(p, tid, "the agent's result")
+    assert t["state"] == "done" and t["result"] == "the agent's result"
+    assert len(hive.list_events(ADMIN, 0, 1000)["events"]) == events
+
+
+def test_a_task_waiting_for_review_does_not_take_the_session_focus(tmp_path):
+    a_review = dict(TASK, id=1, state="review")
+    b_claimed = dict(TASK, id=2, state="claimed")
+    d, rt = make_daemon(tmp_path, tasks=[a_review, b_claimed])
+    assert d.session_focus(rt, d.my_open_tasks(rt)) == 2       # the task it can work on
+    d.store.put("s1", "session_task", 2)
+    a_review["state"] = "in_progress"                            # A comes back from review
+    b_claimed["state"] = "in_progress"
+    assert d.session_focus(rt, d.my_open_tasks(rt)) == 2       # the session keeps B
+    b_claimed["state"] = "review"
+    assert d.session_focus(rt, d.my_open_tasks(rt)) == 1       # B done for now: A
+
+
+def test_progress_note_counts_only_once_it_is_saved(tmp_path):
+    d, rt = make_daemon(tmp_path)
+
+    def failing_patch(path, body=None):
+        raise HiveError(0, "unreachable", "down")
+
+    rt.client.patch = failing_patch
+    with pytest.raises(HiveError):
+        d.call_tool("s1", "task_update", {"task_id": 7, "note": "where I am"})
+    assert rt.noted is False
+    rt.client.patch = FakeClient().patch
+    d.call_tool("s1", "task_update", {"task_id": 7, "note": "where I am"})
+    assert rt.noted is True

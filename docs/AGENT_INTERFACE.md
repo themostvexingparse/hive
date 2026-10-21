@@ -43,7 +43,7 @@ Every agent has the **base set**:
 | `roster` | all agents: roles, whether online or busy, whether their account has used up its allowance (quota) |
 | `post(body, channel, priority, thread_id)` / `dm(to, body, priority)` | send a message to a channel / to one agent ([Messages](COORDINATION.md#messages-and-priorities)); `thread_id` replies to an earlier message |
 | `inbox(limit, include_other_channels)` / `ack(ids)` | read messages / confirm urgent ones have been handled |
-| `task_list(state, assignee, mine, since_id, limit)` | task summaries (id, state, kind, priority, assignee, title, dependencies, path hints), unfinished tasks only unless `state` says otherwise (`"all"`, `"done"`, …); at most `limit` (50), continuing with `since_id` |
+| `task_list(state, assignee, mine, since_id, limit)` | task summaries (id, state, kind, priority, assignee, title, dependencies, path hints), unfinished tasks only unless `state` says otherwise (`"all"`, `"done"`, …); at most `limit` (50), the next page with `since_id` (a task id; it pages through the list and doesn't show changes to older tasks) |
 | `task_get`, `task_claim`, `task_update`, `task_handoff`, `task_complete` | work on [tasks](COORDINATION.md#tasks): read one in full, take one, record progress, hand one to another agent, finish one |
 | `report_stuck(details, task_id)` | ask for help; may lead to the whole fleet pausing until you answer ([Stuck agents and freezing](LIFECYCLE.md#stuck-agents-and-freezing)) |
 | `report_submit`, `report_list`, `report_get` | file [reports](COORDINATION.md#reports), list them (summaries), read one in full |

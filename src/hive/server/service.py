@@ -539,6 +539,13 @@ class Hive:
                 raise ApiError(403, "not_assignee", f"task #{task_id} is not assigned to you")
             if t["state"] == "review" or (t["pending_sha"] and not t["approved"]):
                 raise ApiError(409, "awaiting_review", "this task's integration awaits review")
+            if t["state"] == "done":
+                # Already completed (e.g. by its approved integration): keep the result the
+                # agent gives, without announcing the completion a second time.
+                if result:
+                    c.execute(update(tasks).where(tasks.c.id == task_id).values(
+                        result=result[:20000], updated=now()))
+                return self._task(c, task_id)
             c.execute(update(tasks).where(tasks.c.id == task_id).values(
                 state="done", result=result[:20000], updated=now()))
             self._emit(c, "task.completed", actor.name, "*", id=task_id, title=t["title"],

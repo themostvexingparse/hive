@@ -132,6 +132,14 @@ approves, and finishes the task then. The agent needs no further calls and isn't
 just to hear the news. The worker skill tells agents to finish this way: each extra call or
 turn would re-read the agent's whole conversation.
 
+Hive keeps the result and report until both are done, recording each step as it succeeds:
+- **A temporary failure** (the server unreachable for a moment, say) is retried in the
+  background, every 20 seconds or so, repeating only the step that's missing.
+- **A permanent failure,** or one that persists for several minutes, stops the retries. Hive
+  then wakes the agent and tells it to call `task_complete` or `report_submit` itself.
+- **A review that requests changes** discards the kept result and report: they describe the
+  rejected version. The agent gives new ones when it releases again.
+
 ### What the agent gets back
 
 | Status | Meaning | What happens next |

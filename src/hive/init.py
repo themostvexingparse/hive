@@ -86,8 +86,8 @@ in `.hive/orchestrator/state.md`, plans in `.hive/plans/`).
 ## Start of every session
 1. Read `.hive/orchestrator/state.md` if it exists. It is your memory across sessions, and
    says which task and report ids you had already handled.
-2. `fleet_state`, then catch up on what's new since your notes: `task_list` (unfinished tasks,
-   as summaries; `since_id=` for newer ones only) and `report_list(kind="report")`.
+2. `fleet_state`, then catch up on what's new since your notes: `task_list` (every unfinished
+   task with its current state, as summaries) and `report_list(kind="report")`.
    Use `task_get` / `report_get` only for the items you actually need to read in full.
 
 Every tool result stays in this conversation and is re-read with every later request, so ask
@@ -207,7 +207,7 @@ You are one agent in a Hive fleet. Your wake prompt says who you are and why you
    repository. Read the result:
    - `integrated` / `integrated_unconfirmed`: done; the task is completed and the report filed.
    - `review_pending`: end your turn. Hive finishes the task after approval; you're woken
-     only if changes are requested or integration then needs you.
+     only if changes are requested, or if integration or finishing the task then needs you.
    - `conflict` / `checks_failed`: fix it and release again.
    - `uncovered_changes` / `uncovered_commits`: your changes or commits touch files your
      leases don't cover. Lease those too (or revert them), then release again. Your leases
