@@ -100,7 +100,8 @@ All the agents of one project, working towards one goal you set with `hive start
 ### Vendor, CLI
 
 The company and command-line program an agent runs: **Claude Code** (`claude`, Anthropic),
-**Gemini CLI** (`gemini`, Google) or **Codex** (`codex`, OpenAI). A CLI (command-line
+**Codex** (`codex`, OpenAI), **Antigravity CLI** (`agy`, Google) or **Gemini CLI** (`gemini`,
+Google; replaced by agy for personal accounts). A CLI (command-line
 interface) is a program you use by typing in a terminal. Hive uses each vendor's official
 CLI, unmodified, logged in to a normal subscription account.
 
@@ -352,7 +353,8 @@ A written procedure an agent follows, in Markdown: `hive-orchestrator` for the o
 ### Bundle (plugin, extension, profile)
 
 The package of MCP server, hooks, skills and permission rules that `hive init` writes to
-`.hive/agent/`: a Claude Code **plugin**, a Gemini CLI **extension** and a Codex **profile**.
+`.hive/agent/`: a Claude Code **plugin**, a Gemini CLI **extension**, a Codex **profile** and
+an agy **plugin**.
 Hive attaches it only to sessions it launches. ➜ [Preparing the repository](REPOSITORY.md)
 
 ### Permission tiers
@@ -363,7 +365,7 @@ Hive's sorting of shell commands into allowed, needs approval, and never.
 ### Permission mode
 
 Each CLI's own setting for how much it may do without asking, e.g. Claude Code's
-`acceptEdits` or Codex's `workspace-write` sandbox. Set per slot with
+`acceptEdits`, Codex's `workspace-write` sandbox or agy's `accept-edits`. Set per slot with
 `hive join --permission-mode`.
 
 ### Prompt

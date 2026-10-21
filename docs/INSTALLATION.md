@@ -25,8 +25,9 @@ For a first trial, all three can be the same computer.
 | Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/) (or pip) | every machine and the server | uv and pip are Python package installers; uv is faster and keeps `hive` isolated. |
 | git | every agent machine | Each agent gets its own [worktree](GLOSSARY.md#worktree): a separate working folder of the repository. |
 | Claude Code CLI (`claude`) | machines running Claude agents | Each Claude agent logs into its own Claude account once. |
-| Gemini CLI (`gemini`) | machines running Gemini agents | Each Gemini agent logs into its own Google account once. |
+| Gemini CLI (`gemini`) | machines running Gemini agents | Each Gemini agent logs into its own Google account once. Since June 2026 only with a paid Gemini API key or a Gemini Code Assist Standard/Enterprise licence; personal accounts use agy instead ([details](LIMITATIONS.md#gemini-cli-and-antigravity-cli)). |
 | Codex CLI (`codex`) | machines running Codex agents | Each Codex agent logs into its own ChatGPT account once (`codex login`). |
+| Antigravity CLI (`agy`) | machines running agy agents | Google's successor to Gemini CLI. Log in once per computer by running `agy`; all agy agents on that computer share that Google account ([why](MACHINES.md#log-each-slots-account-in-once)). |
 | A git remote (`origin`) | the repository | The shared copy of the repository that every machine pushes to: GitHub or any remote all machines can reach. |
 | A reachable server URL | | The address of the Hive server: `http://127.0.0.1:8765` (your own computer) for single-machine trials; a public HTTPS address otherwise. |
 
@@ -34,11 +35,11 @@ On a machine, each agent lives in a **slot**: its own private CLI settings folde
 account login) plus its own worktree ([Setting up machines](MACHINES.md)).
 
 You only need the CLIs for the vendors you actually use. A fleet of only Claude Code agents
-needs no Gemini or Codex installed anywhere.
+needs no Gemini, Codex or agy installed anywhere.
 
 **One machine can host several slots.** Each slot has its own CLI config folder, so several
 Claude, Gemini or Codex accounts can run side by side on one computer. You don't need one
-computer per account.
+computer per account. (agy is the exception: it has one login per computer.)
 
 ### Platforms
 

@@ -31,6 +31,7 @@ first and installs only if it passes.
 | `tests/test_e2e.py` | a real server, daemon, bare git origin and two worktrees. A scripted fake agent CLI (`tests/fake_agent.py`) plans, gets approved, is denied an unleased write, leases, integrates into `main`, completes, reports and streams output. Also covers an interactive orchestrator in `await_events` and the freeze on a stuck agent. |
 | `tests/test_init_and_launch.py` | bundle generation and legacy cleanup, launch commands, tool-name matching, stream formatting |
 | `tests/test_codex.py` | Codex CLI support: bundle, launch commands, the slot's private `CODEX_HOME`, output, hooks |
+| `tests/test_agy.py` | Antigravity CLI (agy) support: bundle, the slot's private home, launch commands, output and token counts, hooks, the daemon's approvals for agy, the 3-minute limit on MCP calls. Events and hook payloads are recorded from agy 1.4.4. |
 | `tests/test_codex_e2e.py` | end to end with the real Codex CLI and a scripted model server; runs only when `codex` is installed |
 | `tests/test_gitops.py` | git status parsing and the lease release transaction against a real git repository |
 | `tests/test_permissions.py` | shell-command tiers and the generated permission files |

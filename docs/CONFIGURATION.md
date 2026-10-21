@@ -96,7 +96,7 @@ token = "hv_…"
 worktree = "/path/to/proj-claude-2"
 config_dir = "/home/you/.hive/accounts/claude-2"
 permission_mode = ""         # empty = default (claude: acceptEdits, gemini: auto_edit,
-                             # codex: workspace-write)
+                             # codex: workspace-write, agy: accept-edits)
 model = ""                   # empty = the account's default model
 server_url = "https://USER.pythonanywhere.com/p/acme"   # this slot's server or project
 command = []                 # optional custom headless command, see below
@@ -143,6 +143,7 @@ The default commands are listed in
 | `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off ([Coloured output](CLI.md#16-coloured-output)). |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |
 | `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` / `CODEX_HOME` | set by Hive per slot | Keep each account's CLI config separate. |
+| `USERPROFILE`, `HOME`, `GIT_CONFIG_GLOBAL` | set by Hive for agy slots | agy has no config-folder setting, so the slot's folder becomes its home directory; git keeps your `~/.gitconfig` ([agy home folder](RUNNING.md#agy-home-folder)). |
 | `MCP_TOOL_TIMEOUT` | set by Hive | Lets `await_events` block for up to 30 minutes. |
 
 ---
@@ -156,11 +157,11 @@ The default commands are listed in
 | `machine.toml` | default server URL, local API port and secret, slots with their tokens and server URLs (keep private) |
 | `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive admin login`) |
 | `state.db` | what the daemon remembers between runs: which fleet events each slot has seen, a copy of its messages, why it's waiting to be started, and its conversation ids |
-| `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login |
+| `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login; for agy, its settings, Hive's plugin and its conversations (agy's login is in the computer's keyring) |
 | `logs/daemon.log` | daemon log |
 | `logs/<slot>.log` | raw output of every headless turn of that slot |
 
-**In the repository:** `hive.toml`, `.hive/agent/{claude,gemini,codex}/`, `.hive/plans/`,
+**In the repository:** `hive.toml`, `.hive/agent/{claude,gemini,codex,agy}/`, `.hive/plans/`,
 `.hive/prompts/` (yours; [Customising what agents are told](PROMPTS.md)), `.hive/README.md`,
 and `.hive/orchestrator/state.md` (orchestrator worktree only, git-ignored). See
 [Preparing the repository](REPOSITORY.md#what-it-creates).

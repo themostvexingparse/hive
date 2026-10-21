@@ -12,7 +12,7 @@ and full specification are in [SPEC.md](../SPEC.md).
 
 | Term | Meaning |
 |---|---|
-| **Agent** | One AI coding assistant in the team: Claude Code, Gemini CLI or Codex, running as the vendor's own command-line program (CLI), logged in to its own account. |
+| **Agent** | One AI coding assistant in the team: Claude Code, Codex, Antigravity CLI (`agy`) or Gemini CLI, running as the vendor's own command-line program (CLI), logged in to its own account. |
 | **Fleet** | All the agents working on one repository towards one goal. |
 | **Orchestrator** | The one agent that plans and coordinates, and that you chat with. It never writes code. |
 | **Worker** | Every other agent: programmers, reviewers, testers, planners. |
@@ -29,7 +29,7 @@ and full specification are in [SPEC.md](../SPEC.md).
 | **Report** | A worker's written summary of what it did, filed for the orchestrator. |
 | **Status update** | The orchestrator's summary for you, shown in `hive status` and the dashboard. |
 | **Approval** | A worker's request to run a dangerous shell command, decided by the orchestrator ([Shell-command permissions](PERMISSIONS.md)). |
-| **Bundle** | The per-CLI package `hive init` writes to `.hive/agent/` in the repository: a Claude Code plugin, a Gemini CLI extension, or a Codex profile, holding Hive's tools, hooks and instructions. |
+| **Bundle** | The per-CLI package `hive init` writes to `.hive/agent/` in the repository: a Claude Code plugin, a Gemini CLI extension, a Codex profile or an agy plugin, holding Hive's tools, hooks and instructions. |
 
 ---
 
@@ -109,9 +109,12 @@ The daemon talks to the server for every [slot](#key-terms) on that machine. It:
 
 ### The agents
 
-Agents are the vendors' own CLIs: **Claude Code** (`claude`), **Gemini CLI** (`gemini`) and
-**Codex** (`codex`). Each one is logged in to its own account. When `hive` launches one, it
-attaches Hive **for that session only**:
+Agents are the vendors' own CLIs: **Claude Code** (`claude`), **Codex** (`codex`),
+**Antigravity CLI** (`agy`) and **Gemini CLI** (`gemini`). Each one is logged in to its own
+account, except that agy keeps one login per computer
+([Accounts](MACHINES.md#log-each-slots-account-in-once)). Google has replaced Gemini CLI with
+agy for personal accounts ([Known limitations](LIMITATIONS.md#gemini-cli-and-antigravity-cli)).
+When `hive` launches one, it attaches Hive **for that session only**:
 - the `hive` **MCP server**, which gives the agent its tools (messages, tasks, leases, …).
   [MCP](GLOSSARY.md#mcp-mcp-server-mcp-tool) (Model Context Protocol) is the standard way
   these CLIs accept extra tools;
@@ -121,7 +124,7 @@ attaches Hive **for that session only**:
 - two **skills**, written procedures the agent follows: `hive-orchestrator` and
   `hive-worker`.
 
-A `claude`, `gemini` or `codex` you start yourself never sees any of this
+A `claude`, `codex`, `agy` or `gemini` you start yourself never sees any of this
 ([Preparing the repository](REPOSITORY.md) explains why).
 
 Agents come in two kinds:

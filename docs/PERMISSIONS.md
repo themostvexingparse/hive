@@ -30,6 +30,7 @@ the sessions it starts:
 | Claude Code | `.hive/agent/claude/settings/{orchestrator,worker}.json` | `--settings` |
 | Gemini CLI | `.hive/agent/gemini/policies/{orchestrator,worker}.toml` | `--policy` |
 | Codex | `.hive/agent/codex/rules/{orchestrator,worker}.rules` (Codex's rule format, *execpolicy*) | copied into the agent's private Codex settings folder (`CODEX_HOME`) as `rules/hive.rules` |
+| agy | `.hive/agent/agy/settings/{orchestrator,worker}.json` (`command(regex:…)` rules) | written into the `permissions` of the agent's private agy settings (`.gemini/antigravity-cli/settings.json` in its [home folder](RUNNING.md#agy-home-folder)) |
 
 - **Which file:** the orchestrator gets the `orchestrator` set; every other role gets the
   `worker` set.
@@ -182,6 +183,23 @@ in bash, PowerShell and cmd.exe alike:
   starts Codex with its hook review switched off
   ([why](RUNNING.md#codex-profile)), so an agent able to change those files could change its
   own checks.
+
+---
+
+## agy specifics
+
+- In a headless turn, agy refuses every tool call its own rules would ask about, and then
+  ends the turn without an answer. So for agy agents Hive's hook makes the decision for every
+  shell command: it approves commands in the *allowed* tier itself, refuses the *approval* and
+  *forbidden* tiers as for the other CLIs, and refuses any other command with a note: do it
+  another way, or `request_approval` if that exact command is needed. Hive's own tools are
+  approved the same way. The rules in the settings file apply only when the daemon can't be
+  reached.
+- The orchestrator's interactive session leaves commands outside the *allowed* tier to agy,
+  which asks you.
+- agy writes files inside the worktree without asking (`--mode accept-edits` is the default for
+  workers); Hive's lease checks apply to `write_file` and `edit_file` as to the other CLIs'
+  edit tools. An edit whose file Hive can't tell is refused.
 
 ---
 

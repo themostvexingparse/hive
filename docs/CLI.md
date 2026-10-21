@@ -48,7 +48,7 @@ variable. If Hive is new to you, read [How Hive works](ARCHITECTURE.md) first; t
 | The server | the host (you) | `hive server` (for trials; online, the server runs as a Python web app on a web host instead, see [DEPLOYMENT.md](DEPLOYMENT.md)) |
 | Your computer | you, as admin (the person controlling the fleet) | `hive admin …`, `hive init`, `hive overview`, `hive prompts`, `hive start`, `hive status`, `hive decisions`, `hive decide`, `hive say`, `hive watch`, `hive pause`, `hive resume`, `hive reset` |
 | Each computer that runs agents | you, once per agent | `hive join`, `hive up`, `hive chat` |
-| Inside agents' sessions | the agents' CLIs (Claude Code, Gemini CLI, Codex) | `hive mcp`, `hive hook` (you never run these) |
+| Inside agents' sessions | the agents' CLIs (Claude Code, Gemini CLI, Codex, agy) | `hive mcp`, `hive hook` (you never run these) |
 
 On a computer, each agent lives in a **slot**: its own working folder of the repository (a
 [git worktree](GLOSSARY.md#worktree)) and its own logged-in CLI account
@@ -258,7 +258,7 @@ Adding an agent has two steps: **enroll** (create) it on the server, from your c
 ### `hive admin enroll`: create an agent
 
 ```sh
-hive admin enroll NAME --vendor claude|gemini|codex --roles ROLE[,ROLE…]
+hive admin enroll NAME --vendor claude|gemini|codex|agy --roles ROLE[,ROLE…]
 ```
 
 ```sh
@@ -322,7 +322,7 @@ cd "C:\code\myapp-claude-2"; $env:CLAUDE_CONFIG_DIR = "C:\Users\you\.hive\accoun
 | `--repo PATH` | Your clone; the worktree goes next to it. |
 | `--worktree PATH` | Explicit worktree path. |
 | `--config-dir PATH` | The CLI account folder (default `~/.hive/accounts/NAME`). |
-| `--permission-mode MODE` | The CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default), `read-only`, `danger-full-access`, `yolo`. The defaults allow file edits; the others allow less or everything ([details](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)). |
+| `--permission-mode MODE` | The CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default), `read-only`, `danger-full-access`, `yolo`; agy: `accept-edits` (default), `auto`, `plan`. The defaults allow file edits; the others allow less or everything ([details](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)). |
 | `--model MODEL` | The AI model this agent's CLI uses (default: the account's). |
 | `--hive-cmd CMD` | How the git hook calls `hive`. |
 | `--replace` | Move an existing slot of this name to another server or project. What it remembers locally (messages seen, its conversation) is reset. |
@@ -609,12 +609,12 @@ The commands the agent CLIs run are in [§12](#12-commands-the-agent-clis-run).
 | `hive admin project list` | List the server's projects. |
 | `hive admin project set NAME [--name TEXT] [--github-token-env VAR] [--archive\|--unarchive]` | Rename, archive or change a project's GitHub token variable. |
 | `hive admin project rotate NAME` | Replace a project's admin token. |
-| `hive admin enroll NAME --vendor claude\|gemini\|codex --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
+| `hive admin enroll NAME --vendor claude\|gemini\|codex\|agy --roles r1,r2` | Create an agent; prints its token and a `hive join` line. |
 | `hive admin roles NAME r1,r2` | Change an agent's roles. |
 | `hive admin push-config` | Upload `hive.toml` from the current repository. |
 | `hive init [PATH] [--server URL] [--main BRANCH] [--hive-cmd CMD]` | Prepare a repository ([Preparing the repository](REPOSITORY.md)). |
 | `hive overview [PATH] [--offline]` | Describe this project's Hive setup: repository, configuration, permissions, roles, prompts, this machine's slots, the fleet, and problems with their fixes ([Preparing the repository](REPOSITORY.md)). |
-| `hive prompts [--role R1,R2] [--slot NAME] [--vendor claude\|gemini\|codex] [--full] [--path DIR]` | Show what Hive tells an agent with those roles, including your additions ([Customising what agents are told](PROMPTS.md)). |
+| `hive prompts [--role R1,R2] [--slot NAME] [--vendor claude\|gemini\|codex\|agy] [--full] [--path DIR]` | Show what Hive tells an agent with those roles, including your additions ([Customising what agents are told](PROMPTS.md)). |
 | `hive start "GOAL"` | Start the fleet; uploads `hive.toml` if run in the repo. |
 | `hive status [--all] [-n N] [-v]` | Fleet state, waiting decision, agents, tasks (`--all` includes finished ones), leases, last N status entries (`-v` with bodies). |
 | `hive decisions [--all]` | Open and queued decisions with context (`--all`: also answered ones). |

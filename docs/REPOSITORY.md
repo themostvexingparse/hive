@@ -1,6 +1,6 @@
 # Preparing the repository
 
-Hive's agents are ordinary AI coding CLIs (Claude Code, Gemini CLI, Codex). Before they can
+Hive's agents are ordinary AI coding CLIs (Claude Code, Codex, agy, Gemini CLI). Before they can
 work on a repository as a Hive **fleet**, the repository needs two things:
 - **Hive's settings** for this project, in a file called `hive.toml`;
 - a **bundle** for each CLI: a package, in the folder `.hive/agent/`, of what Hive attaches
@@ -46,6 +46,7 @@ hive init                 # options: --server URL  --main main  --hive-cmd hive
 | `.hive/agent/claude/` | The bundle for Claude Code, in the form Claude Code calls a **plugin**: `.claude-plugin/plugin.json` (the plugin's description), `.mcp.json` (starts Hive's MCP server), `hooks/hooks.json`, the two skills `skills/hive-orchestrator/SKILL.md` and `skills/hive-worker/SKILL.md`, and the permission rules for the orchestrator and for everyone else, `settings/{orchestrator,worker}.json`. | yes |
 | `.hive/agent/gemini/` | The bundle for Gemini CLI, which calls it an **extension**: `gemini-extension.json` (starts Hive's MCP server and adds the instructions in `HIVE.md`), `hooks/hooks.json`, the same skills, and permission rules (Gemini calls them policies) `policies/{orchestrator,worker}.toml`. | yes |
 | `.hive/agent/codex/` | The bundle for Codex, which calls it a **profile**: `hive.config.toml` (starts Hive's MCP server and sets the hooks), the same skills, and permission rules in Codex's own rule format (*execpolicy*) `rules/{orchestrator,worker}.rules`. | yes |
+| `.hive/agent/agy/` | The bundle for the Antigravity CLI (agy), which calls it a **plugin**: `plugin.json`, `mcp_config.json` (starts Hive's MCP server), `hooks.json`, the same skills, and permission rules `settings/{orchestrator,worker}.json`. | yes |
 | `.hive/plans/` | Where the orchestrator (the agent that plans the work) may write plans. | yes |
 | `.hive/prompts/` | **Your additions to the agents' instructions** ([Customising what agents are told](PROMPTS.md)): `README.md`, plus commented-out starters `orchestrator.md`, `worker.md` and `roles/<role>.md` for every role. Each is created only if missing; your files are never overwritten. Until you write something outside the comments, they add nothing. | yes |
 | `.hive/README.md` | Explains the folder. | yes |
@@ -67,7 +68,11 @@ None of the CLIs loads `.hive/agent/` on its own:
   the `hive` profile)
   ([How an agent is launched](RUNNING.md#how-an-agent-is-launched-for-a-headless-turn-wake)).
 
-Opening `claude`, `gemini` or `codex` in this repository yourself loads nothing from Hive. You
+- **agy** gets the plugin and rules only through the agent's own **private** home folder,
+  which Hive passes to agy as its home directory; your own `~/.gemini` is never touched
+  ([agy home folder](RUNNING.md#agy-home-folder)).
+
+Opening `claude`, `gemini`, `codex` or `agy` in this repository yourself loads nothing from Hive. You
 can keep using your own CLI sessions in the same repository as before.
 
 ### Cleanup of older versions

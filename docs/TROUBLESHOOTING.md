@@ -58,6 +58,8 @@ For server-side problems (deployment, database, the dashboard not loading), see
 | A Gemini agent fails to continue its earlier conversation | Give it a custom start command with `--resume latest` ([Custom headless command](CONFIGURATION.md#custom-headless-command)). |
 | A Codex agent's run ends at once, or Hive's end-of-run check ([hook](AGENT_INTERFACE.md#hooks)) repeats `invalid choice: 'codex'` | The `hive` that Codex finds is older than the one running `hive up`. Codex runs hooks through your shell, so your shell's startup files decide which `hive` it finds; reinstall Hive ([Installation](INSTALLATION.md)) or make the bundles use a fixed path with `hive init --hive-cmd /full/path/to/hive`. |
 | Codex says the profile `hive` doesn't exist | The agent has no private Codex settings folder (`CODEX_HOME`), where Hive puts its Codex *profile*; re-run `hive join` (it creates `~/.hive/accounts/<name>`). |
+| An agy agent's turn ends with no answer, and its output shows `needed a permission nobody could give` | agy refused a tool call it wanted to ask about. Hive approves the allowed shell commands and its own tools itself, so this was another tool, such as reading a web page or a file outside the worktree. Hive can't allow those for agy yet ([Known limitations](LIMITATIONS.md#current-limitations)); the agent's next turn usually takes another route. |
+| agy agents on one computer use the wrong account | agy keeps one login per computer, in the keyring; every agy slot there uses it ([Accounts](MACHINES.md#log-each-slots-account-in-once)). |
 | An agent pauses for an hour | Its account hit a usage limit. The server gives it no tasks until then, and the orchestrator is told. |
 
 ---

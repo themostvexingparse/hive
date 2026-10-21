@@ -49,7 +49,7 @@ def load_repo_config(root: Path | None) -> dict:
     return cfg
 
 
-VENDORS = ("claude", "gemini", "codex")
+VENDORS = ("claude", "gemini", "codex", "agy")
 
 
 @dataclass

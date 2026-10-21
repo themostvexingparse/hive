@@ -2,7 +2,7 @@
 
 Used for commands the orchestrator approved and for `[integration] checks`. Shells:
   bash        POSIX shell; Git Bash on Windows (what Claude Code's Bash tool uses)
-  powershell  pwsh if installed, else Windows PowerShell (what Gemini CLI uses on Windows)
+  powershell  pwsh if installed, else Windows PowerShell (what Gemini CLI and agy use on Windows)
   cmd         cmd.exe (Windows only)
   sh          /bin/sh on POSIX; Git Bash on Windows
   auto        powershell on Windows, bash elsewhere
@@ -29,7 +29,7 @@ def tool_shell(tool: str) -> str:
         return "powershell"
     if tool == "Bash":  # Claude Code: Git Bash on Windows
         return "bash"
-    return default_shell()  # Gemini CLI's run_shell_command
+    return default_shell()  # Gemini CLI's run_shell_command, agy's run_command
 
 
 def resolve_shell(shell: str | None) -> str:

@@ -1,7 +1,7 @@
 # Known limitations and verification status
 
-Hive's agents are three vendors' command-line programs (CLIs): Claude Code, Gemini CLI and
-Codex. Hive drives them through their documented features, and those CLIs change often. This
+Hive's agents are the vendors' own command-line programs (CLIs): Claude Code, Codex, the
+Antigravity CLI (agy) and Gemini CLI. Hive drives them through their documented features, and those CLIs change often. This
 page records which of those features have been verified, against which versions and how,
 which haven't been tried yet, and the limitations you should know about today.
 
@@ -41,6 +41,25 @@ needed:
 - A Codex programmer is refused an unleased write, leases, writes, integrates with
   `lease_release` and completes its task.
 
+## Verified with Antigravity CLI (agy) 1.4.4 on Windows
+
+Run live with a logged-in personal account and a real model (not an automated test: agy's
+model can't be replaced by a stand-in). A Hive server and daemon, a scripted orchestrator and an
+agy programmer:
+- the plugin copied into the slot's home folder loads its hooks, MCP server and skills, and
+  `~/.gemini` stays untouched; the MCP server and hooks get the `HIVE_*` variables;
+- the programmer is woken with the prompt on stdin (`--input-format stream-json`), leases,
+  writes with `write_file`, integrates with `lease_release` and completes its task; its live
+  output and the `· tokens:` line are formatted from agy's events;
+- a command outside the allowed tier is refused by Hive's hook and the turn continues;
+- the next wake resumes the same conversation with `--conversation <id>` and remembers the
+  earlier work;
+- separately: `auto_approve` and `deny` from a PreToolUse hook, `SessionStart` and
+  `PreInvocation` context, `Stop` with `continue`, and the 3-minute limit on MCP calls.
+
+Not yet tried: the interactive orchestrator on agy (`agy -i`, reading the conversation id back
+afterwards), usage-limit messages, macOS and Linux.
+
 ## Not yet exercised with a live, logged-in session
 
 These need a real, logged-in account, and would use up some of its allowance:
@@ -59,6 +78,32 @@ These need a real, logged-in account, and would use up some of its allowance:
 - Codex with a real model and account: the interactive orchestrator (`codex resume <id>`) and
   usage-limit messages.
 - [GitHub mode](INTEGRATION.md#github-mode-optional).
+
+---
+
+## Gemini CLI and Antigravity CLI
+
+Google replaced Gemini CLI with the Antigravity CLI (`agy`) in 2026
+([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)):
+since 18 June 2026, Gemini CLI no longer serves Google AI Pro and Ultra subscribers or free
+Gemini Code Assist users. It still works with a paid Gemini API key and with Gemini Code
+Assist Standard or Enterprise licences, so Hive keeps supporting it for those; for a personal
+Google account, enroll agents with `--vendor agy`.
+
+What differs with agy:
+- **One account per computer.** agy keeps its login in the computer's keyring, so every agy
+  slot on a computer shares one Google account and its usage limits.
+- **Its home folder is the slot's.** agy has no setting for where it keeps its files, so Hive
+  changes the home directory for agy sessions; commands the agent runs see that folder too
+  ([agy home folder](RUNNING.md#agy-home-folder)).
+- **MCP calls end after 3 minutes**, so an idle agy orchestrator calls `await_events` again
+  every 150 seconds, a model request each time, where other CLIs wait up to 30 minutes per
+  call. A command approved through `request_approval` must finish within about a minute in
+  the same call; otherwise the agent gets its output from `run_approved`, and a long command
+  run that way can hit the same limit.
+- **A headless turn ends at the first tool call agy wants to ask about.** Hive approves its own
+  tools and the allowed shell commands, and refuses other commands with directions, but tools
+  Hive doesn't check (reading web pages, files outside the worktree) still end the turn.
 
 ---
 

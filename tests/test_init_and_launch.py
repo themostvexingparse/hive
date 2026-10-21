@@ -83,7 +83,7 @@ def test_stream_formatting_claude_and_gemini():
         {"type": "text", "text": "hi\nthere"},
         {"type": "tool_use", "name": "Edit", "input": {"file_path": "a.py"}}]}})
     assert lines == ["  hi", "  there", '→ Edit {"file_path": "a.py"}']
-    j = wake.GeminiDeltaJoiner()
+    j = wake.DeltaJoiner()
     assert j.feed({"type": "message", "role": "assistant", "content": "par", "delta": True}) == []
     assert j.feed({"type": "message", "role": "assistant", "content": "tial\nnext",
                    "delta": True}) == ["  partial"]

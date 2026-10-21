@@ -100,7 +100,7 @@ Write `{{name}}` and Hive fills it in:
 | `{{review}}` | Whether work is reviewed, and by whom (`review` in `[integration]`; [Reviews](INTEGRATION.md#reviews)) | all files |
 | `{{checks}}` | The test commands that must pass before work reaches `main` (`checks` in `[integration]`), joined with `; `, or `(none)` | all files |
 | `{{project}}` | The repository folder's name | all files |
-| `{{slot}}`, `{{roles}}`, `{{vendor}}` | The agent's name, its roles, and its CLI (`claude`, `gemini` or `codex`) | `roles/<role>.md` only |
+| `{{slot}}`, `{{roles}}`, `{{vendor}}` | The agent's name, its roles, and its CLI (`claude`, `gemini`, `codex` or `agy`) | `roles/<role>.md` only |
 
 For example, `worker.md` could say "Run `{{checks}}` before every `lease_release`", and stay
 correct when you change the checks in `hive.toml`.

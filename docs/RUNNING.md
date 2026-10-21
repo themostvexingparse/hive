@@ -36,7 +36,7 @@ hive up
      guessing.
    - It then starts in the background. Its log goes to `~/.hive/logs/daemon.log`, not the
      terminal.
-2. **CLI launch:** opens the orchestrator's CLI (Claude Code, Gemini CLI or Codex) **in your
+2. **CLI launch:** opens the orchestrator's CLI (Claude Code, Codex, agy or Gemini CLI) **in your
    terminal**, as a normal interactive session, with Hive attached for this session only.
    Hive's tools, automatic checks ([hooks](GLOSSARY.md#hook)) and instructions come from the
    [bundle](GLOSSARY.md#bundle-plugin-extension-profile) `hive init` wrote to `.hive/agent/`.
@@ -48,13 +48,15 @@ hive up
      extension)
    - Codex: `codex [resume <id>] -p hive --dangerously-bypass-hook-trust "<start prompt>"`
      (use Hive's profile; [why hook trust is bypassed](#codex-profile))
+   - agy: `agy [--conversation <id>] -i "<start prompt>"` (Hive's plugin is in the slot's
+     [home folder](#agy-home-folder))
 3. **Session:** a session is one continuing conversation with the AI model. The first launch
    creates a new one. Later launches **resume the same conversation**, so the orchestrator
    remembers earlier work, unless the last session was idle for longer than
    `orchestrator_fresh_after_hours` ([`[sessions]`](CONFIGURATION.md#hivetoml), 12 h by
    default). Then it starts fresh and recovers from its notes, rather than re-reading a long,
-   stale conversation with every request. (Codex picks its own session ids; Hive reads the id
-   back from the slot's Codex settings folder when the session ends.)
+   stale conversation with every request. (Codex and agy pick their own session ids; Hive
+   reads the id back from the slot's settings folder when the session ends.)
 4. **Start prompt:** tells the agent to follow the `hive-orchestrator`
    [skill](GLOSSARY.md#skill) (its written operating procedure). It then:
    1. reads its notes from earlier sessions (`.hive/orchestrator/state.md` in its worktree);
@@ -105,8 +107,8 @@ hive up            # -v for debug logging
 
    The `tokens` line is the turn's usage as the CLI reports it: input tokens summed over all
    its requests (most are re-read from the cache), output tokens, and the size of the
-   conversation at the end. Claude Code reports all three; Codex and Gemini CLI report
-   totals only.
+   conversation at the end. Claude Code and agy report all three; Codex and Gemini CLI
+   report totals only.
 2. The same lines are uploaded to the server about once a second, so you can follow them
    from any computer with `hive watch` or the dashboard ([Watching the fleet](MONITORING.md)).
 3. Ctrl+C stops the daemon.
@@ -129,6 +131,7 @@ permission mode is the slot's `--permission-mode` from `hive join`):
 | Claude | `claude -p --output-format stream-json --verbose --plugin-dir <bundle> --settings <allow hive tools> --permission-mode <mode> --session-id/--resume <id>` |
 | Gemini | `gemini -p "Follow the Hive wake notice…" -o stream-json -e hive --approval-mode <mode> --session-id/--resume <id>` |
 | Codex | `codex exec --json -p hive --dangerously-bypass-hook-trust -c sandbox_mode="<mode>" -c approval_policy="never" [resume <id>] -` |
+| agy | `agy --input-format stream-json --output-format stream-json --mode <mode> [--conversation <id>]` (the prompt goes on stdin as one JSON message) |
 
 If a CLI's options differ on your system, give the slot a custom command
 ([`machine.toml`](CONFIGURATION.md#hivemachinetoml)).
@@ -147,8 +150,11 @@ run inside the CLI, use them to reach the daemon:
 | `CLAUDE_CONFIG_DIR` | the slot's config folder (Claude slots) |
 | `GEMINI_CLI_HOME` | the slot's config folder (Gemini slots) |
 | `CODEX_HOME` | the slot's config folder (Codex slots) |
+| `HIVE_HOME` | Hive's own folder (`~/.hive`), so Hive's tools and hooks find it even when the CLI's home folder is changed (agy) |
+| `USERPROFILE`, `HOME` | the slot's config folder (agy slots; [why](#agy-home-folder)) |
+| `GIT_CONFIG_GLOBAL` | your `~/.gitconfig` (agy slots), so git keeps your name and settings |
 
-A slot's `--model` is passed as `--model` (Claude) or `-m` (Gemini, Codex).
+A slot's `--model` is passed as `--model` (Claude, agy) or `-m` (Gemini, Codex).
 
 ### Gemini extension
 
@@ -181,6 +187,35 @@ skips that review. Codex reports this as a warning at the start of each turn;
 
 Codex chooses its own session ids. The daemon reads the id from the first turn's output (the
 `thread.started` line) and resumes that session with `codex exec resume <id>` afterwards.
+
+### agy home folder
+
+The Antigravity CLI (agy) keeps its settings, plugins and conversations in `~/.gemini` and has
+no option to put them elsewhere. So for agy slots Hive sets the home directory itself
+(`USERPROFILE` on Windows, `HOME` elsewhere) to the slot's private folder
+(`~/.hive/accounts/<slot>`), and before every launch writes there (never in your own
+`~/.gemini`):
+- the plugin from `.hive/agent/agy/` (Hive's MCP server, hooks and skills) to
+  `.gemini/config/plugins/hive/`, switched on in `.gemini/config/config.json`;
+- the shell-command rules for the slot's role and the worktree as a trusted folder, in
+  `.gemini/antigravity-cli/settings.json`. Other settings agy keeps there, such as the model
+  you picked in `hive chat`, are kept.
+
+If the repository was initialised by an older Hive and has no `.hive/agent/agy/` yet, the
+files are generated on the fly.
+
+What this means in practice:
+- **One account per computer.** agy's login is in the computer's keyring, not in that folder,
+  so every agy slot on a computer uses the same account
+  ([Accounts](MACHINES.md#log-each-slots-account-in-once)).
+- **Commands the agent runs see that home folder too.** Git keeps your identity through
+  `GIT_CONFIG_GLOBAL`; other tools that keep settings or logins in your home folder (SSH keys,
+  some package managers on macOS and Linux) don't find them. Hive's own git operations run
+  in the daemon, which is unaffected.
+- agy chooses its own conversation ids. The daemon reads the id from the first line of a turn's
+  output (`init`) and resumes with `--conversation <id>`.
+- agy cancels a call to an MCP tool after 3 minutes, so Hive's waiting tools return sooner
+  for agy agents ([`await_events`](AGENT_INTERFACE.md#await_events)).
 
 ### The wake prompt
 
