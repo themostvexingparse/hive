@@ -69,8 +69,9 @@ for day in range(days):
         fences = {str(lease["id"]): lease["fencing"]}
         hive.integrate(who, sha, "0" * 40, fences, t["id"], [f"src/f{i}.py" for i in range(5)])
         hive.review_verdict(A["rev"], t["id"], True, text(300))
-        hive.integrate(who, sha, "0" * 40, fences, t["id"], [f"src/f{i}.py" for i in range(5)])
-        hive.confirm_integration(who, sha, fences, t["id"], [f"src/f{i}.py" for i in range(5)])
+        grant = hive.integrate(who, sha, "0" * 40, fences, t["id"],
+                               [f"src/f{i}.py" for i in range(5)])["grant"]
+        hive.confirm_integration(who, grant, sha, [f"src/f{i}.py" for i in range(5)])
         hive.submit_report(who, text(120), text(2000), t["id"])
     for i in range(MESSAGES):
         # Posted as admin to bypass the per-agent rate limit; row sizes are identical.

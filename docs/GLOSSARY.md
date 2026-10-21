@@ -123,8 +123,10 @@ it's done (workers).
 
 ### Session
 
-One continuing conversation of a CLI with its model. Hive resumes the same session across
-turns so the agent remembers earlier work, and starts a fresh one every 40 turns.
+One continuing conversation of a CLI with its model. Every request re-reads the whole
+session, so Hive keeps sessions short: a worker resumes its session while it works on the same
+task, and starts a fresh one for each new task or once the session grows large
+([Wake rules](RUNNING.md#wake-rules)).
 
 ### Turn
 

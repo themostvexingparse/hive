@@ -409,7 +409,21 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
     from .daemon.store import Store
     store = Store(hive_home() / "state.db")
     session = None if fresh else store.get(slot.name, "session")
+    if session and orchestrator:
+        # A long-idle orchestrator conversation is mostly stale history that every request
+        # would re-read; its memory is in .hive/orchestrator/state.md.
+        hours = float(load_repo_config(Path(slot.worktree)).get("sessions", {})
+                      .get("orchestrator_fresh_after_hours", 12) or 0)
+        used = store.get(slot.name, "session_used", None)
+        if hours and used and time.time() - float(used) > hours * 3600:
+            ui.info(f"Last orchestrator session is over {hours:g} h old: starting a fresh one "
+                    "(its memory is in .hive/orchestrator/state.md).")
+            session = None
     resume = bool(session)
+    if not resume:  # what earlier sessions were shown doesn't carry over to a new one
+        store.put(slot.name, "session_seen", {})
+        store.put(slot.name, "session_task", None)
+        store.put(slot.name, "last_context", 0)
     if slot.vendor != "codex":  # Codex picks its own session id; it is read back afterwards
         session = session or str(uuid.uuid4())
         store.put(slot.name, "session", session)
@@ -423,6 +437,7 @@ def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = 
     cmd = wake.build_interactive_command(slot, session or "", resume, initial, role)
     started = time.time()
     p = subprocess.run(wake.resolve(cmd), cwd=slot.worktree, env=env)
+    store.put(slot.name, "session_used", time.time())
     if p.returncode != 0 and resume:
         # The stored session may be gone (e.g. different machine); start a fresh one next time.
         store.put(slot.name, "session", None)

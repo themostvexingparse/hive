@@ -49,6 +49,13 @@ These need a real, logged-in account, and would use up some of its allowance:
 - Gemini: `--resume <uuid>` (Gemini documents `latest` or an index; see
   [Custom headless command](CONFIGURATION.md#custom-headless-command)) and the exact
   stream-json field names.
+- Gemini: Hive's tool schemas. Gemini's function calling is reported to reject both `anyOf`
+  and type lists (`["string", "null"]`), the two usual ways to write an optional argument, so
+  Gemini slots get plain types with optional arguments simply not required. Not yet
+  confirmed with a live Gemini session.
+- Whether Claude Code and Gemini CLI pass `"source": "resume"` to the SessionStart hook
+  (Hive then skips re-sending the role prompt; without it, it sends it as before), and the
+  token-usage fields the `· tokens:` line reads.
 - Codex with a real model and account: the interactive orchestrator (`codex resume <id>`) and
   usage-limit messages.
 - [GitHub mode](INTEGRATION.md#github-mode-optional).

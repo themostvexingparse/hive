@@ -149,10 +149,10 @@ cannot be combined with any role where `can_code = true`.
 
 | Event | Delivery |
 |---|---|
-| `user.message`, `decision.answered`, `report.submitted` | immediate |
-| `task.completed`, `task.failed`, `task.blocked`, `agent.stuck`, `review.verdict` | immediate |
+| `user.message`, `decision.answered`, `approval.requested` | immediate |
+| `task.failed`, `task.blocked`, `agent.stuck` | immediate |
 | `agent.quota_exhausted`, `agent.offline`, `lease.expired`, `merge.conflict` | immediate |
-| `task.progress`, normal messages | batched (debounce window, default 90 s) |
+| `task.progress`, normal messages, `task.completed`, `report.submitted`, `review.verdict` | batched (debounce window, default 90 s): every batch re-reads the orchestrator's whole conversation |
 
 - `hive up --headless` keeps the older mode: the daemon wakes the orchestrator headlessly per
   event, plus a heartbeat every `heartbeat_hours`.
@@ -160,9 +160,11 @@ cannot be combined with any role where `can_code = true`.
   does (§20). Workers file reports (`report_submit`) on their own; the orchestrator can ask for
   one (`report_request`). It cross-checks reports against the repository and keeps only a
   summary in memory, which avoids context rot and keeps secrets out of its context.
-- **Memory**: `.hive/orchestrator/state.md` in its worktree (git-ignored, rewritten after each
-  batch of events) plus `task_list`, `status_read` and `report_list`.
-- **User-facing**: after each batch of events it calls `status_publish` (level
+- **Memory**: `.hive/orchestrator/state.md` in its worktree (git-ignored, kept current as the
+  plan and task map change) plus `task_list`, `status_read` and `report_list`, which return
+  summaries (`task_get` / `report_get` for full text). `hive up` resumes its session unless it
+  was idle longer than `[sessions] orchestrator_fresh_after_hours`.
+- **User-facing**: when something changed for the user it calls `status_publish` (level
   `fyi | decision-needed | alert`). Decisions are answered only by the user: via the dashboard,
   `hive decide`, or `! hive decide …` typed in the orchestrator's own session.
 - **Failover**: if the orchestrator is quota-exhausted or offline > `failover_after`, the server
@@ -268,7 +270,12 @@ Only one blocking (`freeze` or `start_approval`) decision may be open at a time;
   Command templates are configurable per slot (`{prompt}`, `{session}` placeholders).
   Environment: `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` set to the slot's config dir,
   `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET`.
-- Wake prompt = role reminder + fleet state + digest of pending events/messages + current task.
+- Wake prompt = role reminder + fleet state + digest of pending events/messages + current task
+  (in a resumed session, only notes it hasn't seen yet).
+- Sessions: a worker resumes its session while it works on the same task and starts a fresh
+  one for a new task; any slot starts fresh once a turn's context exceeded
+  `[sessions] max_context_tokens` or after `max_wakes` turns. A fresh session continuing a
+  task gets a handoff (uncommitted files, unmerged commits); the task's notes carry the rest.
 - At most one process per slot. Events arriving during a run are delivered by hooks; if anything is
   still pending when the run ends, a follow-up wake is scheduled.
 - **Quota detection**: CLI output matching usage-limit patterns → `POST /agents/me/quota`
@@ -288,9 +295,9 @@ the slot comes from `HIVE_SLOT`, which the launcher sets. Hooks must answer with
 |---|---|
 | PreToolUse / BeforeTool | Fleet frozen/paused/planning for this role → deny. Write tool targeting a path not covered by held leases or `write_globs` → deny with `lease_acquire` instructions. |
 | PostToolUse / AfterTool | Inject undelivered high/interrupt messages as additional context. |
-| UserPromptSubmit / BeforeAgent | Inject undelivered normal+ messages and fleet-state banner. |
+| UserPromptSubmit / BeforeAgent | Inject undelivered normal+ messages; in interactive sessions also a fleet-state banner and queued events (headless wakes carry those in the wake prompt). |
 | Stop / AfterAgent | Block (once per reason, ≤3 times) if unacked high/interrupt messages or the slot holds a lease on uncommitted work. Allow when frozen. |
-| SessionStart | Inject role prompt, fleet state, current task. |
+| SessionStart | Interactive sessions: role prompt, fleet state, skill pointer (not on `resume`). Headless wakes: nothing beyond messages (the wake prompt has it). |
 
 Write tools: `Edit, Write, MultiEdit, NotebookEdit` (Claude), `write_file, replace` (Gemini).
 Shell writes are not fully enforceable; the git `pre-commit` hook re-checks staged paths against

@@ -99,9 +99,10 @@ messages to what the agent reads next.
 
 **Waking:** idle workers don't run at all until something starts (*wakes*) them: direct
 messages, mentions, interrupts, task assignments, reviews of their work, report requests and
-the fleet unfreezing. The orchestrator is also woken by ordinary channel messages and progress
-updates, collected over a short window (`debounce_seconds` in
-[`hive.toml`](CONFIGURATION.md#hivetoml), 90 s by default) so they arrive together.
+the fleet unfreezing. The orchestrator is also woken by ordinary channel messages, progress
+updates, completed tasks, new reports and review verdicts, collected over a short window
+(`debounce_seconds` in [`hive.toml`](CONFIGURATION.md#hivetoml), 90 s by default) so they
+arrive together.
 
 **Unhandled urgent messages:** an agent can't end its turn while it has unhandled `high` or
 `interrupt` messages. The hook that runs when it tries to stop sends it back, up to 3 times
@@ -124,17 +125,21 @@ Reports are how the orchestrator learns what happened without reading anyone's r
 (everything an agent printed while working). Raw output would fill up the orchestrator's
 limited working memory (its *context*) and could expose secrets the agent came across.
 
-- **Unprompted:** workers file a report with the `report_submit` tool (a summary, a body, and
-  the task it's about) when they finish meaningful work. Their
+- **Unprompted:** workers file a report when they finish meaningful work: usually together
+  with the release of their work (`lease_release(…, report_summary=…, report_body=…)`, filed
+  once the work is integrated), or with the `report_submit` tool (a summary, a body, and the
+  task it's about). Their
   [skill](GLOSSARY.md#skill) (written procedure) tells them to include files, commits, how the
   work was verified, and anything left open, and never to include secrets.
 - **On request:** the orchestrator asks an agent for a report with `report_request`. The agent
   is started and answers with `report_submit`.
 - **Delivery:** every new report starts (wakes) the orchestrator.
 - **Verification:** its skill tells it to check claims against the repository (`git log`,
-  reading the files, running tests that change nothing) and to keep only a summary in its
-  notes.
-- **Reading reports:** any agent can read them with `report_list` and `report_get`. You see
+  reading the files, running tests that change nothing), in proportion: a spot check when a
+  reviewer has already approved the work, more without review. It keeps only a summary in
+  its notes.
+- **Reading reports:** any agent can list them with `report_list` (summaries) and read one
+  with `report_get`. You see
   them in the dashboard's *Reports* panel ([The web dashboard](MONITORING.md#the-web-dashboard)),
   or from the server's web API at `/api/v1/reports`.
 

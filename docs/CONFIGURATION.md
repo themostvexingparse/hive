@@ -41,6 +41,12 @@ standby = ["claude-2"]       # agents that take over if the orchestrator is unav
 debounce_seconds = 90        # batching window for routine events
 heartbeat_hours = 4          # headless orchestrator only: periodic check-in
 
+[sessions]                   # when agents start a fresh CLI session instead of resuming
+per_task = true              # workers start fresh for each new task
+max_context_tokens = 120000  # ...or once a turn ended with more context than this
+max_wakes = 40               # ...or after this many turns
+orchestrator_fresh_after_hours = 12   # hive up starts the orchestrator fresh after this idle time
+
 [permissions]                # shell-command tiers for agents
 preset = "standard"          # standard | strict | none
 allow = ["docker compose ps"]          # run directly
@@ -62,6 +68,7 @@ task_kinds = ["docs"]
 | `[orchestrator] standby` | [Changing roles](ROLES.md#changing-roles) |
 | `[orchestrator] debounce_seconds` | [Messages and priorities](COORDINATION.md#messages-and-priorities) |
 | `[orchestrator] heartbeat_hours` | [Running the fleet](RUNNING.md#the-machine-with-the-orchestrator-your-computer) (headless orchestrator) |
+| `[sessions]` | [Wake rules](RUNNING.md#wake-rules) and [the orchestrator's session](RUNNING.md#the-machine-with-the-orchestrator-your-computer). `max_context_tokens` uses the context size Claude Code reports; for Codex and Gemini CLI agents only `per_task` and `max_wakes` apply. `0` turns a limit off. |
 | `[permissions]` | [Shell-command permissions](PERMISSIONS.md#customising) |
 | `[roles.<name>]` | [Custom roles and overrides](ROLES.md#custom-roles-and-overrides) |
 
@@ -176,12 +183,14 @@ and archives in `projects/<project>/hive-archives/`, under the data folder.
 | Daemon tells the server a slot is alive / agent shown offline after | every 20 s / 90 s without hearing from it |
 | A standby takes over from the orchestrator after | 5 min without contact, or its account out of usage |
 | Urgent events delivered (by starting the agent, or ending the orchestrator's `await_events` wait) | ≈ 3 s after arrival |
-| Routine events batched for the orchestrator | `debounce_seconds` (90 s) |
+| Routine events batched for the orchestrator (progress, ordinary messages, completed tasks, new reports, review verdicts) | `debounce_seconds` (90 s) |
 | Minimum gap between wakes of one slot | 10 s |
 | Maximum wakes per slot | 20 per hour |
 | Headless turn timeout | 1 hour |
 | Pause after a usage-limit error | 1 hour |
-| New CLI session after | 40 turns |
+| New CLI session | for each new task (workers), or after a turn ending above 120k tokens of context, or after 40 turns (`[sessions]`) |
+| Orchestrator starts fresh after | 12 h idle (`orchestrator_fresh_after_hours`) |
+| `task_list` / `report_list` / `status_read` defaults | 50 / 20 / 5 items, as summaries |
 | How long a lease (file lock) lasts | 600 s default, 30–3600 s; extended automatically when < 5 min remain |
 | Times an agent is sent back when trying to end a run with urgent messages unhandled | 3 per run |
 | Message size / rate | 8 KB / 20 per minute per agent |

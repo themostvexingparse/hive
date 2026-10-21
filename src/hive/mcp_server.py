@@ -17,6 +17,43 @@ from .local import LocalDaemon
 Priority = Literal["info", "normal", "high", "interrupt"]
 
 
+def slim_schema(schema, nullable: bool = True):
+    """The JSON schema the model reads for a tool's arguments, without the boilerplate the
+    generator adds: per-field `title`s and `default: null`. About 20% fewer tokens, and the
+    schemas are re-read on every model request.
+
+    `Optional[X]` becomes a type list (`["integer", "null"]`) instead of an `anyOf`, so an
+    explicit null is still accepted. With `nullable=False` (Gemini, whose function calling
+    rejects both `anyOf` and type lists) it becomes plain `X`: the argument is optional because
+    it isn't `required`, and omitting it means the same as null."""
+    if isinstance(schema, list):
+        return [slim_schema(x, nullable) for x in schema]
+    if not isinstance(schema, dict):
+        return schema
+    s = {k: slim_schema(v, nullable) for k, v in schema.items() if k != "title"}
+    if isinstance(schema.get("properties"), dict):  # argument names, not schema keywords
+        s["properties"] = {k: slim_schema(v, nullable) for k, v in schema["properties"].items()}
+    alts = s.get("anyOf")
+    if isinstance(alts, list) and len(alts) == 2 and {"type": "null"} in alts:
+        other = next(a for a in alts if a != {"type": "null"})
+        if isinstance(other.get("type"), str) and "anyOf" not in other:
+            merged = {k: v for k, v in s.items() if k != "anyOf"}
+            merged.update(other)
+            if nullable:
+                merged["type"] = [other["type"], "null"]
+                if "enum" in merged:
+                    merged["enum"] = [*merged["enum"], None]
+            s = merged
+    if "default" in s and s["default"] is None:
+        del s["default"]
+    return s
+
+
+def compact_json(obj) -> str:
+    """Tool results as compact JSON: indentation is pure token cost for the model."""
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
 def build_server(slot: str | None = None) -> MCPServer:
     d = LocalDaemon(slot)
     if not d.slot:
@@ -44,7 +81,7 @@ def build_server(slot: str | None = None) -> MCPServer:
             extra = {k: v for k, v in r.items() if k not in ("error", "message")}
             raise ToolError(f"{r['error']}: {r.get('message')}"
                             + (f" {json.dumps(extra)}" if extra else ""))
-        return json.dumps(r["result"], indent=1, default=str)
+        return compact_json(r["result"])
 
     def tool(fn):
         if allowed is None or fn.__name__ in allowed:
@@ -53,7 +90,7 @@ def build_server(slot: str | None = None) -> MCPServer:
 
     @tool
     def whoami() -> str:
-        """Your agent name, roles, permitted tools, write permissions and the fleet state."""
+        """Your agent name, roles, write permissions and the fleet state."""
         return call("whoami")
 
     @tool
@@ -95,9 +132,19 @@ def build_server(slot: str | None = None) -> MCPServer:
                     path_hints=path_hints, priority=priority, assignee=assignee)
 
     @tool
-    def task_list(state: str | None = None, assignee: str | None = None) -> str:
-        """List tasks, optionally filtered by state (comma-separated) and assignee."""
-        return call("task_list", state=state, assignee=assignee)
+    def task_list(state: str | None = None, assignee: str | None = None, mine: bool = False,
+                  since_id: int = 0, limit: int = 50) -> str:
+        """Task summaries (no spec or notes; use task_get). Default: unfinished tasks only.
+        state: comma-separated states, or "all". since_id pages through a long list (tasks
+        with a higher id); it does not show changes to older tasks."""
+        limit = max(1, min(int(limit), 200))
+        out = call("task_list", state=state, assignee=assignee, mine=mine, since_id=since_id,
+                   limit=limit + 1)
+        rows = json.loads(out)
+        if len(rows) > limit:
+            return (compact_json(rows[:limit]) + "\n(more tasks: call again with "
+                    f"since_id={rows[limit - 1]['id']})")
+        return out
 
     @tool
     def task_get(task_id: int) -> str:
@@ -160,12 +207,16 @@ def build_server(slot: str | None = None) -> MCPServer:
 
     @tool
     def lease_release(commit_message: str = "", task_id: int | None = None,
-                      abandon: bool = False) -> str:
+                      abandon: bool = False, result: str = "", report_summary: str = "",
+                      report_body: str = "") -> str:
         """Finish work on your leased paths: commits them, rebases onto main, runs checks and
-        integrates into main (or submits for review), then frees the leases. abandon=true frees
+        integrates into main (or submits for review), then frees the leases. Pass result and
+        report_summary/report_body to also complete the task and file your report once it is
+        integrated (after review, if review is on), with no further calls. abandon=true frees
         the leases without integrating."""
         return call("lease_release", commit_message=commit_message, task_id=task_id,
-                    abandon=abandon)
+                    abandon=abandon, result=result, report_summary=report_summary,
+                    report_body=report_body)
 
     @tool
     def lease_force_release(lease_id: int, reason: str) -> str:
@@ -184,9 +235,9 @@ def build_server(slot: str | None = None) -> MCPServer:
         return call("status_publish", summary=summary, body=body, level=level)
 
     @tool
-    def status_read(limit: int = 10) -> str:
-        """Read the latest status feed entries."""
-        return call("status_read", limit=limit)
+    def status_read(limit: int = 5, full: bool = False) -> str:
+        """The latest status feed entries: summaries, or with full=true their bodies too."""
+        return call("status_read", limit=limit, full=full)
 
     @tool
     def decision_request(kind: Literal["start_approval", "stuck", "question"], question: str,
@@ -230,12 +281,11 @@ def build_server(slot: str | None = None) -> MCPServer:
     def request_approval(command: str, reason: str,
                          shell: Literal["auto", "bash", "powershell", "cmd"] = "auto",
                          task_id: int | None = None, wait_seconds: int = 600) -> str:
-        """Ask the orchestrator to approve a command that needs approval (pushes, history
-        rewrites, recursive or forced deletes). Give the exact command and why it is needed and
-        what it affects. shell is the shell the command is written for (auto: PowerShell on
-        Windows, bash elsewhere). Waits up to wait_seconds (using no tokens) for the decision; if
-        approved, Hive runs the command once in your worktree and returns its output. If no
-        decision arrives in time, end your turn; you will be woken, then call run_approved."""
+        """Ask the orchestrator to approve a blocked command (push, history rewrite, recursive
+        delete): the exact command, why, and what it affects. shell: what it's written for
+        (auto: PowerShell on Windows, bash elsewhere). Waits for the decision; if approved, Hive
+        runs it once in your worktree and returns the output. If still pending, end your turn
+        and call run_approved when woken."""
         return call("request_approval", command=command, reason=reason, shell=shell,
                     task_id=task_id, wait_seconds=wait_seconds)
 
@@ -278,7 +328,7 @@ def build_server(slot: str | None = None) -> MCPServer:
     @tool
     def report_list(kind: Literal["request", "report"] | None = None, author: str | None = None,
                     target: str | None = None, state: str | None = None, limit: int = 20) -> str:
-        """List reports and report requests (newest last)."""
+        """Report and request summaries, newest last (use report_get for a body)."""
         return call("report_list", kind=kind, author=author, target=target, state=state,
                     limit=limit)
 
@@ -287,6 +337,8 @@ def build_server(slot: str | None = None) -> MCPServer:
         """Read one report in full."""
         return call("report_get", report_id=report_id)
 
+    for info in server._tool_manager.list_tools():
+        info.parameters = slim_schema(info.parameters, nullable=getattr(d, "vendor", "") != "gemini")
     return server
 
 

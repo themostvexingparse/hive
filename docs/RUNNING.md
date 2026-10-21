@@ -50,12 +50,15 @@ hive up
      (use Hive's profile; [why hook trust is bypassed](#codex-profile))
 3. **Session:** a session is one continuing conversation with the AI model. The first launch
    creates a new one. Later launches **resume the same conversation**, so the orchestrator
-   remembers earlier work. (Codex picks its own session ids; Hive reads the id back from the
-   slot's Codex settings folder when the session ends.)
+   remembers earlier work, unless the last session was idle for longer than
+   `orchestrator_fresh_after_hours` ([`[sessions]`](CONFIGURATION.md#hivetoml), 12 h by
+   default). Then it starts fresh and recovers from its notes, rather than re-reading a long,
+   stale conversation with every request. (Codex picks its own session ids; Hive reads the id
+   back from the slot's Codex settings folder when the session ends.)
 4. **Start prompt:** tells the agent to follow the `hive-orchestrator`
    [skill](GLOSSARY.md#skill) (its written operating procedure). It then:
-   1. calls Hive's `whoami` tool, to learn its name, roles and the fleet's state;
-   2. reads its notes from earlier sessions (`.hive/orchestrator/state.md` in its worktree);
+   1. reads its notes from earlier sessions (`.hive/orchestrator/state.md` in its worktree);
+   2. checks the fleet state and what changed since its notes (task and report summaries);
    3. acts on the [fleet state](LIFECYCLE.md) (for example, starts planning);
    4. waits in Hive's `await_events` tool, which returns as soon as something needs its
       attention and uses none of the account's model usage while waiting.
@@ -97,7 +100,13 @@ hive up            # -v for debug logging
    [claude-2] ← {"id": 7, "holder": "claude-2", "fencing": 12, …}
    [claude-2] → Edit {"file_path": "src/auth/login.py", …}
    [claude-2] · turn done (14 turns)
+   [claude-2] · tokens: 412k in, 6.3k out over 15 requests, context 38k
    ```
+
+   The `tokens` line is the turn's usage as the CLI reports it: input tokens summed over all
+   its requests (most are re-read from the cache), output tokens, and the size of the
+   conversation at the end. Claude Code reports all three; Codex and Gemini CLI report
+   totals only.
 2. The same lines are uploaded to the server about once a second, so you can follow them
    from any computer with `hive watch` or the dashboard ([Watching the fleet](MONITORING.md)).
 3. Ctrl+C stops the daemon.
@@ -180,18 +189,26 @@ The prompt a worker receives contains:
 - the fleet state;
 - why it was woken;
 - its current tasks, with their description (*spec*), the files they're expected to touch
-  (*path hints*) and notes ([Tasks](COORDINATION.md#tasks));
+  (*path hints*) and notes ([Tasks](COORDINATION.md#tasks)). A resumed session that has seen
+  a task already gets only the notes added since;
 - new messages;
-- on the first turn of a session, its role's instructions and reminders of Hive's rules.
+- on the first turn of a session, its role's instructions and reminders of Hive's rules;
+- when a fresh session continues a task begun in an earlier one, a short handoff: the
+  uncommitted files and unmerged commits in its worktree. Its task notes say the rest, which
+  is why agents record where they are before ending a turn with work unfinished.
 
 ### Wake rules
 
 - **One turn at a time per slot.** Events that arrive during a turn reach the agent through
   [hooks](AGENT_INTERFACE.md#hooks) (automatic checks that run after each of its actions), or
   trigger a follow-up turn.
-- **Sessions persist** across turns, so an agent remembers what it did earlier. A new session
-  starts every 40 turns, or after a failed resume, to keep the context from growing without
-  limit.
+- **Sessions last one task.** Every request re-reads the whole session, so history that
+  doesn't help the current work is pure cost. A worker resumes its session while it works on
+  the same task (a review sending it back, a conflict, an approval coming in), and starts a
+  fresh one when it moves to a new task. Any agent also starts fresh once a turn's context
+  grew past `max_context_tokens` (120,000), after `max_wakes` turns (40), or after a failed
+  resume. All three are set in [`[sessions]`](CONFIGURATION.md#hivetoml); `per_task = false`
+  keeps one session across tasks.
 - **Wakes are rate-limited**: at most 20 per slot per hour, at least 10 seconds apart.
 - **Usage limits:** if the CLI fails because the account has used up its allowance, the slot
   pauses for an hour. The server is told, so it assigns no tasks to the agent meanwhile, and
