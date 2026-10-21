@@ -274,3 +274,36 @@ def test_orchestrator_waits_instead_of_ending_its_turn_before_the_fleet_starts(t
     # Headless workers are woken when it is their turn, so they still end it.
     rt.me = {**rt.me, "roles": ["programmer"]}
     assert "End your turn" in pre("Bash", command="git status")["deny"]
+
+
+def test_a_slot_that_is_not_logged_in_pauses_until_hive_chat_logs_it_in(tmp_path):
+    from hive.daemon.localapi import create_local_app
+    # Claude Code's headless answer for an account that isn't logged in.
+    script = ("import json\n"
+              "print(json.dumps({'type': 'result', 'is_error': True, "
+              "'result': 'Invalid API key · Please run /login'}))\n"
+              "raise SystemExit(1)\n")
+    slot = Slot(name="w1", vendor="claude", token="t", worktree=str(tmp_path),
+                config_dir=str(tmp_path / "account"))
+    res = wake.run_cli(slot, [sys.executable, "-c", script], "prompt", dict(os.environ),
+                       tmp_path / "log.txt")
+    assert res.login_needed and not res.quota_hit
+
+    d = core.Daemon(MachineConfig(server_url=UNREACHABLE, slots=[slot]),
+                    Store(tmp_path / "state.db"), echo=False)
+    rt = d.slots["w1"]
+    assert not core.account_used(slot)  # an empty account folder: never logged in
+    rt.me = {"roles": ["programmer"], "active": True}
+    d.need_login(rt)  # the server is unreachable: telling the user there is best effort
+    assert any("hive chat w1" in line for line in rt.sink.buf)
+    assert d.store.pending_triggers("w1")  # a retry is waiting...
+    d.maybe_wake(rt)
+    assert not rt.running  # ...but no headless turn starts while it can't log in
+
+    # `hive chat w1` attaches, logs in, detaches: the pause ends and the retry can run.
+    local = create_local_app(d).test_client()
+    hdr = {"X-Hive-Local": d.mcfg.local_secret}
+    local.post("/slot/w1/attach", json={"attached": True}, headers=hdr)
+    assert rt.login_needed
+    local.post("/slot/w1/attach", json={"attached": False}, headers=hdr)
+    assert not rt.login_needed

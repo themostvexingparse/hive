@@ -59,7 +59,10 @@ def create_local_app(daemon: Daemon) -> Flask:
     @app.post("/slot/<slot>/attach")
     def attach(slot):
         rt = slot_or_404(slot)
-        rt.attached = bool((request.get_json(silent=True) or {}).get("attached"))
+        attached = bool((request.get_json(silent=True) or {}).get("attached"))
+        if rt.attached and not attached:
+            rt.login_needed = False  # the `hive chat` session that just ended may have logged in
+        rt.attached = attached
         return jsonify({"attached": rt.attached, "running": rt.running})
 
     @app.post("/slot/<slot>/check-paths")

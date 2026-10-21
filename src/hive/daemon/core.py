@@ -107,6 +107,7 @@ class SlotRuntime:
         self.consumed_approvals: deque[int] = deque(maxlen=200)
         self.sink: StreamSink | None = None
         self.quota_until = 0.0
+        self.login_needed = False  # the CLI isn't logged in; `hive chat` here ends the pause
         self.stop_blocks = 0
         self.noted = False  # the agent recorded progress (a task note) during this turn
         self.last_wake_end = 0.0
@@ -187,6 +188,10 @@ class Daemon:
     def start_background(self) -> None:
         for rt in self.slots.values():
             self.refresh(rt)
+            if not account_used(rt.cfg):
+                ui.warn(f"{rt.name}'s account folder is empty: its {rt.cfg.vendor} CLI has "
+                        f"probably never been logged in, and a headless turn can't log in. "
+                        f"Log it in with `hive chat {rt.name}` in another terminal.")
         for target in (self.poll_loop, self.heartbeat_loop, self.wake_loop, self.stream_loop):
             threading.Thread(target=target, daemon=True, name=target.__name__).start()
 
@@ -467,7 +472,7 @@ class Daemon:
     # ------------------------------------------------------------------ wakes
 
     def maybe_wake(self, rt: SlotRuntime) -> None:
-        if rt.running or rt.releasing or rt.attached or not rt.active \
+        if rt.running or rt.releasing or rt.attached or not rt.active or rt.login_needed \
                 or rt.quota_until > time.time():
             return
         trig = self.store.pending_triggers(rt.name)
@@ -562,7 +567,9 @@ class Daemon:
             self.store.put(rt.name, "wakes_in_session", wakes + 1)
             self.store.put(rt.name, "last_wake", time.time())
             self.store.put(rt.name, "last_context", int(res.usage.get("context") or 0))
-            if res.quota_hit:
+            if res.login_needed:
+                self.need_login(rt)
+            elif res.quota_hit:
                 rt.sink.write(["· usage limit reached; pausing this agent for an hour"])
                 rt.quota_until = time.time() + 3600
                 # The turn may have failed before the model read its prompt: resend it all.
@@ -585,6 +592,29 @@ class Daemon:
             rt.proc = None
             rt.running = False
             rt.last_wake_end = time.time()
+
+    def need_login(self, rt: SlotRuntime) -> None:
+        """The slot's CLI isn't logged in, and a headless turn can't log in: stop waking it
+        and say how to fix it, here and to the user. The `hive chat` session that logs it in
+        ends the pause (see the local API's attach)."""
+        first = not rt.login_needed
+        rt.login_needed = True
+        # The turn never reached the model: start a fresh session, with everything resent.
+        self.store.put(rt.name, "session", None)
+        self.store.put(rt.name, "session_seen", {})
+        self.store.add_trigger(rt.name, "login.retry", True,
+                               "Retrying now that your account is logged in.")
+        msg = (f"{rt.name}'s {rt.cfg.vendor} account isn't logged in on this computer, so it "
+               f"can't work. Log it in with `hive chat {rt.name}` in another terminal there; "
+               "Hive retries when that session ends (or when `hive up` is restarted).")
+        rt.sink.write([f"× {msg}"])
+        log.warning("[%s] %s", rt.name, msg)
+        if first:
+            try:
+                rt.client.post("/messages", {"body": msg, "channel": "#user",
+                                             "priority": "high"})
+            except HiveError:
+                pass
 
     def session_rotation(self, rt: SlotRuntime, session, wakes: int, focus) -> str | None:
         """Why the next headless turn should start a fresh session, or None to resume.
@@ -1259,6 +1289,15 @@ def is_hive_tool(tool: str) -> bool:
         return True
     head, _, name = tool.rpartition("__")
     return name in HIVE_TOOL_NAMES and "hive" in head
+
+
+def account_used(slot: Slot) -> bool:
+    """Whether the slot's CLI has ever run with its private account folder. agy keeps its login
+    in the computer's keyring, so its folder says nothing about that."""
+    if slot.vendor == "agy" or not slot.config_dir:
+        return True
+    folder = Path(slot.config_dir)
+    return folder.is_dir() and any(folder.iterdir())
 
 
 def is_hive_mcp_call(tool: str, tool_input: dict) -> bool:

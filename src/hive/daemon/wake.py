@@ -33,6 +33,12 @@ from .shells import kill_tree, popen_group_kwargs
 
 QUOTA_RE = re.compile(r"usage limit|rate.?limit|limit reached|quota (?:exceeded|exhausted)|"
                       r"out of (?:credits|quota)|resource.?exhausted", re.I)
+# What the CLIs print when their account isn't logged in (Claude Code: "Invalid API key ·
+# Please run /login"; Codex; Gemini CLI: "Please set an Auth method"; agy: "authentication
+# required"). A headless turn can't log in, so the slot has to be logged in by hand.
+LOGIN_RE = re.compile(r"please run /login|invalid api key|not logged in|log ?in required|"
+                      r"authentication required|please set an auth method|"
+                      r"(?:oauth|access) token (?:has )?expired|run `?codex login", re.I)
 SESSION_ROTATE_AFTER = 40
 MCP_TIMEOUT_MS = 30 * 60 * 1000  # await_events blocks for minutes
 CLAUDE_SESSION_SETTINGS = json.dumps(
@@ -698,6 +704,7 @@ class WakeResult:
     duration: float
     session_id: str = ""  # reported by the CLI (Codex picks its own)
     usage: dict = field(default_factory=dict)  # see TokenMeter.summary()
+    login_needed: bool = False  # the CLI's account isn't logged in
 
 
 class TokenMeter:
@@ -830,6 +837,7 @@ def run_cli(slot: Slot, cmd: list[str], prompt: str, env: dict, log_path: Path,
     killer.cancel()
     out = "".join(raw)
     is_error = is_error or proc.returncode != 0
-    quota = is_error and bool(QUOTA_RE.search(out[-5000:]))
+    login = is_error and bool(LOGIN_RE.search(out[-5000:]))
+    quota = is_error and not login and bool(QUOTA_RE.search(out[-5000:]))
     return WakeResult(proc.returncode or 0, out, quota, time.time() - t0, session_id,
-                      meter.summary())
+                      meter.summary(), login)
