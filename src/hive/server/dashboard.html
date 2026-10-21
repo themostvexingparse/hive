@@ -976,16 +976,29 @@ function setConn(ok) {
   c.firstElementChild.textContent = ok ? "Live" : "Reconnecting…";
   c.title = ok ? "Connected; updates every few seconds" : `Can't reach the server. Last update ${ago(lastOk / 1000)}.`;
 }
+/* One loop of each kind at a time: starting one while its request is in flight (returning to
+   the tab, signing in again) would leave two loops polling side by side, and two output polls
+   sent together both append the same lines. The request in flight schedules the next one. */
+let coreBusy = false, coreAgain = false, outBusy = false;
 async function coreLoop() {
+  clearTimeout(coreTimer);
+  if (coreBusy) { coreAgain = true; return; }
+  coreBusy = true;
   try { await refresh(); coreFails = 0; lastOk = Date.now(); setConn(true); }
-  catch (e) { if (e.status === 401) return; coreFails++; setConn(false); }
+  catch (e) { if (e.status === 401) { coreBusy = false; return; } coreFails++; setConn(false); }
+  coreBusy = false;
   if (!running) return;
-  const base = document.hidden ? 30000 : 4000;
+  const base = coreAgain ? 150 : document.hidden ? 30000 : 4000;
+  coreAgain = false;
   coreTimer = setTimeout(coreLoop, coreFails ? Math.min(30000, 2000 * 2 ** Math.min(coreFails, 4)) : base);
 }
 async function outLoop() {
+  clearTimeout(outTimer);
+  if (outBusy) return;
+  outBusy = true;
   try { await pollOutput(); outFails = 0; }
-  catch (e) { if (e.status === 401) return; outFails++; }
+  catch (e) { if (e.status === 401) { outBusy = false; return; } outFails++; }
+  outBusy = false;
   if (!running) return;
   const base = document.hidden ? 10000 : 1500;
   outTimer = setTimeout(outLoop, outFails ? Math.min(30000, 2000 * 2 ** Math.min(outFails, 4)) : base);
@@ -1431,9 +1444,11 @@ function showJump() {
 }
 async function pollOutput() {
   const r = await api(`/streams?since_id=${OUT.lastId}&limit=${OUT.lastId ? 1000 : 600}`);
-  if (ARCHIVE || !running || !r.lines.length) return;
-  OUT.lastId = r.last_id;
-  const add = r.lines.map(toLine);
+  if (ARCHIVE || !running) return;
+  // Only lines newer than those shown: an overlapping answer must not add them again.
+  const add = r.lines.filter((l) => l.id > OUT.lastId).map(toLine);
+  OUT.lastId = Math.max(OUT.lastId, r.last_id || 0);
+  if (!add.length) return;
   let newAgent = false;
   for (const l of add) if (!OUT.known.has(l.agent)) { OUT.known.add(l.agent); newAgent = true; }
   OUT.lines.push(...add);
