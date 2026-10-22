@@ -226,6 +226,14 @@ class Daemon:
             self.add_slot(slot)
         for name in res.removed:
             self.slots.pop(name, None)
+        if res.updated:
+            from ..config import load_machine_config
+            fresh = load_machine_config()
+            for name in res.updated:
+                if name in self.slots:
+                    s = fresh.slot(name)
+                    self.slots[name].cfg.model = s.model
+                    self.slots[name].cfg.permission_mode = s.permission_mode
         for line in machines.describe(res):
             log.info(line)
         for err in res.errors:

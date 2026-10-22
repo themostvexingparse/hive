@@ -300,6 +300,8 @@ class Hive:
             p = placed.get(d["name"])
             d["machine"] = p["machine"] if p else None
             d["claimed"] = bool(p and p["claimed"])
+            d["placement"] = {"model": p["model"], "permission_mode": p["permission_mode"]} \
+                if p else None
             out.append(d)
         return out
 
@@ -390,20 +392,29 @@ class Hive:
             self._emit(c, "machine.removed", actor.name, name=name, agents=agents_there)
         return {"name": name, "unplaced": agents_there}
 
-    def place_agent(self, actor: Actor, agent: str, machine: str | None) -> dict:
-        """Run `agent` on `machine` (None: on no paired machine). Its daemon picks it up and
-        takes a fresh token, so the token of a previous home stops working."""
+    def place_agent(self, actor: Actor, agent: str, machine: str | None, model: str = "",
+                    permission_mode: str = "") -> dict:
+        """Run `agent` on `machine` (None: on no paired machine), with those slot settings.
+        Its daemon picks it up and takes a fresh token, so the token of a previous home stops
+        working. Re-placing it on the same machine only changes the settings."""
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         with self._write() as c:
             self._agent(c, agent)
+            old = c.execute(select(placements).where(placements.c.agent == agent)).first()
+            if machine and old is not None and old.machine == machine:
+                c.execute(update(placements).where(placements.c.agent == agent).values(
+                    model=model or "", permission_mode=permission_mode or ""))
+                return {"agent": agent, "machine": machine}
             c.execute(placements.delete().where(placements.c.agent == agent))
             if machine:
                 if not c.execute(select(machines.c.name).where(machines.c.name == machine)
                                  ).first():
                     raise ApiError(404, "no_such_machine",
                                    f"no machine named {machine!r}; `hive machines` lists them")
-                c.execute(insert(placements).values(agent=agent, machine=machine, claimed=0.0))
+                c.execute(insert(placements).values(agent=agent, machine=machine, claimed=0.0,
+                                                    model=model or "",
+                                                    permission_mode=permission_mode or ""))
             self._emit(c, "agent.placed", actor.name, name=agent, machine=machine)
         return {"agent": agent, "machine": machine}
 
@@ -423,7 +434,8 @@ class Hive:
                 agents, agents.c.name == placements.c.agent).where(
                 placements.c.machine == actor.name).order_by(placements.c.agent)).fetchall()
         return [{"agent": r.agent, "vendor": r.vendor, "roles": list(r.roles),
-                 "claimed": bool(r.claimed)} for r in rows]
+                 "claimed": bool(r.claimed), "model": r.model,
+                 "permission_mode": r.permission_mode} for r in rows]
 
     def claim_agent(self, actor: Actor, agent: str) -> dict:
         """A machine takes an agent placed on it: a new token, which only it ever sees."""

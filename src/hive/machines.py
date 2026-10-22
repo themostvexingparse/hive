@@ -46,7 +46,15 @@ def pair(server: str, code: str, repo: Path, name: str = "") -> dict:
 class SyncResult:
     added: list[Slot] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)  # model or permission mode changed
     errors: list[str] = field(default_factory=list)
+
+
+def _set_slot(name: str, model: str, permission_mode: str) -> None:
+    cfg = load_machine_config()
+    slot = cfg.slot(name)
+    slot.model, slot.permission_mode = model, permission_mode
+    save_machine_config(cfg)
 
 
 def sync(only_server: str | None = None,
@@ -76,8 +84,14 @@ def sync(only_server: str | None = None,
         for name, p in want.items():
             have = here.get(name)
             # A claim hands out a new token, so an agent that is already here (and claimed)
-            # keeps running untouched; one moved back here is claimed again.
-            if have is not None and (p["claimed"] and have.placed or busy(name)):
+            # keeps running, only taking changed settings; one moved back here is claimed again.
+            if have is not None and p["claimed"] and have.placed:
+                if (have.model, have.permission_mode) != (p.get("model", ""),
+                                                          p.get("permission_mode", "")):
+                    _set_slot(name, p.get("model", ""), p.get("permission_mode", ""))
+                    out.updated.append(name)
+                continue
+            if have is not None and busy(name):
                 continue
             if name in others:  # checked first: claiming would rotate its token for nothing
                 out.errors.append(f"{name}: this computer already has a slot of that name for "
@@ -86,7 +100,8 @@ def sync(only_server: str | None = None,
             try:
                 got = c.post(f"/machines/me/claim/{name}")
                 slot, _ = agents.place(name, got["vendor"], got["token"], server, repo,
-                                       placed=True)
+                                       placed=True, model=p.get("model", ""),
+                                       permission_mode=p.get("permission_mode", ""))
             except (HiveError, agents.SetupError) as e:
                 out.errors.append(f"{name}: {getattr(e, 'message', e)}")
                 continue
@@ -103,4 +118,5 @@ def describe(result: SyncResult) -> list[str]:
              for s in result.added]
     lines += [f"Took {n} off this computer (removed, or placed elsewhere)"
               for n in result.removed]
+    lines += [f"Updated {n}'s model or permission mode" for n in result.updated]
     return lines

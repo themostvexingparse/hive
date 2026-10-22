@@ -1152,7 +1152,7 @@ def cmd_agents_add(a):
         what = f"{ui.agent(name)} ({vendor}, {', '.join(mine)})"
         if a.on:
             ui.ok(f"Created {what}.")
-            place_on(c, name, a.on)
+            place_on(c, name, a.on, a.model or "", a.permission_mode or "")
             continue
         if a.elsewhere:
             ui.ok(f"Created {what}. On the computer that will run it, inside its clone, run:")
@@ -1235,30 +1235,54 @@ def cmd_agents_login(a):
     ui.ok(f"{ui.agent(slot.name)}'s account is set up.")
 
 
+def _unless_default(value: str) -> str:
+    """`default` on the command line means the CLI's own default, stored as ""."""
+    return "" if value == "default" else value
+
+
 def cmd_agents_edit(a):
     from .agents import parse_roles
     if a.roles is None and a.model is None and a.permission_mode is None and a.on is None:
         die("say what to change: --roles, --model, --permission-mode or --on")
     if a.roles is not None:
         set_roles(admin_client(), a.name, parse_roles(a.roles))
+    c = admin_client() if a.on is not None or a.model is not None or \
+        a.permission_mode is not None else None
+    reset = _unless_default
     if a.on is not None:
-        c = admin_client()
         target = None if a.on.lower() == "none" else a.on
-        place_on(c, a.name, target)
+        place_on(c, a.name, target, reset(a.model or ""), reset(a.permission_mode or ""))
         here = _local_slots(c.base.removesuffix("/api/v1")).get(a.name)
         if target and here and not here.placed:
             # The other computer's claim gives it a new token: this slot would stop working.
             from .agents import unplace
             unplace(a.name)
             ui.info(f"Took {a.name} off this computer (its account folder is kept).")
+        return
     if a.model is not None or a.permission_mode is not None:
+        url = c.base.removesuffix("/api/v1")
+        ag = next((x for x in call(c.get, "/agents") if x["name"] == a.name), None) or \
+            die(f"no agent named {a.name!r}")
+        if a.name not in _local_slots(url) and ag.get("machine"):
+            # Placed on another computer: its daemon applies the settings there.
+            p = ag.get("placement") or {}
+            model = reset(a.model) if a.model is not None else p.get("model", "")
+            mode = reset(a.permission_mode) if a.permission_mode is not None \
+                else p.get("permission_mode", "")
+            call(c.put, f"/agents/{a.name}/placement", {"machine": ag["machine"],
+                                                        "model": model,
+                                                        "permission_mode": mode})
+            ui.ok(f"{ui.agent(a.name)}: model {model or 'default'}, permission mode "
+                  f"{mode or 'default'}, applied on {ag['machine']} at its next check "
+                  + ui.dim("(within a minute while hive up runs there)"))
+            return
         _slot_here(a.name)
         cfg = load_machine_config()
         slot = cfg.slot(a.name)
         if a.model is not None:
-            slot.model = "" if a.model == "default" else a.model
+            slot.model = reset(a.model)
         if a.permission_mode is not None:
-            slot.permission_mode = "" if a.permission_mode == "default" else a.permission_mode
+            slot.permission_mode = reset(a.permission_mode)
         save_machine_config(cfg)
         ui.ok(f"{ui.agent(a.name)}: model {slot.model or 'default'}, permission mode "
               f"{slot.permission_mode or 'default'} " + ui.dim("(from its next turn)"))
@@ -1374,8 +1398,10 @@ def cmd_machines_rm(a):
              + ui.dim("(hive agents edit NAME --on MACHINE)") if r["unplaced"] else ""))
 
 
-def place_on(c: ServerClient, name: str, machine: str | None) -> None:
-    call(c.put, f"/agents/{name}/placement", {"machine": machine})
+def place_on(c: ServerClient, name: str, machine: str | None, model: str = "",
+             permission_mode: str = "") -> None:
+    call(c.put, f"/agents/{name}/placement", {"machine": machine, "model": model,
+                                              "permission_mode": permission_mode})
     if machine:
         ui.ok(f"{ui.agent(name)} is placed on {ui.agent(machine)}: it is set up there within a "
               f"minute if `hive up` runs there, else when it next starts.")
@@ -1384,6 +1410,147 @@ def place_on(c: ServerClient, name: str, machine: str | None) -> None:
                 + ui.dim(" (hive up there offers it too)"))
     else:
         ui.ok(f"{ui.agent(name)} isn't placed on any paired computer now.")
+
+
+# ---------------------------------------------------------------------- hive plan / apply
+
+def _fleet_path(given: str | None) -> Path:
+    from .fleetfile import FLEET_FILE
+    if given:
+        return Path(given)
+    root = find_repo_root()
+    return (root or Path.cwd()) / FLEET_FILE
+
+
+def _fleet_plan(a):
+    from . import fleetfile
+    c = admin_client()
+    url = c.base.removesuffix("/api/v1")
+    roster = call(c.get, "/agents")
+    local = _local_slots(url)
+    machines_ = {m["name"] for m in call(c.get, "/machines")}
+    try:
+        wants = fleetfile.load(_fleet_path(a.file))
+        p = fleetfile.plan(wants, roster, local, machines_, prune=a.prune)
+    except fleetfile.FleetFileError as e:
+        die(str(e))
+    return c, roster, local, p
+
+
+SYMBOL = {"create": ("+", "green"), "roles": ("~", "yellow"), "move": ("→", "cyan"),
+          "settings": ("~", "yellow"), "remove": ("-", "red")}
+
+
+def _show_plan(p) -> None:
+    for ch in p.changes:
+        sym, colour = SYMBOL[ch.kind]
+        ui.out(f"  {ui.paint(sym, colour, 'bold')} {ui.agent(ch.name)}  "
+               f"{ui.paint(ch.kind, colour)}  {ch.detail}")
+    if p.ok:
+        ui.out(ui.dim(f"  unchanged: {', '.join(p.ok)}"))
+    if p.unlisted:
+        ui.out(ui.dim(f"  not in the file, kept: {', '.join(p.unlisted)} (--prune removes "
+                      "them)"))
+
+
+def cmd_plan(a):
+    _, _, _, p = _fleet_plan(a)
+    if not p.changes:
+        ui.ok("The fleet already matches the file.")
+        _show_plan(p)
+        return
+    ui.section("hive apply would", ui.dim(f"{len(p.changes)} change(s)"))
+    _show_plan(p)
+    ui.out()
+    ui.note("Make these changes: " + ui.cmd("hive apply" + (" --prune" if a.prune else "")))
+
+
+def cmd_apply(a):
+    from . import agents, fleetfile
+    c, roster, local, p = _fleet_plan(a)
+    if not p.changes:
+        ui.ok("The fleet already matches the file.")
+        return
+    ui.section("Changes", ui.dim(f"{len(p.changes)}"))
+    _show_plan(p)
+    ui.out()
+    if not a.yes:
+        if not interactive():
+            die("add --yes to make these changes")
+        if not yes("Make these changes?", default=False):
+            die("nothing changed")
+    url = c.base.removesuffix("/api/v1")
+    need_here = any(ch.want and ch.want.on == fleetfile.HERE and ch.kind in ("create", "move")
+                    for ch in p.changes)
+    repo = agents.clone_here() if need_here else None
+    if need_here and repo is None:
+        die("agents on this computer need its clone: run this inside it")
+    order = ["remove", "roles", "create", "move", "settings"]
+    new_here: list[Slot] = []
+    for ch in sorted(p.changes, key=lambda ch: order.index(ch.kind)):
+        w = ch.want
+        if ch.kind == "remove":
+            call(c.delete, f"/agents/{ch.name}")
+            if ch.name in local:
+                agents.unplace(ch.name)
+            ui.ok(f"Removed {ui.agent(ch.name)}.")
+        elif ch.kind == "roles":
+            set_roles(c, ch.name, w.roles)
+        elif ch.kind == "create":
+            r = call(c.post, "/agents", {"name": w.name, "vendor": w.vendor, "roles": w.roles})
+            ui.ok(f"Created {ui.agent(w.name)} ({fleetfile.describe_want(w)}).")
+            if w.on == fleetfile.ELSEWHERE:
+                ui.out("    " + ui.cmd(join_line(w.name, r["token"], c)))
+            elif w.on == fleetfile.HERE:
+                new_here.append(_set_up_here(w, r["token"], url, repo))
+            else:
+                place_on(c, w.name, w.on, w.model, w.permission_mode)
+        elif ch.kind == "move":
+            if w.on == fleetfile.HERE:
+                call(c.put, f"/agents/{w.name}/placement", {"machine": None})
+                token = call(c.post, f"/agents/{w.name}/token")["token"]
+                new_here.append(_set_up_here(w, token, url, repo))
+            else:
+                place_on(c, w.name, w.on, w.model, w.permission_mode)
+                if w.name in local and not local[w.name].placed:
+                    agents.unplace(w.name)
+        elif ch.kind == "settings":
+            if w.name in local:
+                cfg = load_machine_config()
+                slot = cfg.slot(w.name)
+                slot.model, slot.permission_mode = w.model, w.permission_mode
+                save_machine_config(cfg)
+            else:
+                call(c.put, f"/agents/{w.name}/placement",
+                     {"machine": w.on, "model": w.model, "permission_mode": w.permission_mode})
+            ui.ok(f"{ui.agent(w.name)}: {ch.detail}")
+    if new_here:
+        offer_login(new_here)
+        ui.note("Start the agents on this computer with " + ui.cmd("hive up")
+                + ui.dim(" (restart it if it's running)"))
+
+
+def _set_up_here(w, token: str, url: str, repo: Path) -> Slot:
+    from . import agents
+    try:
+        slot, _ = agents.place(w.name, w.vendor, token, url, repo, model=w.model,
+                               permission_mode=w.permission_mode)
+    except agents.SetupError as e:
+        die(f"couldn't set up {w.name} on this computer: {e}")
+    ui.ok(f"Set up {ui.agent(w.name)} on this computer " + ui.dim(f"→ {slot.worktree}"))
+    return slot
+
+
+def cmd_agents_export(a):
+    from . import fleetfile
+    c = admin_client()
+    text = fleetfile.export(call(c.get, "/agents"), _local_slots(c.base.removesuffix("/api/v1")))
+    if a.output:
+        Path(a.output).write_text(text, "utf-8")
+        ui.ok(f"Wrote {ui.path(a.output)}. " + ui.cmd("hive plan") + " compares it with the "
+              "fleet.")
+    else:
+        sys.stdout.write(text)
 
 
 # ---------------------------------------------------------------------- hive config …
@@ -1647,6 +1814,7 @@ Work with the team:
 Manage:
   hive agents                    list, add, login, edit, rm, rotate
   hive machines                  list, invite (pair another computer), rm
+  hive plan / hive apply         compare / match the fleet to hive.fleet.toml
   hive join CODE --server URL    pair this computer, with a code from hive machines invite
   hive config                    list, get, set, unset, explain, edit
   hive doctor                    check the whole setup and list fixes
@@ -1779,6 +1947,20 @@ def main(argv: list[str] | None = None) -> None:
     s = ag.add_parser("rotate", help="give an agent a new token (the old one stops working)")
     s.add_argument("name")
     s.set_defaults(fn=cmd_agents_rotate)
+    s = ag.add_parser("export", help="write the fleet as a file for hive plan / hive apply")
+    s.add_argument("-o", "--output", help="file to write (default: print it)")
+    s.set_defaults(fn=cmd_agents_export)
+
+    for verb, fn, text in (("plan", cmd_plan, "show how the fleet differs from "
+                            "hive.fleet.toml"),
+                           ("apply", cmd_apply, "make the fleet match hive.fleet.toml")):
+        s = sub.add_parser(verb, help=text)
+        s.add_argument("file", nargs="?", help="default: hive.fleet.toml next to hive.toml")
+        s.add_argument("--prune", action="store_true",
+                       help="also remove agents the file doesn't list")
+        if verb == "apply":
+            s.add_argument("-y", "--yes", action="store_true", help="don't ask first")
+        s.set_defaults(fn=fn)
 
     s = sub.add_parser("machines", help="pair other computers and see them")
     s.set_defaults(fn=cmd_machines_list)

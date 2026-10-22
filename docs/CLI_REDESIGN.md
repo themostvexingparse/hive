@@ -83,10 +83,11 @@ and presets (`preset = "solo" | "team" | "strict"`).
   computer's clone pairs it, and its daemon sets up whatever agents are placed on it. The
   server has `machines`, `pairing_codes` and `placements`. Still to come: reusable join keys
   for automation, and cloning the repository when the computer has no clone yet.
-- **A declarative fleet.** `[[agents]]` blocks (`vendor`, `roles`, `count`, `on`, `model`,
-  `permission_mode`) with `hive plan` (shows the difference) and `hive apply`;
-  `hive agents export` writes the current fleet out. The server stays the source of truth;
-  the file is applied to it, like `kubectl apply`.
+- **A declarative fleet** (built, see [CLI.md](CLI.md#hive-plan-and-hive-apply-the-fleet-as-a-file)).
+  `[[agents]]` blocks (`name`, `vendor`, `roles`, `count`, `on`, `model`,
+  `permission_mode`) in `hive.fleet.toml`, with `hive plan` (shows the difference) and
+  `hive apply`; `hive agents export` writes the current fleet out. The server stays the
+  source of truth; the file is applied to it, like `kubectl apply`.
 - **Rung 0 chat.** `hive` opens a chat with the orchestrator in Hive's own window, with
   decisions as prompts Hive itself draws (so only your keypress approves) and slash
   commands that mirror rung 1 (`/agents add` ≡ `hive agents add`).
@@ -126,11 +127,18 @@ Phase 2:
 - [x] Docs: MACHINES rewritten around the three ways to add agents; CLI, CONFIGURATION,
   SECURITY and PERMISSIONS updated.
 - [ ] Reusable join keys for automation (a code that pairs many machines).
-- [ ] Launch-time bundles; `hive init` asking for the test command.
+- [ ] Launch-time bundles. (`hive init` asking for the test command: done in phase 3.)
 
 Decided while building: a paired machine accepts placements automatically
 (`accept_placements = "auto"`, or `"never"`). Pairing is already the owner's consent, and
 an "ask" prompt has nowhere to appear while `hive up` streams output.
 
-Phase 3: the declarative fleet file. Phase 4: the rung 0 chat, and the dashboard's agent and
-machine panels.
+Phase 3:
+
+- [x] `hive.fleet.toml` with `hive plan`, `hive apply [--prune]` and `hive agents export`.
+- [x] Placements carry the slot's model and permission mode, so the file (and
+  `hive agents edit`) can set them for agents on other computers.
+- [x] `hive init` offers the detected test command (from phase 2's list).
+- [ ] Launch-time bundles (from phase 2's list).
+
+Phase 4: the rung 0 chat, and the dashboard's agent and machine panels.

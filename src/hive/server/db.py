@@ -214,6 +214,9 @@ placements = Table(
     Column("agent", String(32), primary_key=True),
     Column("machine", String(32), nullable=False, index=True),
     Column("claimed", Float, nullable=False, default=0.0),  # when the machine took its token
+    # The slot's settings there ("" = the CLI's defaults), applied by that machine's daemon.
+    Column("model", String(64), nullable=False, default=""),
+    Column("permission_mode", String(32), nullable=False, default=""),
 )
 
 # Tables an archive flush empties. Their ids must keep counting up afterwards: daemons hold event

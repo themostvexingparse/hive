@@ -150,7 +150,10 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.put(f"{api}/agents/<name>/placement")
     @auth(admin=True)
     def place_agent(name):
-        return jsonify(hive.place_agent(me(), name, body().get("machine") or None))
+        b = body()
+        return jsonify(hive.place_agent(me(), name, b.get("machine") or None,
+                                        str(b.get("model") or ""),
+                                        str(b.get("permission_mode") or "")))
 
     # ---------------------------------------------------------------- machines
     @app.post(f"{api}/machines/invite")

@@ -53,7 +53,8 @@ def test_pairing_codes_tokens_and_placements(tmp_path):
     assert e.value.code == "no_such_machine"
     hv.place_agent(ADMIN_ACTOR, "dev", "desk-top")
     assert hv.machine_placements(desk) == [{"agent": "dev", "vendor": "claude",
-                                           "roles": ["programmer"], "claimed": False}]
+                                           "roles": ["programmer"], "claimed": False,
+                                           "model": "", "permission_mode": ""}]
     assert hv.machine_placements(other) == []
     with pytest.raises(ApiError) as e:
         hv.claim_agent(other, "dev")
@@ -206,6 +207,15 @@ def test_pair_a_computer_and_place_agents_on_it(two_computers, tmp_path, capsys)
     d.slots["claude-1"].running = True  # mid-turn: left alone
     d.sync_placements()
     assert sorted(d.slots) == ["claude-1"]
+
+    # Settings of an agent placed there are changed from the admin's computer.
+    d.slots["claude-1"].running = False
+    as_admin()
+    cli.main(["agents", "edit", "claude-1", "--model", "m9"])
+    as_worker()
+    res = d.sync_placements()
+    assert res.updated == ["claude-1"] and d.slots["claude-1"].cfg.model == "m9"
+    assert load_machine_config().slot("claude-1").model == "m9"
 
     # The paired computer's home screen knows what it is.
     capsys.readouterr()

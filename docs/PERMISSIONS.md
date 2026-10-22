@@ -157,7 +157,8 @@ else to approve them.
 - **Hive's own commands for you:** `hive decide`, `hive approve`, `hive reject`,
   `hive answer`, `hive admin`, `hive login`, `hive agents`, `hive config`, `hive server`,
   `hive start`, `hive say`, `hive pause`, `hive resume`, `hive reset`, `hive init`,
-  `hive join`, `hive up`, `hive chat`, `hive machines`, and `hive watch` (agents never read each other's live
+  `hive join`, `hive up`, `hive chat`, `hive machines`, `hive plan`, `hive apply`, and
+  `hive watch` (agents never read each other's live
   output). An agent must never answer your questions ([decisions](GLOSSARY.md#decision)),
   speak as you or reconfigure Hive, even on a computer where you're logged in as admin.
 - **Pushing to `main`,** including `git push --all` and `--mirror`, which push every branch.
