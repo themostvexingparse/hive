@@ -19,8 +19,6 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import tomli_w
-
 from .config import VENDORS
 
 FLEET_FILE = "hive.fleet.toml"
@@ -187,7 +185,10 @@ def export(roster: list[dict], local: dict) -> str:
         if mode:
             e["permission_mode"] = mode
         entries.append(e)
+    from .settings import show
     head = ("# The fleet, as `hive agents export` wrote it. `hive plan` shows what applying it\n"
             "# would change; `hive apply` does it. Leave `on` out for agents on the computer\n"
-            "# you apply from; \"elsewhere\" leaves where an agent runs alone.\n\n")
-    return head + tomli_w.dumps({"agents": entries})
+            "# you apply from; \"elsewhere\" leaves where an agent runs alone.\n")
+    blocks = ["[[agents]]\n" + "".join(f"{k} = {show(v)}\n" for k, v in e.items())
+              for e in entries]
+    return head + "".join("\n" + b for b in blocks)

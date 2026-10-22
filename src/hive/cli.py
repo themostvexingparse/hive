@@ -1288,6 +1288,8 @@ def cmd_agents_rm(a):
     from . import agents
     c = admin_client()
     here = _local_slots(c.base.removesuffix("/api/v1")).get(a.name)
+    placed_on = next((ag.get("machine") for ag in call(c.get, "/agents")
+                      if ag["name"] == a.name), None)
     if not a.yes:
         if not interactive():
             die(f"removing {a.name} can't be undone; add --yes to go ahead")
@@ -1308,6 +1310,8 @@ def cmd_agents_rm(a):
         ui.ok("Removed it from this computer" + ("." if gone else
               f"; its worktree {ui.path(here.worktree)} has uncommitted changes, so it was "
               "kept (delete it yourself when you no longer need them)."))
+    elif placed_on:
+        ui.note(f"{placed_on} takes it off by itself within a minute (while hive up runs there).")
     else:
         ui.note("If it was set up on another computer, run "
                 + ui.cmd(f"hive agents rm {a.name}") + " there too, to clean up its folder.")
@@ -2090,7 +2094,8 @@ def main(argv: list[str] | None = None) -> None:
                                              "agy: accept-edits|auto|plan")
     s.add_argument("--model", help="model for this slot's CLI (default: the "
                                    "account's default model)")
-    s.add_argument("--hive-cmd", default="hive")
+    s.add_argument("--hive-cmd", help="how the git hook calls hive (default: the one it "
+                                      "already uses, else the one hive init set)")
     s.add_argument("--replace", action="store_true",
                    help="move an existing slot of this name to another server or project")
     s.set_defaults(fn=cmd_join)

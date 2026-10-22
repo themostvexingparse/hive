@@ -54,7 +54,7 @@ def parse_roles(text: str | None) -> list[str]:
 
 def place(name: str, vendor: str, token: str, server: str, repo: Path | None,
           worktree: Path | None = None, config_dir: str | None = None,
-          permission_mode: str = "", model: str = "", hive_cmd: str | None = "hive",
+          permission_mode: str = "", model: str = "", hive_cmd: str | None = None,
           replace: bool = False, placed: bool = False) -> tuple[Slot, list[str]]:
     """Make the agent `name` a slot on this computer: its worktree (next to the clone, on
     branch hive/<name>), the git hook, its private CLI settings folder, and its entry in
@@ -87,8 +87,11 @@ def place(name: str, vendor: str, token: str, server: str, repo: Path | None,
             gitops.ensure_worktree(repo, worktree, f"hive/{name}", main)
         except gitops.GitError as e:
             raise SetupError(str(e)) from e
+        from .init import git_hook_path
+        had = "hook git-pre-commit" in (git_hook_path(repo).read_text("utf-8", "replace")
+                                        if git_hook_path(repo).exists() else "")
         hook = install_git_hook(repo, hive_cmd)
-        if hook:
+        if hook and not had:
             notes.append(f"Installed the git pre-commit hook at {ui.path(hook)}")
     config_dir = config_dir or (old.config_dir if old and old.config_dir else
                                 str(hive_home() / "accounts" / name))

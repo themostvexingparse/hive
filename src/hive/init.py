@@ -583,16 +583,20 @@ exec {hive_cmd} hook git-pre-commit
 """
 
 
-def install_git_hook(repo: Path, hive_cmd: str | None = None,
-                     quiet: bool = False) -> Path | None:
-    """Install (or refresh) the lease-checking pre-commit hook; never overwrites a foreign
-    hook. With no hive_cmd, the command of an existing Hive hook is kept."""
+def git_hook_path(repo: Path) -> Path:
     import subprocess
     common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=repo,
                             capture_output=True, text=True, check=True).stdout.strip()
-    hooks = (repo / common).resolve() / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
-    hook = hooks / "pre-commit"
+    return (repo / common).resolve() / "hooks" / "pre-commit"
+
+
+def install_git_hook(repo: Path, hive_cmd: str | None = None,
+                     quiet: bool = False) -> Path | None:
+    """Install (or refresh) the lease-checking pre-commit hook; never overwrites a foreign
+    hook. With no hive_cmd, the command of an existing Hive hook is kept, else the one the
+    repository's bundles call (`hive init --hive-cmd`)."""
+    hook = git_hook_path(repo)
+    hook.parent.mkdir(parents=True, exist_ok=True)
     existing = hook.read_text("utf-8", "replace") if hook.exists() else ""
     if existing and "hook git-pre-commit" not in existing:
         if not quiet:
@@ -602,7 +606,7 @@ def install_git_hook(repo: Path, hive_cmd: str | None = None,
         return None
     if hive_cmd is None:
         m = re.search(r"exec (.+) hook git-pre-commit", existing)
-        hive_cmd = m.group(1) if m else "hive"
+        hive_cmd = m.group(1) if m else bundle_hive_cmd(repo) or "hive"
     hook.write_text(GIT_HOOK.format(hive_cmd=hive_cmd), "utf-8")
     try:
         hook.chmod(0o755)

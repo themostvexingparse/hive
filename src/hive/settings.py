@@ -108,7 +108,9 @@ def _type_name(v) -> str:
 
 
 def show(value) -> str:
-    """A value as it is written in TOML."""
+    """A value as it is written in TOML, on one line (lists too: `["a", "b"]`)."""
+    if isinstance(value, list):
+        return "[" + ", ".join(show(v) for v in value) + "]"
     return tomli_w.dumps({"v": value})[4:].strip()
 
 
