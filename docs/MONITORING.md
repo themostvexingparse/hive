@@ -97,6 +97,24 @@ to steer the fleet from a phone.
 - **Clear:** the bin button empties the view without deleting the server's history.
 - **Limit:** up to 5,000 lines stay in the page.
 
+### Agents and computers
+
+**Manage** on the Agents panel (or **⋯ → *Agents & computers…***) does from the browser what
+`hive agents` and `hive machines` do ([Setting up machines](MACHINES.md)):
+- **Add agents:** a CLI, roles (without them, the fleet's first agent is its orchestrator,
+  later ones programmers), where they run, and how many. On a paired computer they are set
+  up there within a minute; for another computer, the dialog shows the `hive join` line to
+  run there, with a token shown only once. Agents for the computer you work on are added
+  there with `hive agents add`, since setting one up needs that computer's clone.
+- **Change an agent:** its roles, the paired computer it runs on, and (for agents on a paired
+  computer) its model. **Save** applies them; while the fleet is active, some role changes
+  become a decision to approve.
+- **Remove an agent**, after a confirmation.
+- **Pair a computer:** a one-time code and the line to run on it. **Unpair** cuts it off,
+  including its agents' tokens.
+
+Log each new agent's account in on its computer, once: `hive agents login NAME`.
+
 ### Archives
 
 **⋯ → *Archives…*** keeps a run's history without letting it pile up in the live view. A

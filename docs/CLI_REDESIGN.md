@@ -145,4 +145,9 @@ Phase 3:
   the fallback, and what older Hive versions read. Gemini extensions linked to the committed
   copy are relinked once. Agents' file edits in Hive's own folder are refused.
 
-Phase 4: the rung 0 chat, and the dashboard's agent and machine panels.
+Phase 4:
+
+- [x] The dashboard's *Agents & computers* dialog: add agents (on a paired computer, or with
+  a `hive join` line), change roles, placement and model, remove agents, pair and unpair
+  computers. (Its JavaScript is syntax-checked; it hasn't been clicked through in a browser.)
+- [ ] The rung 0 chat.
