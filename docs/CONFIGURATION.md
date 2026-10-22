@@ -10,9 +10,10 @@ PowerShell).
 
 | Where | What | Written by |
 |---|---|---|
-| [`hive.toml`](#hivetoml) | The project's settings for its fleet (its team of agents), committed to the repository. | `hive init`, then you |
-| [`~/.hive/machine.toml`](#hivemachinetoml) | One computer's agents (*slots*) and their tokens (passwords). Private. | `hive join` |
-| `~/.hive/admin.toml` | Your admin logins. Private. | `hive admin login` |
+| [`hive.toml`](#hivetoml) | The project's settings for its fleet (its team of agents), committed to the repository. | `hive init`, then you or `hive config set` |
+| `hive.local.toml` | This computer's overrides of `hive.toml` settings, next to it in your clone; git-ignored, never uploaded ([`hive config`](CLI.md#hive-config-read-and-change-settings)). | `hive config set --local`, or you |
+| [`~/.hive/machine.toml`](#hivemachinetoml) | One computer's agents (*slots*) and their tokens (passwords). Private. | `hive agents add`, `hive join` |
+| `~/.hive/admin.toml` | Your admin logins. Private. | `hive login`, `hive server` |
 | [Environment variables](#environment-variables) | Server settings and overrides. | you |
 
 ---
@@ -155,7 +156,9 @@ The default commands are listed in
 | Path | Contents |
 |---|---|
 | `machine.toml` | default server URL, local API port and secret, slots with their tokens and server URLs (keep private) |
-| `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive admin login`) |
+| `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive login`, or `hive server`) |
+| `server.toml` | the admin token `hive server` made up and uses when given none (keep private) |
+| `config-sync.json` | for each server, a fingerprint of the `hive.toml` last uploaded from here, so a changed one is uploaded automatically |
 | `state.db` | what the daemon remembers between runs: which fleet events each slot has seen, a copy of its messages, why it's waiting to be started, and its conversation ids |
 | `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login; for agy, its settings, Hive's plugin and its conversations (agy's login is in the computer's keyring) |
 | `logs/daemon.log` | daemon log |

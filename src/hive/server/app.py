@@ -134,6 +134,11 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def patch_agent(name):
         return jsonify(hive.set_roles(me(), name, list(body().get("roles", []))))
 
+    @app.delete(f"{api}/agents/<name>")
+    @auth(admin=True)
+    def remove_agent(name):
+        return jsonify(hive.remove_agent(me(), name))
+
     @app.get(f"{api}/agents/me")
     @auth()
     def whoami():

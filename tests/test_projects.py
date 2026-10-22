@@ -167,7 +167,7 @@ def test_cli_manages_and_targets_projects(tmp_path, monkeypatch, capsys):
         cli.main(["admin", "enroll", "dev", "--vendor", "claude", "--roles", "programmer",
                   "--project", "acme"])
         out = capsys.readouterr().out
-        assert f"--server {url}/p/acme " in out
+        assert any(line.rstrip().endswith(f"--server {url}/p/acme") for line in out.splitlines())
         acme_dev = next(w for w in out.split() if w.startswith("hv_"))
         cli.main(["--project", "acme", "status"])
         capsys.readouterr()

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -14,9 +16,10 @@ import tomllib
 from pathlib import Path
 
 from . import __version__, ui
-from .config import (VENDORS, AdminConfig, Slot, find_repo_root, hive_home, load_admin_config,
-                     load_machine_config, load_repo_config, machine_config_path, project_url,
-                     save_admin_config, save_machine_config, split_project_url)
+from .config import (LOCAL_TOML, VENDORS, AdminConfig, Slot, find_repo_root, hive_home,
+                     load_admin_config, load_machine_config, load_repo_config,
+                     local_config_path, machine_config_path, project_url, save_admin_config,
+                     save_machine_config, split_project_url)
 from .daemon.client import HiveError, ServerClient
 
 
@@ -28,18 +31,71 @@ def die(msg: str) -> None:
 PROJECT: str | None = None  # --project: the project admin commands act on
 
 
+def interactive() -> bool:
+    """Whether a person is at the keyboard (so Hive may ask instead of failing)."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def yes(question: str, default: bool = True) -> bool:
+    ans = ui.ask(f"{question} [{'Y/n' if default else 'y/N'}]", "y" if default else "n")
+    return default if not ans else ans.lower() in ("y", "yes")
+
+
 def admin_target() -> tuple[str, str]:
     url, token = load_admin_config().target(PROJECT)
     if not url:
-        die("not logged in as admin; run `hive admin login --server URL --token TOKEN`")
+        die("not logged in to a Hive server. Try Hive on this computer with `hive server` "
+            "(it logs you in), or log in to a team server with `hive login --server URL`")
     if not token:
-        die(f"no admin token for {url}; run "
-            f"`hive admin login --server {url} --token <its admin token>`")
+        die(f"no admin token for {url}; run `hive login --server {url}`")
     return url, token
 
 
-def admin_client() -> ServerClient:
-    return ServerClient(*admin_target())
+def admin_client(sync: bool = True) -> ServerClient:
+    c = ServerClient(*admin_target())
+    if sync:
+        sync_config(c)
+    return c
+
+
+def _sync_record() -> Path:
+    return hive_home() / "config-sync.json"
+
+
+def sync_config(c: ServerClient, strict: bool = False, quiet: bool = False) -> None:
+    """Upload this repository's hive.toml when it changed since this computer last uploaded
+    it to that server, so nobody has to remember `hive admin push-config`. Only from a main
+    clone: an agent's worktree may hold an older main. With strict, an upload error stops the
+    command; otherwise it is a warning."""
+    root = find_repo_root()
+    if not root or not (root / ".git").is_dir():
+        return
+    raw = (root / "hive.toml").read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        record = json.loads(_sync_record().read_text("utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    where = c.base.removesuffix("/api/v1")
+    if record.get(where) == digest and not strict:
+        return
+    try:
+        c.put("/config", tomllib.loads(raw.decode("utf-8")))
+    except (HiveError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        if strict:
+            fail(e) if isinstance(e, HiveError) else die(f"hive.toml: {e}")
+        if getattr(e, "code", "") == "unreachable":
+            return  # the command itself says so
+        ui.warn(f"hive.toml wasn't uploaded: {getattr(e, 'message', e)}")
+        return
+    if record.get(where) != digest and not quiet:
+        ui.info(f"Uploaded {ui.path('hive.toml')} to the server (it changed).")
+    record[where] = digest
+    _sync_record().parent.mkdir(parents=True, exist_ok=True)
+    _sync_record().write_text(json.dumps(record, indent=1), "utf-8")
 
 
 def owner_client() -> ServerClient:
@@ -47,11 +103,11 @@ def owner_client() -> ServerClient:
     cfg = load_admin_config()
     base = split_project_url(cfg.server_url)[0]
     if not base:
-        die("not logged in as admin; run `hive admin login --server URL --token TOKEN`")
+        die("not logged in to a Hive server; run `hive login --server URL`")
     token = os.environ.get("HIVE_ADMIN_TOKEN", "") or cfg.token_for(base)
     if not token:
         die(f"managing projects needs the server's own admin token; run "
-            f"`hive admin login --server {base} --token <HIVE_ADMIN_TOKEN>`")
+            f"`hive login --server {base}` with it")
     return ServerClient(base, token)
 
 
@@ -59,14 +115,21 @@ def call(fn, *a, **kw):
     try:
         return fn(*a, **kw)
     except HiveError as e:
-        detail = e.data.get("problems") or e.data.get("conflicts")
-        if isinstance(detail, list):
-            detail = "\n".join(f"  - {d if isinstance(d, str) else json.dumps(d)}"
-                               for d in detail)
-        elif detail:
-            detail = json.dumps(detail, indent=1)
-        die(f"{ui.paint(e.code, 'bold', stream=sys.stderr)}: {e.message}"
-            + (f"\n{ui.dim(detail, sys.stderr)}" if detail else ""))
+        fail(e)
+
+
+def fail(e: HiveError) -> None:
+    if e.code == "unreachable":
+        die(f"can't reach the Hive server ({e.message}). Is it running? On this computer: "
+            "`hive server`; `hive doctor` checks the setup")
+    detail = e.data.get("problems") or e.data.get("conflicts")
+    if isinstance(detail, list):
+        detail = "\n".join(f"  - {d if isinstance(d, str) else json.dumps(d)}"
+                           for d in detail)
+    elif detail:
+        detail = json.dumps(detail, indent=1)
+    die(f"{ui.paint(e.code, 'bold', stream=sys.stderr)}: {e.message}"
+        + (f"\n{ui.dim(detail, sys.stderr)}" if detail else ""))
 
 
 ago = ui.ago
@@ -74,14 +137,43 @@ ago = ui.ago
 
 # ---------------------------------------------------------------------- server & admin
 
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "::")
+
+
+def server_token_path() -> Path:
+    return hive_home() / "server.toml"
+
+
+def _server_token(given: str | None) -> tuple[str, str]:
+    """The admin token `hive server` runs with, and where it came from: --admin-token,
+    $HIVE_ADMIN_TOKEN, the one an earlier `hive server` saved, or a new one (then saved)."""
+    if given:
+        return given, "--admin-token"
+    if os.environ.get("HIVE_ADMIN_TOKEN"):
+        return os.environ["HIVE_ADMIN_TOKEN"], "HIVE_ADMIN_TOKEN"
+    path = server_token_path()
+    if path.exists():
+        with open(path, "rb") as f:
+            token = tomllib.load(f).get("admin_token", "")
+        if token:
+            return token, str(path)
+    import tomli_w
+    token = secrets.token_urlsafe(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomli_w.dumps({"admin_token": token}), "utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return token, "new"
+
+
 def cmd_server(a):
     os.environ.setdefault("HIVE_DATABASE_URL", a.db)
     if a.sqlite_journal:
         os.environ["HIVE_SQLITE_JOURNAL"] = a.sqlite_journal
-    if a.admin_token:
-        os.environ["HIVE_ADMIN_TOKEN"] = a.admin_token
-    if not os.environ.get("HIVE_ADMIN_TOKEN"):
-        die("set HIVE_ADMIN_TOKEN (or pass --admin-token)")
+    token, source = _server_token(a.admin_token)
+    os.environ["HIVE_ADMIN_TOKEN"] = token
     from werkzeug.serving import run_simple
     from .server.router import create_server
     server = create_server()
@@ -90,26 +182,54 @@ def cmd_server(a):
     ui.kv([("listening", ui.path(f"http://{a.host}:{a.port}")),
            ("dashboard", ui.path(f"http://{a.host}:{a.port}/")),
            ("database", os.environ["HIVE_DATABASE_URL"]),
-           ("projects", ", ".join(["default"] + projects))])
+           ("projects", ", ".join(["default"] + projects)),
+           ("admin token", "new, saved in " + ui.path(server_token_path()) if source == "new"
+            else ui.dim(f"from {source}"))])
+    if a.host in LOCAL_HOSTS:
+        # This computer's own admin commands then just work, with no `hive login`.
+        url = f"http://127.0.0.1:{a.port}"
+        if load_admin_config().token_for(url) != token:
+            save_login(url, token)
+            ui.ok(f"This computer is logged in to it as admin; in another terminal, run "
+                  f"{ui.cmd('hive')} to see what's next.")
     ui.out(ui.dim("  Ctrl+C to stop.") + "\n")
     run_simple(a.host, a.port, server, threaded=True)
 
 
-def cmd_admin_login(a):
-    url = a.server.rstrip("/")
-    if PROJECT:
-        url = project_url(url, PROJECT)
-    who = call(ServerClient(url, a.token).get, "/admin/check")
+def save_login(url: str, token: str) -> None:
     cfg = load_admin_config() if (hive_home() / "admin.toml").exists() else AdminConfig()
     if not split_project_url(url)[1] or not cfg.server_url:
         # A server's own URL (or a first login) becomes the default target.
         if cfg.server_url and cfg.server_url.rstrip("/") != url and cfg.token:
             cfg.servers[cfg.server_url.rstrip("/")] = cfg.token  # keep the previous login
-        cfg.server_url, cfg.token = url, a.token
+        cfg.server_url, cfg.token = url, token
         cfg.servers.pop(url, None)
     else:
-        cfg.servers[url] = a.token
+        cfg.servers[url] = token
     save_admin_config(cfg)
+
+
+def cmd_admin_login(a):
+    url = a.server
+    if not url:
+        root = find_repo_root()
+        url = (load_repo_config(root)["server"].get("url") if root else "") or \
+            load_admin_config().server_url or "http://127.0.0.1:8765"
+        if interactive():
+            url = ui.ask(f"Hive server [{url}]:", url) or url
+    url = url.rstrip("/")
+    if PROJECT:
+        url = project_url(url, PROJECT)
+    token = a.token
+    if not token:
+        if not interactive():
+            die("pass --token TOKEN (the server's admin token, or a project's)")
+        import getpass
+        token = getpass.getpass(ui.paint("? ", "bright_yellow", "bold")
+                                + ui.paint(f"Admin token for {url} (hidden):", "bold") + " ")
+        token = token.strip() or die("no token given")
+    who = call(ServerClient(url, token).get, "/admin/check")
+    save_login(url, token)
     project = who.get("project", "default")
     role = ("the server's admin (all projects)" if who.get("owner")
             else f"admin of project {project}")
@@ -129,10 +249,9 @@ def cmd_project_create(a):
     ui.section("Next")
     for i, t in enumerate([
             "In the project's repository: " + ui.cmd(f"hive init --server {url}"),
-            "Its admin logs in once: " + ui.cmd(f"hive admin login --server {url} --token "
-                                                "<admin token>"),
-            "Upload its config: " + ui.cmd("hive admin push-config") + ui.dim(
-                " (run inside the repository; it targets the project hive.toml names)")], 1):
+            "Its admin logs in once: " + ui.cmd(f"hive login --server {url}"),
+            "Then, inside the repository: " + ui.cmd("hive") + ui.dim(
+                " (it shows each next step; hive.toml names the project)")], 1):
         ui.out(f"  {ui.num(f'{i}.')} {t}")
 
 
@@ -167,21 +286,27 @@ def cmd_admin_enroll(a):
     ui.ok(f"Enrolled {ui.agent(r['name'])} ({a.vendor}; roles: {', '.join(roles)}).")
     ui.kv([("token", ui.paint(r["token"], "bold", "bright_yellow")),
            ("", ui.dim("shown only once; treat it like a password"))])
-    ui.section("On the agent's machine run")
-    ui.out("  " + ui.cmd(f"hive join {r['name']} --vendor {a.vendor} --token {r['token']} "
-                         f"--server {c.base.removesuffix('/api/v1')} --repo <path-to-clone>"))
+    ui.section("On the agent's machine, inside its clone of the repository, run")
+    ui.out("  " + ui.cmd(join_line(r["name"], r["token"], c)))
 
 
-def cmd_admin_roles(a):
-    c = admin_client()
-    roles = [r.strip() for r in a.roles.split(",") if r.strip()]
-    r = call(c.patch, f"/agents/{a.name}", {"roles": roles})
+def join_line(name: str, token: str, c: ServerClient) -> str:
+    return f"hive join {name} --token {token} --server {c.base.removesuffix('/api/v1')}"
+
+
+def set_roles(c: ServerClient, name: str, roles: list[str]) -> None:
+    r = call(c.patch, f"/agents/{name}", {"roles": roles})
     if r.get("status") == "proposed":
         did = r.get("decision_id")
         ui.warn(f"The fleet is active, so this became decision #{did}; approve it with "
-                + ui.cmd(f"hive decide {did} approve"), sys.stdout)
+                + ui.cmd(f"hive approve {did}"), sys.stdout)
     else:
-        ui.ok(f"{ui.agent(a.name)} now has roles: {', '.join(roles)}.")
+        ui.ok(f"{ui.agent(name)} now has roles: {', '.join(roles)}.")
+
+
+def cmd_admin_roles(a):
+    from .agents import parse_roles
+    set_roles(admin_client(), a.name, parse_roles(a.roles))
 
 
 def cmd_admin_backup(a):
@@ -211,7 +336,11 @@ def cmd_admin_push_config(a):
     root = find_repo_root() or die("no hive.toml found (run `hive init`)")
     with open(root / "hive.toml", "rb") as f:
         data = tomllib.load(f)
-    call(admin_client().put, "/config", data)
+    c = admin_client(sync=False)
+    if (root / ".git").is_dir():
+        sync_config(c, strict=True, quiet=True)  # also records it, so it isn't sent again
+    else:
+        call(c.put, "/config", data)
     ui.ok("Uploaded hive.toml to the server.")
 
 
@@ -230,7 +359,7 @@ def cmd_init(a):
     if PROJECT:
         server = project_url(server, PROJECT)
     try:
-        written, cleaned = init_repo(root, server, a.main, a.hive_cmd)
+        written, cleaned = init_repo(root, server, a.main or default_branch(root), a.hive_cmd)
     except PromptError as e:
         die(f"{e}. Nothing in .hive/agent/ was changed.")
     ui.section("Wired for Hive", ui.dim(str(root)))
@@ -242,10 +371,26 @@ def cmd_init(a):
     ui.info("The agent bundles in .hive/agent/ load only in sessions launched by `hive`.")
     _prompt_problems(root)
     ui.section("Next")
-    for i, t in enumerate(["Review " + ui.path("hive.toml") + " (roles, checks, permissions).",
-                           "Commit these files and push.",
-                           "Upload the config: " + ui.cmd("hive admin push-config")], 1):
+    for i, t in enumerate([
+            "Optional: run your tests before work reaches main, e.g. "
+            + ui.cmd('hive config set integration.checks "npm test"'),
+            "Commit these files and push: "
+            + ui.cmd('git add hive.toml .hive .gitignore && git commit -m "Set up Hive" '
+                     "&& git push"),
+            "Add agents: " + ui.cmd("hive agents add claude")
+            + ui.dim("  (the first one plans; run it again for one that codes)")], 1):
         ui.out(f"  {ui.num(f'{i}.')} {t}")
+
+
+def default_branch(root: Path) -> str:
+    """The branch finished work goes into: origin's default branch, else the current one."""
+    for cmd in (["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                ["git", "branch", "--show-current"]):
+        r = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+        name = r.stdout.strip().removeprefix("origin/")
+        if r.returncode == 0 and name:
+            return name
+    return "main"
 
 
 def _prompt_problems(root: Path) -> None:
@@ -324,92 +469,74 @@ def cmd_overview(a):
 
 
 def cmd_join(a):
-    from .daemon import gitops
-    from .init import install_git_hook
+    from . import agents
     cfg = load_machine_config()
     old = next((s for s in cfg.slots if s.name == a.name), None)
     # The server belongs to this slot alone: other slots on the machine may be in other
     # projects, or on other servers, and must keep theirs.
     server = (a.server or (cfg.url_for(old) if old else "") or cfg.server_url).rstrip("/")
-    if old and cfg.url_for(old).rstrip("/") != server and not a.replace:
-        # Agent names are unique per project, not per machine: this may be another project's
-        # agent of the same name, whose slot (worktree, account, session) must not be lost.
-        die(f"this machine already has a slot named {a.name!r}, for {cfg.url_for(old)}. Slot "
-            "names must be unique on a machine: enroll the agent under another name, or pass "
-            "--replace to move this slot to " + server)
     c = ServerClient(server, a.token)
     me = call(c.get, "/agents/me")
     if me["name"] != a.name:
         die(f"token belongs to {me['name']!r}, not {a.name!r}")
-    if a.vendor in ("codex", "agy") and a.permission_mode:
-        from .daemon.wake import AGY_MODES, CODEX_MODES
-        modes = CODEX_MODES if a.vendor == "codex" else AGY_MODES
-        if a.permission_mode not in modes:
-            die(f"{a.vendor} --permission-mode must be one of {', '.join(modes)}")
-    if a.worktree:
-        wt = Path(a.worktree).resolve()
-    elif a.repo:
-        repo = Path(a.repo).resolve()
-        wt = repo.parent / f"{repo.name}-{a.name}"
-    else:
-        die("pass --repo <clone> (a worktree is created next to it) or --worktree <path>")
-    if a.repo:
-        repo = Path(a.repo).resolve()
-        main = load_repo_config(repo)["repo"].get("main", "main")
-        try:
-            gitops.ensure_worktree(repo, wt, f"hive/{a.name}", main)
-        except gitops.GitError as e:
-            die(str(e))
-        hook = install_git_hook(repo, a.hive_cmd)
-        if hook:
-            ui.ok(f"Installed the git pre-commit hook at {ui.path(hook)}")
-    config_dir = a.config_dir or str(hive_home() / "accounts" / a.name)
-    Path(config_dir).mkdir(parents=True, exist_ok=True)
-    if old and cfg.url_for(old).rstrip("/") != server:
-        # Event cursors, message ids and sessions were the old server's; keeping them would
-        # skip or replay the new one's events.
-        from .daemon.store import Store
-        Store(hive_home() / "state.db").forget(a.name)
-        ui.info(f"Slot {ui.agent(a.name)} moved from {ui.path(cfg.url_for(old))} to "
-                f"{ui.path(server)}; its local state was reset.")
-    if not cfg.slots:
-        cfg.server_url = server  # the first slot's server is the default for later joins
-    cfg.slots = [s for s in cfg.slots if s.name != a.name] + [Slot(
-        name=a.name, vendor=a.vendor, token=a.token, worktree=str(wt), config_dir=config_dir,
-        permission_mode=a.permission_mode or "", model=a.model or "", server_url=server)]
-    save_machine_config(cfg)
-    ui.ok(f"Slot {ui.agent(a.name)} ready.")
-    ui.kv([("worktree", ui.path(wt)), ("account", ui.path(config_dir))]
+    # The server knows which CLI the agent runs; --vendor is only a check.
+    known = next((ag["vendor"] for ag in call(c.get, "/agents") if ag["name"] == a.name), "")
+    if a.vendor and known and a.vendor != known:
+        die(f"{a.name} runs {known} (set when it was created), not {a.vendor}")
+    vendor = a.vendor or known or die("pass --vendor (the server didn't say which CLI "
+                                      f"{a.name} runs)")
+    repo = Path(a.repo).resolve() if a.repo else None
+    if repo is None and not a.worktree:
+        repo = agents.clone_here() or die(
+            "run this inside your clone of the repository (the agent's worktree is created "
+            "next to it), or pass --repo <clone> or --worktree <path>")
+    try:
+        slot, notes = agents.place(
+            a.name, vendor, a.token, server, repo,
+            worktree=Path(a.worktree).resolve() if a.worktree else None,
+            config_dir=a.config_dir, permission_mode=a.permission_mode or "",
+            model=a.model or "", hive_cmd=a.hive_cmd, replace=a.replace)
+    except agents.SetupError as e:
+        die(str(e))
+    for n in notes:
+        ui.ok(n) if n.startswith("Installed") else ui.info(n)
+    ui.ok(f"Agent {ui.agent(a.name)} is set up on this computer.")
+    ui.kv([("worktree", ui.path(slot.worktree)), ("account", ui.path(slot.config_dir))]
           + ([("model", a.model)] if a.model else []))
-    if a.vendor == "agy":
-        # agy keeps its login in the OS keyring, not in its config folder.
-        others = [s.name for s in cfg.slots if s.vendor == "agy" and s.name != a.name]
-        ui.warn("agy keeps its Google login in this computer's keyring, so every agy slot on "
-                "it uses the same account and shares its usage limits"
-                + (f" (also {', '.join(others)})." if others else "."))
-        ui.section("Log agy in once on this computer, if you haven't (interactive)")
-        ui.out("  " + ui.cmd("agy"))
-    else:
-        var = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}.get(a.vendor,
-                                                                          "GEMINI_CLI_HOME")
-        ui.section("Log this slot's account in once (interactive)")
-        # Codex has a login command; `--device-auth` also works over SSH, without a browser.
-        ui.out(login_instructions(var, config_dir, str(wt),
-                                  "codex login" if a.vendor == "codex" else a.vendor))
-    ui.out(f"  {ui.dim('or, while `hive up` runs:')}  {ui.cmd(f'hive chat {a.name}')}")
-    ui.section("Then start the machine")
+    offer_login([slot])
+    ui.section("Then start this computer's agents")
     ui.out("  " + ui.cmd("hive up"))
 
 
-def login_instructions(var: str, config_dir: str, worktree: str, cli: str) -> str:
-    """Shell-appropriate commands to start a CLI with a private config folder."""
-    if os.name == "nt":
-        return (f"  {ui.dim('PowerShell')}  "
-                + ui.cmd(f"cd \"{worktree}\"; $env:{var} = \"{config_dir}\"; {cli}; "
-                         f"Remove-Item Env:{var}") + "\n"
-                f"  {ui.dim('cmd.exe   ')}  "
-                + ui.cmd(f"cd /d \"{worktree}\" && set \"{var}={config_dir}\" && {cli}"))
-    return "  " + ui.cmd(f"cd '{worktree}' && {var}='{config_dir}' {cli}")
+def offer_login(slots: list[Slot]) -> None:
+    """Log each new agent's account in now, if a person is here; else say how to later."""
+    from . import agents
+    cfg = load_machine_config()
+    for slot in slots:
+        if slot.vendor == "agy":
+            # agy keeps its login in the OS keyring, not in its config folder.
+            others = [s.name for s in cfg.slots if s.vendor == "agy" and s.name != slot.name]
+            ui.warn("agy keeps its Google login in this computer's keyring, so every agy agent "
+                    "on it uses the same account and shares its usage limits"
+                    + (f" (also {', '.join(others)})." if others else "."))
+            if others:
+                continue  # already logged in, once for the whole computer
+        who = "agy on this computer" if slot.vendor == "agy" else f"{slot.name}'s account"
+        if interactive() and yes(f"Log {who} in now?"):
+            ui.note(f"{slot.vendor} opens here: log in, then exit it "
+                    + ui.dim("(/exit, or Ctrl+C twice)") + ".")
+            try:
+                agents.run_login(slot)
+            except agents.SetupError as e:
+                ui.warn(str(e))
+                continue
+            if agents.is_logged_in(slot) is False:
+                ui.warn(f"{slot.name}'s account folder is still empty, so the login may not "
+                        "have finished; run " + ui.cmd(f"hive agents login {slot.name}"))
+            else:
+                ui.ok(f"{ui.agent(slot.name)} is ready.")
+        else:
+            ui.note(f"Log {who} in once: " + ui.cmd(f"hive agents login {slot.name}"))
 
 
 def run_interactive(slot: Slot, cfg, fresh: bool = False, initial: str | None = None,
@@ -635,15 +762,18 @@ def cmd_watch(a):
 # ---------------------------------------------------------------------- user operations
 
 def cmd_start(a):
-    c = admin_client()
+    c = admin_client(sync=False)
     root = find_repo_root()
-    if root:
+    if root and (root / ".git").is_dir():
+        sync_config(c, strict=True)
+    elif root:
         with open(root / "hive.toml", "rb") as f:
             call(c.put, "/config", tomllib.load(f))
     f = call(c.post, "/fleet/start", {"goal": a.goal})
     ui.ok(f"Fleet is {ui.state(f['state'])}; orchestrator {ui.agent(f['orchestrator'])} is "
           "planning.")
-    ui.note(f"You will be asked to approve the plan: {ui.cmd('hive decisions')}")
+    ui.note(f"When the plan is ready: {ui.cmd('hive decisions')} shows it, "
+            f"{ui.cmd('hive approve')} approves it.")
 
 
 def cmd_decisions(a):
@@ -665,17 +795,29 @@ def cmd_decisions(a):
         if d["answer"]:
             ui.out()
             ui.kv([("answer", ui.paint(d["answer"], "green", "bold")), ("note", d["note"])])
-        elif d["options"]:
+        elif d["state"] == "open":
+            # The ID is only needed when several decisions are open.
+            ref = f" {d['id']}" if sum(r["state"] == "open" for r in rows) > 1 else ""
             ui.out()
             ui.out("  " + ui.paint("Answer with", "gray", "underline"))
-            for o in d["options"]:
-                ui.out("    " + ui.cmd(f"hive decide {d['id']} {_quote(o)}"))
-        else:
-            ui.out()
-            ui.out("  " + ui.paint("Answer with", "gray", "underline") + "  "
-                   + ui.cmd(f"hive decide {d['id']} \"<your answer>\""))
+            for line in answer_commands(d, ref):
+                ui.out("    " + ui.cmd(line))
     if rows:
         ui.out()
+
+
+def answer_commands(d: dict, ref: str = "") -> list[str]:
+    opts = [o.lower() for o in d["options"] or []]
+    if not opts:
+        return [f'hive answer{ref} "<your answer>"']
+    out = []
+    if "approve" in opts:
+        out.append(f"hive approve{ref}")
+    if "reject" in opts:
+        out.append(f'hive reject{ref} "<what to change>"')
+    out += [f"hive answer{ref} {_quote(o)}" for o in d["options"]
+            if o.lower() not in ("approve", "reject")]
+    return out
 
 
 def _quote(arg: str) -> str:
@@ -683,9 +825,77 @@ def _quote(arg: str) -> str:
 
 
 def cmd_decide(a):
-    d = call(admin_client().post, f"/decisions/{a.id}/answer", {"answer": a.answer,
-                                                                "note": a.note or ""})
-    ui.ok(f"Decision #{d['id']} answered: {ui.paint(d['answer'], 'green', 'bold')}")
+    answer_decision(admin_client(), a.id, a.answer, a.note or "")
+
+
+def answer_decision(c: ServerClient, did: int, answer: str, note: str = "") -> None:
+    d = call(c.post, f"/decisions/{did}/answer", {"answer": answer, "note": note})
+    ui.ok(f"Decision #{d['id']} answered: {ui.paint(d['answer'], 'green', 'bold')}"
+          + (ui.dim(f"  ({note})") if note else ""))
+
+
+def pick_decision(c: ServerClient, words: list[str], verb: str) -> tuple[dict, list[str]]:
+    """The open decision a shortcut answers, and the words left for its note or answer. A
+    leading number names one; with a single open decision none is needed."""
+    rows = [d for d in call(c.get, "/decisions", state="open") if d["state"] == "open"]
+    if words and words[0].lstrip("#").isdigit():
+        did = int(words[0].lstrip("#"))
+        hit = next((d for d in rows if d["id"] == did), None)
+        if hit:
+            return hit, words[1:]
+        if verb != "answer" or len(words) > 1:
+            die(f"decision #{did} isn't waiting for an answer; "
+                + ui.cmd("hive decisions --all") + " lists them all")
+    if not rows:
+        die("no decision is waiting for you" + ("" if verb == "answer" else
+            f", so there is nothing to {verb}") + "; " + ui.cmd("hive status") + " shows "
+            "what the fleet is doing")
+    if len(rows) == 1:
+        return rows[0], words
+    listing = "\n".join(f"  #{d['id']}  {d['question'].splitlines()[0][:90]}" for d in rows)
+    if not interactive():
+        die(f"{len(rows)} decisions are open; say which: hive {verb} <number> …\n{listing}")
+    ui.out(listing)
+    ans = ui.ask("Which decision (number)?").lstrip("#")
+    d = next((d for d in rows if str(d["id"]) == ans), None)
+    return d or die(f"no open decision #{ans}"), words
+
+
+def cmd_approve(a):
+    c = admin_client()
+    d, rest = pick_decision(c, a.words, "approve")
+    opts = [o.lower() for o in d["options"] or []]
+    if opts and "approve" not in opts:
+        die(f"decision #{d['id']} isn't a yes/no question: {d['question'][:200]}\n"
+            "Answer it with: " + " · ".join(answer_commands(d, f" {d['id']}")))
+    answer_decision(c, d["id"], "approve", " ".join(rest))
+
+
+def cmd_reject(a):
+    c = admin_client()
+    d, rest = pick_decision(c, a.words, "reject")
+    opts = [o.lower() for o in d["options"] or []]
+    if opts and "reject" not in opts:
+        die(f"decision #{d['id']} can't be rejected: {d['question'][:200]}\n"
+            "Answer it with: " + " · ".join(answer_commands(d, f" {d['id']}")))
+    note = " ".join(rest)
+    if not note and interactive():
+        note = ui.ask("What should change? (Enter to skip)")
+    answer_decision(c, d["id"], "reject", note)
+
+
+def cmd_answer(a):
+    c = admin_client()
+    d, rest = pick_decision(c, a.words, "answer")
+    text = " ".join(rest).strip()
+    if not text:
+        if not interactive():
+            die('give the answer: hive answer "<your answer>"')
+        ui.out("  " + ui.bold(d["question"].replace("\n", "\n  ")))
+        if d["options"]:
+            ui.out(ui.dim("  options: " + ", ".join(d["options"])))
+        text = ui.ask("Your answer:") or die("no answer given")
+    answer_decision(c, d["id"], text, a.note or "")
 
 
 def cmd_say(a):
@@ -767,6 +977,489 @@ def cmd_fleet(action):
     return run
 
 
+# ---------------------------------------------------------------------- hive agents …
+
+def _known_roles(root: Path | None) -> set[str]:
+    from .roles import load_roles
+    try:
+        return set(load_roles(load_repo_config(root).get("roles")))
+    except ValueError:
+        from .roles import BUILTIN_ROLES
+        return set(BUILTIN_ROLES)
+
+
+def parse_add_words(words: list[str], roles_known: set[str]) -> tuple[int, str, list[str]]:
+    """`hive agents add [N] VENDOR [ROLES]` in any order: a number is the count, a vendor
+    name the CLI, anything else roles ("programmers" means programmer)."""
+    count, vendor, roles = 1, "", []
+    for w in words:
+        for part in [p for p in w.replace(",", " ").split() if p]:
+            low = part.lower()
+            if low.isdigit():
+                count = int(low)
+            elif low in VENDORS:
+                vendor = low
+            elif low in roles_known:
+                roles.append(low)
+            elif low.endswith("s") and low[:-1] in roles_known:
+                roles.append(low[:-1])
+            else:
+                die(f"{part!r} is neither a CLI ({', '.join(VENDORS)}) nor a role "
+                    f"({', '.join(sorted(roles_known))})")
+    if not 1 <= count <= 20:
+        die("add between 1 and 20 agents at a time")
+    return count, vendor, roles
+
+
+def cmd_agents_add(a):
+    from . import agents
+    root = find_repo_root()
+    count, vendor, roles = parse_add_words(a.words, _known_roles(root))
+    if not vendor:
+        installed = [v for v in VENDORS if shutil.which(v)]
+        if not interactive():
+            die("say which CLI the agent runs: hive agents add claude|codex|gemini|agy")
+        ui.out("  CLIs on this computer: " + (", ".join(installed) or ui.dim("none found")))
+        vendor = (ui.ask(f"Which CLI? [{installed[0] if installed else 'claude'}]")
+                  or (installed[0] if installed else "claude")).lower()
+        if vendor not in VENDORS:
+            die(f"{vendor!r} isn't one of {', '.join(VENDORS)}")
+    if a.name and count > 1:
+        die("--name names one agent; leave it out to add several (they're numbered)")
+    repo = None
+    if not a.elsewhere:
+        repo = agents.clone_here() or die(
+            "run this inside your clone of the repository, where the agents' worktrees are "
+            "created; or use --elsewhere for agents that run on another computer")
+        if not (repo / "hive.toml").exists():
+            die(f"{repo} isn't set up for Hive yet: run " + ui.cmd("hive init")
+                + ", then commit and push what it writes")
+        if not shutil.which(vendor):
+            ui.warn(f"{vendor} isn't installed on this computer (not on PATH); install it "
+                    "before the agent can run.")
+    c = admin_client()
+    server = c.base.removesuffix("/api/v1")
+    roster = call(c.get, "/agents")
+    taken = {ag["name"] for ag in roster} | {s.name for s in load_machine_config().slots}
+    names = [a.name] if a.name else agents.free_names(vendor, count, taken)
+    added: list[Slot] = []
+    for i, name in enumerate(names):
+        mine = roles or agents.default_roles(roster, i)
+        r = call(c.post, "/agents", {"name": name, "vendor": vendor, "roles": mine})
+        roster.append({"name": name, "vendor": vendor, "roles": mine})
+        what = f"{ui.agent(name)} ({vendor}, {', '.join(mine)})"
+        if a.elsewhere:
+            ui.ok(f"Created {what}. On the computer that will run it, inside its clone, run:")
+            ui.out("    " + ui.cmd(join_line(name, r["token"], c)))
+            ui.out(ui.dim("    The token in it is shown only once; it works like a password."))
+            continue
+        try:
+            slot, notes = agents.place(name, vendor, r["token"], server, repo,
+                                       permission_mode=a.permission_mode or "",
+                                       model=a.model or "")
+        except agents.SetupError as e:
+            call(c.delete, f"/agents/{name}")  # don't leave an agent nothing can run
+            die(f"couldn't set up {name} on this computer: {e}")
+        for n in notes:
+            ui.info(n)
+        ui.ok(f"Added {what} on this computer " + ui.dim(f"→ {slot.worktree}"))
+        added.append(slot)
+    if added and not a.no_login:
+        offer_login(added)
+    if added:
+        ui.note("Start them with " + ui.cmd("hive up") + ui.dim(" (if it's already running, "
+                                                               "restart it)"))
+
+
+def _local_slots(url: str) -> dict[str, Slot]:
+    cfg = load_machine_config()
+    return {s.name: s for s in cfg.slots if cfg.url_for(s).rstrip("/") == url.rstrip("/")}
+
+
+def cmd_agents_list(a):
+    from . import agents
+    c = admin_client()
+    url = c.base.removesuffix("/api/v1")
+    roster = call(c.get, "/agents")
+    here = _local_slots(url)
+    if not roster:
+        ui.info("No agents yet. Add the first one (it plans and you talk to it): "
+                + ui.cmd("hive agents add claude"))
+        return
+
+    def login(s: Slot | None) -> str:
+        if s is None:
+            return ""
+        state = agents.is_logged_in(s)
+        return ui.dim("keyring") if state is None else \
+            ui.state("ok", label="yes") if state else ui.state("failed", label="no")
+
+    ui.table(["name", "cli", "roles", "state", "where", "logged in"],
+             [[ui.agent(ag["name"]), ag["vendor"], ", ".join(ag["roles"]), _agent_state(ag),
+               "this computer" if ag["name"] in here else ui.dim("elsewhere"),
+               login(here.get(ag["name"]))] for ag in roster])
+    gone = sorted(set(here) - {ag["name"] for ag in roster})
+    for name in gone:
+        ui.warn(f"{name} is set up on this computer but no longer on the server; clean it up "
+                "with " + ui.cmd(f"hive agents rm {name}"))
+
+
+def _slot_here(name: str) -> Slot:
+    slot = next((s for s in load_machine_config().slots if s.name == name), None)
+    return slot or die(f"{name} isn't set up on this computer; run this on the computer "
+                       "that runs it (`hive agents list` shows where each agent is)")
+
+
+def cmd_agents_login(a):
+    from . import agents
+    slot = _slot_here(a.name)
+    ui.note(f"{slot.vendor} opens here: log in, then exit it "
+            + ui.dim("(/exit, or Ctrl+C twice)") + ".")
+    try:
+        code = agents.run_login(slot, device=a.device)
+    except agents.SetupError as e:
+        die(str(e))
+    if agents.is_logged_in(slot) is False:
+        die(f"{slot.name}'s account folder is still empty: the login didn't finish"
+            + (f" ({slot.vendor} exited with {code})" if code else ""))
+    ui.ok(f"{ui.agent(slot.name)}'s account is set up.")
+
+
+def cmd_agents_edit(a):
+    from .agents import parse_roles
+    if a.roles is None and a.model is None and a.permission_mode is None:
+        die("say what to change: --roles, --model or --permission-mode")
+    if a.roles is not None:
+        set_roles(admin_client(), a.name, parse_roles(a.roles))
+    if a.model is not None or a.permission_mode is not None:
+        _slot_here(a.name)
+        cfg = load_machine_config()
+        slot = cfg.slot(a.name)
+        if a.model is not None:
+            slot.model = "" if a.model == "default" else a.model
+        if a.permission_mode is not None:
+            slot.permission_mode = "" if a.permission_mode == "default" else a.permission_mode
+        save_machine_config(cfg)
+        ui.ok(f"{ui.agent(a.name)}: model {slot.model or 'default'}, permission mode "
+              f"{slot.permission_mode or 'default'} " + ui.dim("(from its next turn)"))
+
+
+def cmd_agents_rm(a):
+    from . import agents
+    c = admin_client()
+    here = _local_slots(c.base.removesuffix("/api/v1")).get(a.name)
+    if not a.yes:
+        if not interactive():
+            die(f"removing {a.name} can't be undone; add --yes to go ahead")
+        if not yes(f"Remove {a.name}? Its unfinished tasks go back on the board and its "
+                   "leases are released.", default=False):
+            die("nothing removed")
+    try:
+        r = c.delete(f"/agents/{a.name}")
+        ui.ok(f"Removed {ui.agent(a.name)} from the server."
+              + (ui.dim(f" Tasks back on the board: {', '.join(f'#{t}' for t in r['requeued'])}.")
+                 if r["requeued"] else ""))
+    except HiveError as e:
+        if e.code != "no_such_agent" or here is None:
+            fail(e)
+        ui.info(f"{a.name} wasn't on the server any more.")
+    if here:
+        _, gone = agents.unplace(a.name)
+        ui.ok("Removed it from this computer" + ("." if gone else
+              f"; its worktree {ui.path(here.worktree)} has uncommitted changes, so it was "
+              "kept (delete it yourself when you no longer need them)."))
+    else:
+        ui.note("If it was set up on another computer, run "
+                + ui.cmd(f"hive agents rm {a.name}") + " there too, to clean up its folder.")
+
+
+def cmd_agents_rotate(a):
+    c = admin_client()
+    r = call(c.post, f"/agents/{a.name}/token")
+    cfg = load_machine_config()
+    slot = next((s for s in cfg.slots if s.name == a.name and
+                 cfg.url_for(s).rstrip("/") == c.base.removesuffix("/api/v1")), None)
+    if slot:
+        slot.token = r["token"]
+        save_machine_config(cfg)
+        ui.ok(f"New token for {ui.agent(a.name)}, saved for its slot on this computer; the old "
+              "one no longer works. Restart " + ui.cmd("hive up") + " if it's running.")
+    else:
+        ui.ok(f"New token for {ui.agent(a.name)}; the old one no longer works. On the computer "
+              "that runs it, inside its clone, run:")
+        ui.out("    " + ui.cmd(join_line(a.name, r["token"], c)))
+
+
+# ---------------------------------------------------------------------- hive config …
+
+def _config_root() -> Path:
+    root = find_repo_root()
+    return root or die("no hive.toml here or above; run this inside a repository set up with "
+                       + ui.cmd("hive init"))
+
+
+def cmd_config_list(a):
+    from . import settings
+    root = find_repo_root()
+    rows = settings.effective(root)
+    if not a.all:
+        rows = [r for r in rows if r[2] != "default"]
+        if not rows:
+            ui.info("Everything is at its default. " + ui.cmd("hive config list --all")
+                    + " shows every setting.")
+            return
+    ui.table(["setting", "value", "from"],
+             [[k, settings.show(v), ui.dim(src) if src == "default" else src]
+              for k, v, src in rows])
+
+
+def cmd_config_get(a):
+    from . import settings
+    try:
+        e = settings.explain(find_repo_root(), a.key)
+    except settings.SettingError as err:
+        die(str(err))
+    if e["source"] is None:
+        die(f"{a.key} isn't set")
+    ui.out(settings.show(e["value"]))
+
+
+def cmd_config_explain(a):
+    from . import settings
+    root = find_repo_root()
+    try:
+        e = settings.explain(root, a.key)
+    except settings.SettingError as err:
+        die(str(err))
+    ui.section(a.key, ui.dim(f"from {e['source']}") if e["source"] else ui.dim("not set"))
+    ui.kv([("value", ui.bold(settings.show(e["value"])) if e["source"] else ui.dim("(none)"))]
+          + [(layer, settings.show(v) if v is not None else ui.dim("—"))
+             for layer, _, v in e["layers"]])
+    ui.out()
+    if e["source"] == LOCAL_TOML:
+        ui.note("Set in hive.local.toml: it applies on this computer only (its daemon and "
+                "agents); the server and other computers use hive.toml's value.")
+    else:
+        ui.note("hive.toml values apply to the whole fleet; " + ui.cmd(
+            f"hive config set {a.key} <value> --local") + " overrides one on this computer.")
+
+
+def _after_config_change(root: Path, key: str, local: bool) -> None:
+    if local:
+        return
+    if key.startswith("permissions."):
+        ui.note("Permission rules are also built into the agents' files: run "
+                + ui.cmd("hive init") + " to regenerate them.")
+    ui.note("Commit and push hive.toml so every agent's copy has it.")
+    if load_admin_config().server_url:
+        try:
+            c = admin_client(sync=False)
+        except SystemExit:
+            return
+        sync_config(c)
+
+
+def _validate_or_restore(root: Path, path: Path, before: str | None) -> None:
+    """The edited files must still make a valid configuration; otherwise undo the edit."""
+    from . import permissions
+    from .roles import load_roles
+    try:
+        cfg = load_repo_config(root)
+        load_roles(cfg.get("roles"))
+        permissions.build_rules(cfg)
+    except (ValueError, TypeError) as e:
+        if before is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(before, "utf-8")
+        die(f"not changed: {e}")
+
+
+def cmd_config_set(a):
+    from . import settings
+    root = _config_root()
+    path = local_config_path(root) if a.local else root / "hive.toml"
+    try:
+        value = settings.parse_value(" ".join(a.value), a.key)
+        before = path.read_text("utf-8") if path.exists() else None
+        settings.write(path, a.key, value)
+    except settings.SettingError as e:
+        die(str(e))
+    _validate_or_restore(root, path, before)
+    if a.local and settings.ensure_ignored(path.parent):
+        ui.info(f"Added {LOCAL_TOML} to .gitignore (it holds this computer's settings).")
+    ui.ok(f"{a.key} = {settings.show(value)} " + ui.dim(f"in {path.name}"))
+    _after_config_change(root, a.key, a.local)
+
+
+def cmd_config_unset(a):
+    from . import settings
+    root = _config_root()
+    path = local_config_path(root) if a.local else root / "hive.toml"
+    try:
+        before = path.read_text("utf-8") if path.exists() else None
+        removed = settings.unset(path, a.key)
+    except settings.SettingError as e:
+        die(str(e))
+    if not removed:
+        die(f"{a.key} isn't set in {path.name}")
+    _validate_or_restore(root, path, before)
+    now_ = settings.explain(root, a.key)
+    ui.ok(f"Removed {a.key} from {path.name}; it is now "
+          f"{settings.show(now_['value'])} " + ui.dim(f"(from {now_['source']})"))
+    _after_config_change(root, a.key, a.local)
+
+
+def cmd_config_edit(a):
+    root = _config_root()
+    path = local_config_path(root) if a.local else root / "hive.toml"
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or \
+        ("notepad" if os.name == "nt" else "vi")
+    before = path.read_text("utf-8") if path.exists() else None
+    subprocess.run([*editor.split(), str(path)])
+    if path.exists() and path.read_text("utf-8") != (before or ""):
+        _validate_or_restore(root, path, before)
+        ui.ok(f"Saved {path.name}.")
+        _after_config_change(root, "", a.local)
+
+
+# ---------------------------------------------------------------------- hive (no command)
+
+def cmd_home(a):
+    """Where things stand, and the one next step: the first rung of docs/CLI_REDESIGN.md."""
+    from . import agents
+    import requests
+    cfg = load_admin_config()
+    url, token = cfg.target(PROJECT)
+
+    def step(what: str, command: str, why: str = "") -> None:
+        ui.section("Next")
+        ui.out(f"  {what}")
+        ui.out(f"    {ui.cmd(command)}")
+        if why:
+            ui.out("  " + ui.dim(why))
+        ui.out()
+        ui.out(ui.dim("  hive help: the common commands · hive doctor: check everything"))
+
+    ui.banner(f"Hive {__version__}", "several coding agents, one coordinated team")
+    if not url or not token:
+        return step("Start a Hive server on this computer (in its own terminal):",
+                    "hive server", "It logs this computer in. For a team server someone "
+                    "else runs: hive login --server URL")
+    repo = agents.clone_here()
+    if repo is None:
+        return step("Go to your project: Hive works inside a clone of its git repository.",
+                    "cd path/to/your/repo && hive")
+    if not (repo / "hive.toml").exists():
+        return step(f"Set up {repo.name} for Hive:", "hive init",
+                    "It writes hive.toml and the files agents use; then commit and push them.")
+    c = ServerClient(url, token)
+    try:
+        sync_config(c)
+        roster = c.get("/agents")
+        fleet = c.get("/fleet")
+        open_ = [d for d in c.get("/decisions", state="open") if d["state"] == "open"]
+    except HiveError as e:
+        if e.code == "unreachable":
+            local = split_project_url(url)[0].split("//")[-1].split(":")[0] in LOCAL_HOSTS
+            return step(f"The server at {url} isn't answering.",
+                        "hive server" if local else "hive doctor",
+                        "Start it in its own terminal." if local else "")
+        fail(e)
+    ui.kv([("project", repo.name), ("server", ui.path(url)),
+           ("fleet", ui.state(fleet["state"])),
+           ("agents", ", ".join(f"{ag['name']} ({', '.join(ag['roles'])})" for ag in roster)
+            or ui.dim("none yet"))])
+    if not any("orchestrator" in ag["roles"] for ag in roster):
+        return step("Add the agent that plans the work (you'll chat with it):",
+                    "hive agents add claude", "Any CLI works: claude, codex, gemini or agy.")
+    from .roles import load_roles
+    try:
+        cat = load_roles(load_repo_config(repo).get("roles"))
+    except ValueError:
+        cat = {}
+    if not any(cat.get(r) and cat[r].can_code for ag in roster for r in ag["roles"]):
+        return step("Add an agent that writes code:", "hive agents add claude programmer",
+                    "Use another account than the orchestrator's. Add several at once: "
+                    "hive agents add 3 claude programmers")
+    mcfg = load_machine_config()
+    here = [s for s in mcfg.slots if mcfg.url_for(s).rstrip("/") == url.rstrip("/")]
+    for s in here:
+        if agents.is_logged_in(s) is False:
+            return step(f"Log {s.name}'s {s.vendor} account in once:",
+                        f"hive agents login {s.name}")
+    if here:
+        try:
+            requests.get(mcfg.local_url + "/slots", timeout=1,
+                         headers={"X-Hive-Local": mcfg.local_secret})
+        except requests.RequestException:
+            return step("Start this computer's agents (in its own terminal):", "hive up",
+                        "The orchestrator opens there for you to chat with.")
+    if open_:
+        d = open_[0]
+        ui.section(f"Waiting for you: decision #{d['id']}")
+        ui.out("  " + ui.bold(d["question"].splitlines()[0][:200]))
+        ref = f" {d['id']}" if len(open_) > 1 else ""
+        return step("Answer it:", "  ·  ".join(answer_commands(d, ref)),
+                    "hive decisions shows the whole question.")
+    if fleet["state"] == "setup":
+        return step("Give the team a goal:", 'hive start "Add CSV export to the reports page"')
+    step("The team is at work. Follow along:", "hive status",
+         "Or: hive watch (live output) · hive say \"…\" (message the orchestrator)")
+
+
+HELP = """\
+usage: hive [COMMAND] ...
+
+Several coding agents, one coordinated team. Run hive on its own to see what to do next.
+
+Set up:
+  hive server                    run a Hive server on this computer (logs you in)
+  hive login                     log in to a Hive server someone else runs
+  hive init                      set up this repository for Hive
+  hive agents add CLI [ROLES]    add agents on this computer, e.g. hive agents add 2 codex
+  hive up                        run this computer's agents
+
+Work with the team:
+  hive start "GOAL"              give the team a goal
+  hive status                    what is going on
+  hive decisions                 what the team is asking you
+  hive approve / hive reject     answer the plan or a yes/no question
+  hive answer "TEXT"             answer any other question
+  hive say "TEXT"                message the orchestrator
+  hive watch [AGENT]             follow live output
+  hive pause / hive resume       stop and restart all agents
+
+Manage:
+  hive agents                    list, add, login, edit, rm, rotate
+  hive config                    list, get, set, unset, explain, edit
+  hive join NAME --token T       set up an agent created on another computer
+  hive doctor                    check the whole setup and list fixes
+
+More:
+  hive help --all                every command, including hive admin ...
+  hive COMMAND --help            one command in detail
+"""
+
+
+class TopParser(ui.ArgumentParser):
+    """`hive --help` shows the everyday commands; `hive help --all` argparse's full list."""
+
+    full = False
+
+    def format_help(self) -> str:
+        if self.full:
+            return super().format_help()
+        return ui.colorize_help(HELP, sys.stdout)
+
+
+def cmd_help(a, parser: TopParser):
+    if a.topic:
+        parser.parse_args([*a.topic, "--help"])
+    parser.full = a.all
+    parser.print_help()
+
+
 # ---------------------------------------------------------------------- agent-side entry points
 
 def cmd_mcp(a):
@@ -792,7 +1485,8 @@ def main(argv: list[str] | None = None) -> None:
             args[i + 1] if arg == "--color" and i + 1 < len(args) else None
         if mode in ("auto", "always", "never"):
             ui.set_mode(mode)
-    p = ui.ArgumentParser(prog="hive", description="Multi-agent harness. See SPEC.md.")
+    p = TopParser(prog="hive", description="Several coding agents, one coordinated team. Run "
+                                           "`hive` alone to see what to do next.")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                    help="colour the output (default: auto = only on a terminal; also "
@@ -801,23 +1495,113 @@ def main(argv: list[str] | None = None) -> None:
                                      "server (default: the one this repository's hive.toml "
                                      "names, else the server's default project; also "
                                      "HIVE_PROJECT)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p.set_defaults(fn=cmd_home)
+    sub = p.add_subparsers(dest="cmd", parser_class=ui.ArgumentParser)  # not TopParser
 
-    s = sub.add_parser("server", help="run the hive server (development)")
+    s = sub.add_parser("help", help="the common commands (--all: every command)")
+    s.add_argument("--all", action="store_true", help="every command")
+    s.add_argument("topic", nargs="*", help="a command to explain, e.g. agents add")
+    s.set_defaults(fn=lambda a: cmd_help(a, p))
+
+    s = sub.add_parser("server", help="run a Hive server (for trials and local networks)")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--db", default="sqlite:///hive.db")
     s.add_argument("--sqlite-journal", choices=["wal", "delete", "truncate"],
                    help="SQLite journal mode (default: wal; delete on network filesystems)")
-    s.add_argument("--admin-token")
+    s.add_argument("--admin-token", help="default: $HIVE_ADMIN_TOKEN, else one made and saved "
+                                         "in ~/.hive/server.toml")
     s.set_defaults(fn=cmd_server)
 
-    adm = sub.add_parser("admin", help="user/admin operations").add_subparsers(dest="sub",
-                                                                               required=True)
-    s = adm.add_parser("login", help="save an admin token (the server's, or a project's)")
-    s.add_argument("--server", required=True, help="server URL, or a project's (…/p/NAME)")
-    s.add_argument("--token", required=True)
-    s.set_defaults(fn=cmd_admin_login)
+    def login_args(s):
+        s.add_argument("--server", help="server URL, or a project's (…/p/NAME); default: "
+                                        "hive.toml's, asked for in a terminal")
+        s.add_argument("--token", help="admin token (default: asked for, without echoing it)")
+        s.set_defaults(fn=cmd_admin_login)
+
+    login_args(sub.add_parser("login", help="log in to a Hive server as its admin"))
+
+    s = sub.add_parser("agents", help="list, add, log in, change or remove agents")
+    s.set_defaults(fn=cmd_agents_list)
+    ag = s.add_subparsers(dest="asub")
+    s = ag.add_parser("list", help="every agent: roles, state, where it runs, login")
+    s.set_defaults(fn=cmd_agents_list)
+    s = ag.add_parser("add", help="create agents and set them up on this computer",
+                      description="examples:\n"
+                                  "  hive agents add claude\n"
+                                  "  hive agents add 3 codex programmers\n"
+                                  "  hive agents add gemini reviewer --elsewhere\n\n"
+                                  "Without roles, the fleet's first agent is its orchestrator "
+                                  "and later ones are\nprogrammers.")
+    s.add_argument("words", nargs="*", metavar="[N] CLI [ROLES]",
+                   help=f"how many, which CLI ({', '.join(VENDORS)}) and roles, in any order")
+    s.add_argument("--name", help="name it (default: <cli>-<n>)")
+    s.add_argument("--elsewhere", action="store_true",
+                   help="it runs on another computer: print the line to run there")
+    s.add_argument("--model", help="the AI model its CLI uses (default: the account's)")
+    s.add_argument("--permission-mode", help="the CLI's own permission mode (see hive join)")
+    s.add_argument("--no-login", action="store_true", help="don't offer to log in now")
+    s.set_defaults(fn=cmd_agents_add)
+    s = ag.add_parser("login", help="log an agent's CLI account in (once per agent)")
+    s.add_argument("name")
+    s.add_argument("--device", action="store_true",
+                   help="codex: log in with a code on another device (over SSH)")
+    s.set_defaults(fn=cmd_agents_login)
+    s = ag.add_parser("edit", help="change an agent's roles, model or permission mode")
+    s.add_argument("name")
+    s.add_argument("--roles", help="replaces its roles, e.g. programmer,tester")
+    s.add_argument("--model", help="this computer's slot; `default` for the account's")
+    s.add_argument("--permission-mode", help="this computer's slot; `default` to reset")
+    s.set_defaults(fn=cmd_agents_edit)
+    s = ag.add_parser("rm", help="remove an agent (server, and this computer)")
+    s.add_argument("name")
+    s.add_argument("-y", "--yes", action="store_true", help="don't ask first")
+    s.set_defaults(fn=cmd_agents_rm)
+    s = ag.add_parser("rotate", help="give an agent a new token (the old one stops working)")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_agents_rotate)
+
+    s = sub.add_parser("config", help="read and change settings (hive.toml, hive.local.toml)")
+    s.set_defaults(fn=cmd_config_list, all=False)
+    cg = s.add_subparsers(dest="csub")
+    s = cg.add_parser("list", help="the settings in force, and where each comes from")
+    s.add_argument("--all", action="store_true", help="include those at their default")
+    s.set_defaults(fn=cmd_config_list)
+    s = cg.add_parser("get", help="print one setting's value")
+    s.add_argument("key", help="e.g. integration.review")
+    s.set_defaults(fn=cmd_config_get)
+    s = cg.add_parser("explain", help="a setting's value in every layer, and which wins")
+    s.add_argument("key")
+    s.set_defaults(fn=cmd_config_explain)
+    for verb, fn, text in (("set", cmd_config_set, "change a setting"),
+                           ("unset", cmd_config_unset, "go back to the value below it")):
+        s = cg.add_parser(verb, help=f"{text} (hive.toml; --local: this computer only)")
+        s.add_argument("key")
+        if verb == "set":
+            s.add_argument("value", nargs="+", help='TOML (true, 90, ["npm test"]) or text')
+        s.add_argument("--local", action="store_true",
+                       help=f"in {LOCAL_TOML}: this computer only, never uploaded")
+        s.set_defaults(fn=fn)
+    s = cg.add_parser("edit", help="open hive.toml (--local: hive.local.toml) in your editor")
+    s.add_argument("--local", action="store_true")
+    s.set_defaults(fn=cmd_config_edit)
+
+    s = sub.add_parser("approve", help="approve the plan (or the yes/no question) waiting")
+    s.add_argument("words", nargs="*", metavar="[ID] [NOTE]",
+                   help="the decision's number, only needed when several are open")
+    s.set_defaults(fn=cmd_approve)
+    s = sub.add_parser("reject", help="send the plan back, saying what to change")
+    s.add_argument("words", nargs="*", metavar="[ID] [NOTE]")
+    s.set_defaults(fn=cmd_reject)
+    s = sub.add_parser("answer", help="answer the question waiting")
+    s.add_argument("words", nargs="*", metavar="[ID] TEXT")
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_answer)
+
+    adm = sub.add_parser("admin", help="exact low-level commands (scripts, unusual setups)") \
+        .add_subparsers(dest="sub", required=True)
+    login_args(adm.add_parser("login", help="save an admin token (the server's, or a "
+                                            "project's)"))
     prj = adm.add_parser("project", help="manage the server's projects (server admin only)")         .add_subparsers(dest="psub", required=True)
     s = prj.add_parser("create", help="add a project and print its admin token")
     s.add_argument("slug", help="lowercase name, used in its URL: /p/<slug>")
@@ -855,18 +1639,21 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("-o", "--output", help="file to write (default hive-backup-<time>.db)")
     s.set_defaults(fn=cmd_admin_backup)
 
-    s = sub.add_parser("init", help="wire this repository for Hive")
+    s = sub.add_parser("init", help="set up this repository for Hive")
     s.add_argument("path", nargs="?", default=".")
     s.add_argument("--server")
-    s.add_argument("--main", default="main")
+    s.add_argument("--main", help="the branch finished work goes into (default: origin's "
+                                  "default branch, else the current one)")
     s.add_argument("--hive-cmd", default="hive")
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("overview", help="describe this project's Hive setup in detail")
-    s.add_argument("path", nargs="?", default=".", help="project folder (default: here)")
-    s.add_argument("--offline", action="store_true",
-                   help="don't contact the server or the local daemon")
-    s.set_defaults(fn=cmd_overview)
+    for name in ("doctor", "overview"):
+        s = sub.add_parser(name, help="check this project's whole Hive setup, with fixes"
+                           + ("" if name == "doctor" else " (same as hive doctor)"))
+        s.add_argument("path", nargs="?", default=".", help="project folder (default: here)")
+        s.add_argument("--offline", action="store_true",
+                       help="don't contact the server or the local daemon")
+        s.set_defaults(fn=cmd_overview)
 
     s = sub.add_parser("prompts", help="show what Hive tells agents with given roles")
     s.add_argument("--role", help="comma-separated roles (default: programmer)")
@@ -877,12 +1664,13 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--path", default=".", help="repository (default: current directory)")
     s.set_defaults(fn=cmd_prompts)
 
-    s = sub.add_parser("join", help="add an agent slot to this machine")
+    s = sub.add_parser("join", help="set up an agent created on another computer")
     s.add_argument("name")
     s.add_argument("--token", required=True)
-    s.add_argument("--vendor", choices=VENDORS, required=True)
+    s.add_argument("--vendor", choices=VENDORS, help="default: the one it was created with")
     s.add_argument("--server")
-    s.add_argument("--repo", help="local clone; the slot worktree is created next to it")
+    s.add_argument("--repo", help="local clone; the slot worktree is created next to it "
+                                  "(default: the clone you're in)")
     s.add_argument("--worktree", help="explicit worktree path")
     s.add_argument("--config-dir", help="CLI account config dir (default ~/.hive/accounts/NAME)")
     s.add_argument("--permission-mode", help="claude: acceptEdits|bypassPermissions|…; "

@@ -36,11 +36,52 @@ def find_repo_root(start: Path | None = None) -> Path | None:
     return None
 
 
+LOCAL_TOML = "hive.local.toml"  # this computer's overrides; git-ignored, never uploaded
+
+
+def main_clone(root: Path) -> Path:
+    """The main working folder of the repository `root` is a checkout of: `root` itself, or,
+    for a git worktree (an agent's slot), the clone it was made from. Read from the `.git`
+    file rather than by running git, since this runs on every config load."""
+    git = root / ".git"
+    if not git.is_file():
+        return root
+    try:
+        gitdir = Path(git.read_text("utf-8").split("gitdir:", 1)[1].strip())
+        if not gitdir.is_absolute():
+            gitdir = (root / gitdir).resolve()
+        common = (gitdir / "commondir").read_text("utf-8").strip()
+        common_dir = (gitdir / common).resolve()
+    except (OSError, IndexError):
+        return root
+    return common_dir.parent if common_dir.name == ".git" else root
+
+
+def local_config_path(root: Path) -> Path:
+    return main_clone(root) / LOCAL_TOML
+
+
+def _read_toml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def config_layers(root: Path | None) -> list[tuple[str, Path | None, dict]]:
+    """(layer name, file, its settings), lowest priority first: built-in defaults, hive.toml
+    (committed: the whole fleet), hive.local.toml (this computer only)."""
+    layers: list[tuple[str, Path | None, dict]] = [("default", None, DEFAULT_REPO_CONFIG)]
+    if root:
+        layers.append(("hive.toml", root / "hive.toml", _read_toml(root / "hive.toml")))
+        local = local_config_path(root)
+        layers.append((LOCAL_TOML, local, _read_toml(local)))
+    return layers
+
+
 def load_repo_config(root: Path | None) -> dict:
     cfg = {k: dict(v) for k, v in DEFAULT_REPO_CONFIG.items()}
-    if root and (root / "hive.toml").exists():
-        with open(root / "hive.toml", "rb") as f:
-            data = tomllib.load(f)
+    for _, _, data in config_layers(root)[1:]:
         for k, v in data.items():
             if isinstance(v, dict) and isinstance(cfg.get(k), dict):
                 cfg[k].update(v)

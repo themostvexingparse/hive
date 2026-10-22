@@ -222,7 +222,7 @@ def _machine(root: Path, offline: bool, problems: list) -> dict:
                                f"hive/{s.name}.")
         if not row["account_used"]:
             _problem(problems, f"Slot {s.name}'s account folder is empty: its CLI has probably "
-                               "never been logged in.", f"hive chat {s.name}")
+                               "never been logged in.", f"hive agents login {s.name}")
     urls = list(dict.fromkeys(r["server_url"].rstrip("/") for r in info["slots"]))
     if urls:
         info["server_url"] = urls[0]
@@ -265,7 +265,7 @@ def _server(root: Path, cfg: dict, machine: dict, roles: dict, offline: bool,
     if agents_url and admin_url and not _same(agents_url, admin_url):
         _problem(problems, f"This project's agents here use {agents_url}, but your admin "
                            f"commands use {admin_url}: they manage different fleets.",
-                 f"hive admin login --server {agents_url} --token <admin token>")
+                 f"hive login --server {agents_url}")
     if toml_url and url and not _same(toml_url, url):
         _problem(problems, f"hive.toml's [server] url ({toml_url}) is out of date; this project "
                            f"uses {url}. It tells people setting up new machines where the "
@@ -306,7 +306,7 @@ def _server(root: Path, cfg: dict, machine: dict, roles: dict, offline: bool,
     if info["fleet"].get("review") not in (None, local_review):
         _problem(problems, f"The server's review policy ({info['fleet']['review']}) differs "
                            f"from hive.toml ({local_review}): the uploaded config is stale.",
-                 "hive admin push-config")
+                 "hive status  (any admin command uploads a changed hive.toml)")
     enrolled = {a["name"] for a in info["agents"]}
     for s in machine["slots"]:
         if s["name"] not in enrolled:

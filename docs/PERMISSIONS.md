@@ -154,10 +154,12 @@ else to approve them.
 
 ## 3. Never: no approval possible
 
-- **Hive's own commands for you:** `hive decide`, `hive admin`, `hive start`, `hive say`,
-  `hive pause`, `hive resume`, `hive reset`, `hive init`, `hive join`, `hive up`. An agent
-  must never answer your questions ([decisions](GLOSSARY.md#decision)) or speak as you, even
-  on a computer where you're logged in as admin.
+- **Hive's own commands for you:** `hive decide`, `hive approve`, `hive reject`,
+  `hive answer`, `hive admin`, `hive login`, `hive agents`, `hive config`, `hive server`,
+  `hive start`, `hive say`, `hive pause`, `hive resume`, `hive reset`, `hive init`,
+  `hive join`, `hive up`, `hive chat`, and `hive watch` (agents never read each other's live
+  output). An agent must never answer your questions ([decisions](GLOSSARY.md#decision)),
+  speak as you or reconfigure Hive, even on a computer where you're logged in as admin.
 - **Pushing to `main`,** including `git push --all` and `--mirror`, which push every branch.
   Work reaches `main` only through `lease_release`.
 - Anything you add to `deny` ([below](#customising)).

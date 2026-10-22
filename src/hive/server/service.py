@@ -242,6 +242,37 @@ class Hive:
                       .values(token_hash=hash_token(token)))
         return {"name": name, "token": token}
 
+    def remove_agent(self, actor: Actor, name: str) -> dict:
+        """Delete an agent: its token stops working, its unfinished tasks go back on the board
+        and its leases are revoked. History (messages, reports, status) keeps its name."""
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._write() as c:
+            f = self._fleet(c)
+            self._agent(c, name)
+            if f["orchestrator"] == name and f["state"] != "setup":
+                raise ApiError(409, "is_orchestrator",
+                               f"{name} is the fleet's orchestrator; give another agent the "
+                               "orchestrator role first, or end the run (dashboard → Archives)")
+            requeued = [r.id for r in c.execute(select(tasks.c.id).where(and_(
+                tasks.c.assignee == name, tasks.c.state.in_(ACTIVE_TASK_STATES))))]
+            if requeued:
+                c.execute(update(tasks).where(tasks.c.id.in_(requeued))
+                          .values(assignee=None, state="open", updated=now()))
+            revoked = [r.id for r in c.execute(select(leases.c.id).where(and_(
+                leases.c.holder == name, leases.c.state == "active")))]
+            if revoked:
+                c.execute(update(leases).where(leases.c.id.in_(revoked)).values(state="revoked"))
+                self._set_fleet(c, fencing_counter=f["fencing_counter"] + 1)
+            c.execute(agents.delete().where(agents.c.name == name))
+            c.execute(receipts.delete().where(receipts.c.agent == name))
+            if f["orchestrator"] == name:
+                self._set_fleet(c, orchestrator=None)
+            self._emit(c, "agent.removed", actor.name, name=name, requeued=requeued,
+                       revoked=revoked)
+            self._schedule(c, self._fleet(c))
+        return {"name": name, "requeued": requeued, "revoked": revoked}
+
     def roster(self) -> list[dict]:
         with self._read() as c:
             rows = c.execute(select(agents).order_by(agents.c.name)).fetchall()

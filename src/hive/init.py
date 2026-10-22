@@ -116,7 +116,8 @@ say, then go back to `await_events`.
   `decision_request(kind="start_approval", question=..., context=<readable plan>)`.
   **No programmer may start before the user approves.**
 - **awaiting_approval**: Tell the user how to answer, for example by typing
-  `! hive decide <id> approve` in this session, or using the dashboard. You cannot answer
+  `! hive approve` (or `! hive reject "<what to change>"`) in this session, or using the
+  dashboard. You cannot answer
   decisions yourself. On reject, revise using the user's note and ask again.
 - **running**: Keep work flowing. Assign or reassign (`task_assign`), split or cancel tasks,
   answer agents' questions, and resolve lease conflicts (`lease_force_release` only for
@@ -564,8 +565,10 @@ def init_repo(root: Path, server: str, main: str = "main",
     written += prompts.write_starters(root, roles)
     gi = root / ".gitignore"
     lines = gi.read_text("utf-8").splitlines() if gi.exists() else []
-    if ".hive/orchestrator/" not in lines:
-        gi.write_text("\n".join(lines + [".hive/orchestrator/"]) + "\n", "utf-8")
+    # The orchestrator's private memory, and this computer's own settings (hive.local.toml).
+    missing = [p for p in (".hive/orchestrator/", "hive.local.toml") if p not in lines]
+    if missing:
+        gi.write_text("\n".join(lines + missing) + "\n", "utf-8")
         written.append(".gitignore")
     written += write_bundles(root, hive_cmd)
     return written, remove_legacy(root)
