@@ -38,6 +38,7 @@ TASK_SUMMARY_FIELDS = ("id", "state", "kind", "priority", "assignee", "title", "
 ROSTER_FIELDS = ("name", "vendor", "roles", "online", "busy", "has_task", "exhausted",
                  "attached")
 COALESCE_SECONDS = 3
+PLACEMENT_SECONDS = 30  # how often a paired machine asks which agents are placed on it
 MIN_GAP_SECONDS = 10
 MAX_WAKES_PER_HOUR = 20
 MAX_STOP_BLOCKS = 3
@@ -177,12 +178,14 @@ class Daemon:
         self.store = store or Store(hive_home() / "state.db")
         self.slots = {s.name: SlotRuntime(s, mcfg.url_for(s)) for s in mcfg.slots}
         StreamSink.name_width = max((len(n) for n in self.slots), default=0)
+        self.echo = echo
         for rt in self.slots.values():
             rt.sink = StreamSink(rt, echo)
         self.stop_event = threading.Event()
         self.logdir = hive_home() / "logs"
 
     def set_echo(self, echo: bool) -> None:
+        self.echo = echo
         for rt in self.slots.values():
             rt.sink.echo = echo
 
@@ -191,12 +194,55 @@ class Daemon:
     def start_background(self) -> None:
         for rt in self.slots.values():
             self.refresh(rt)
-            if not account_used(rt.cfg):
-                ui.warn(f"{rt.name}'s account folder is empty: its {rt.cfg.vendor} CLI has "
-                        f"probably never been logged in, and a headless turn can't log in. "
-                        f"Log it in with `hive chat {rt.name}` in another terminal.")
-        for target in (self.poll_loop, self.heartbeat_loop, self.wake_loop, self.stream_loop):
+            self.warn_if_logged_out(rt)
+        loops = [self.poll_loop, self.heartbeat_loop, self.wake_loop, self.stream_loop]
+        if self.mcfg.machines:
+            loops.append(self.placement_loop)
+        for target in loops:
             threading.Thread(target=target, daemon=True, name=target.__name__).start()
+
+    def warn_if_logged_out(self, rt: SlotRuntime) -> None:
+        if not account_used(rt.cfg):
+            ui.warn(f"{rt.name}'s account folder is empty: its {rt.cfg.vendor} CLI has "
+                    f"probably never been logged in, and a headless turn can't log in. "
+                    f"Log it in with `hive agents login {rt.name}` in another terminal.")
+
+    # ------------------------------------------------------------------ placed agents
+
+    def placement_loop(self) -> None:
+        """On a paired machine: set up agents the admin places here, and take off those
+        removed or placed elsewhere, while running (docs/CLI_REDESIGN.md, rung 3)."""
+        while not self.stop_event.wait(PLACEMENT_SECONDS):
+            try:
+                self.sync_placements()
+            except Exception:
+                log.exception("placement sync failed")
+
+    def sync_placements(self):
+        from .. import machines
+        res = machines.sync(busy=lambda n: n in self.slots and (
+            self.slots[n].running or self.slots[n].attached))
+        for slot in res.added:
+            self.add_slot(slot)
+        for name in res.removed:
+            self.slots.pop(name, None)
+        for line in machines.describe(res):
+            log.info(line)
+        for err in res.errors:
+            log.warning("placement: %s", err)
+        return res
+
+    def add_slot(self, slot: Slot) -> SlotRuntime:
+        """Start running a slot set up while the daemon runs (or re-claimed with a new
+        token, which replaces the old runtime's)."""
+        old = self.slots.get(slot.name)
+        rt = SlotRuntime(slot, self.mcfg.url_for(slot))
+        rt.sink = StreamSink(rt, old.sink.echo if old else self.echo)
+        self.refresh(rt)
+        self.slots[slot.name] = rt
+        StreamSink.name_width = max((len(n) for n in self.slots), default=0)
+        self.warn_if_logged_out(rt)
+        return rt
 
     def stream_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -609,8 +655,8 @@ class Daemon:
         self.store.add_trigger(rt.name, "login.retry", True,
                                "Retrying now that your account is logged in.")
         msg = (f"{rt.name}'s {rt.cfg.vendor} account isn't logged in on this computer, so it "
-               f"can't work. Log it in with `hive chat {rt.name}` in another terminal there; "
-               "Hive retries when that session ends (or when `hive up` is restarted).")
+               f"can't work. Log it in with `hive agents login {rt.name}` in another terminal "
+               "there; Hive retries when that login ends (or when `hive up` is restarted).")
         rt.sink.write([f"× {msg}"])
         log.warning("[%s] %s", rt.name, msg)
         if first:

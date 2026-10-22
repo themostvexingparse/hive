@@ -157,7 +157,7 @@ else to approve them.
 - **Hive's own commands for you:** `hive decide`, `hive approve`, `hive reject`,
   `hive answer`, `hive admin`, `hive login`, `hive agents`, `hive config`, `hive server`,
   `hive start`, `hive say`, `hive pause`, `hive resume`, `hive reset`, `hive init`,
-  `hive join`, `hive up`, `hive chat`, and `hive watch` (agents never read each other's live
+  `hive join`, `hive up`, `hive chat`, `hive machines`, and `hive watch` (agents never read each other's live
   output). An agent must never answer your questions ([decisions](GLOSSARY.md#decision)),
   speak as you or reconfigure Hive, even on a computer where you're logged in as admin.
 - **Pushing to `main`,** including `git push --all` and `--mirror`, which push every branch.
@@ -204,7 +204,7 @@ in bash, PowerShell and cmd.exe alike:
   no network access. Commands in the *allowed* tier run outside the sandbox, as with the other
   CLIs. If an agent's work needs more, set its mode with
   `hive join … --permission-mode danger-full-access` (or `yolo`)
-  ([Setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
+  ([Setting up machines](MACHINES.md#on-another-computer-without-pairing)).
 - Codex hooks can't ask a person for confirmation, so when the orchestrator runs on Codex, a
   dangerous command in the *approval* tier is refused with a note to ask you to run it
   yourself. The confirmation prompts in the `.rules` file only apply when the Hive daemon

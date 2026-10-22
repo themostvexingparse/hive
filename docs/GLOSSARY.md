@@ -167,12 +167,12 @@ talk to the server as that agent, and can do only what the agent's [roles](#role
 ### Enroll
 
 Creating an agent on the server: `hive admin enroll NAME --vendor … --roles …`. Prints its
-[agent token](#agent-token). ➜ [Enrolling agents](MACHINES.md#enroll-each-agent-on-your-computer)
+[agent token](#agent-token). ➜ [Enrolling agents](MACHINES.md#on-this-computer)
 
 ### Join
 
 Adding an enrolled agent to a machine as a [slot](#slot): `hive join NAME --token …`.
-➜ [Joining a slot](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)
+➜ [Joining a slot](MACHINES.md#on-another-computer-without-pairing)
 
 ### Project
 

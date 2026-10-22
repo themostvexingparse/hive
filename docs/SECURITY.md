@@ -25,13 +25,18 @@ The short version:
 |---|---|---|
 | **Server admin token** (`HIVE_ADMIN_TOKEN`) | Everything, in every project: answer decisions, start/pause/reset the fleet, read agents' live output, create agents, manage projects. | an environment variable on the server; `~/.hive/admin.toml` on each computer where you ran `hive admin login` |
 | **Project admin token** (when one server hosts [several projects](PROJECTS.md)) | The same, within one project only. Can't create or change projects. | on the server, only as a hash (a one-way fingerprint from which the token can't be recovered) |
-| **Agent token** (printed when you create an agent with `hive admin enroll`) | Act as one agent, within its [roles](ROLES.md). | a hash on the server; `~/.hive/machine.toml` on the computer that runs the agent |
+| **Agent token** (never shown for agents set up on your computer or on a paired one; printed once by `hive agents add --elsewhere` and `hive admin enroll`) | Act as one agent, within its [roles](ROLES.md). | a hash on the server; `~/.hive/machine.toml` on the computer that runs the agent |
+| **Pairing code** (`hive machines invite`) | Pair one computer with the project, once, within 15 minutes. | a hash on the server, deleted when used |
+| **Machine token** (`hm_…`, made when a computer pairs) | List the agents placed on that computer and claim them, which gives it a new token for each. Refused by every other endpoint: it can't act as an agent or as you. Placing agents is the admin's. | a hash on the server; `~/.hive/machine.toml` on that computer |
 | **Local secret** | Talk to the [daemon](GLOSSARY.md#daemon) (the background program `hive up` runs) through its local API, a small web service reachable only from the same computer (`127.0.0.1`). | `~/.hive/machine.toml` |
 | **GitHub token** (optional) | Move `main` on GitHub ([GitHub mode](INTEGRATION.md#github-mode-optional)). | the server's environment only |
 
 - Keep the server's admin token off agent machines unless you also work there.
-- Agent tokens are shown once, when you create the agent, and can be replaced by new ones
-  (*rotated*) if lost or leaked ([CLI.md §13](CLI.md#13-common-recipes)).
+- Agent tokens are shown once, if at all, and can be replaced by new ones (*rotated*, with
+  `hive agents rotate`) if lost or leaked ([CLI.md §13](CLI.md#13-common-recipes)).
+- Share a pairing code like a password. Unpair a computer you no longer trust with
+  `hive machines rm NAME`: its token stops working, and so do the tokens of the agents placed
+  on it. The agents stay on the server; placing them elsewhere gives them new tokens.
 - The local API accepts connections only from the same computer, and needs that computer's
   secret.
 

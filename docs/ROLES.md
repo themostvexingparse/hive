@@ -9,7 +9,7 @@ role says what an agent is allowed to do and what it is expected to do:
 - in which [fleet states](LIFECYCLE.md) (phases such as `planning` or `running`) it may work.
 
 You give each agent its roles when you create it with `hive admin enroll`
-([Enrolling agents](MACHINES.md#enroll-each-agent-on-your-computer)). The Hive server uses
+([Enrolling agents](MACHINES.md#on-this-computer)). The Hive server uses
 roles to assign tasks and to refuse anything an agent's roles don't allow.
 
 Hive comes with five built-in roles. You can change them, or add your own, in `hive.toml`,

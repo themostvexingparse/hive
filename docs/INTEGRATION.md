@@ -55,7 +55,7 @@ the optional GitHub mode, and reviews.
 
 - Every agent works in its own worktree on a branch named after it, `hive/<agent name>`
   (e.g. `hive/claude-2`), created by `hive join`
-  ([Enrolling agents and setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
+  ([Enrolling agents and setting up machines](MACHINES.md#on-another-computer-without-pairing)).
 - Agents never commit to or push `main`. Only the release steps below move it.
 - `.hive/orchestrator/`, where the orchestrator keeps its private notes, is never committed
   (it's listed in `.gitignore`).

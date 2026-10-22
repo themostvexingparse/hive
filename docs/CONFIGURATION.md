@@ -77,18 +77,26 @@ task_kinds = ["docs"]
 
 ## `~/.hive/machine.toml`
 
-One per computer that runs agents, private, written by `hive join`. You rarely edit it by
-hand. Each `[[slots]]` block describes one agent on this computer: its name, CLI (`vendor`),
-token, working folder (`worktree`), private CLI settings folder (`config_dir`), and the
-options given to `hive join` ([Setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
-`local_port` and `local_secret` are for the [daemon](GLOSSARY.md#daemon)'s local API, a small
-web service reachable only from this computer, which agents' tools use.
+One per computer that runs agents, private, written by `hive agents add`, `hive join` and,
+on a paired computer, its daemon. You rarely edit it by hand. Each `[[slots]]` block
+describes one agent on this computer: its name, CLI (`vendor`), token, working folder
+(`worktree`), private CLI settings folder (`config_dir`), and its options
+([Setting up machines](MACHINES.md)). `local_port` and `local_secret` are for the
+[daemon](GLOSSARY.md#daemon)'s local API, a small web service reachable only from this
+computer, which agents' tools use. `[machines]` holds this computer's pairings
+([Pair it once](MACHINES.md#on-another-computer-pair-it-once)).
 
 ```toml
 server_url = "https://USER.pythonanywhere.com"   # default for slots that name none
 local_port = 8766            # daemon's local API (127.0.0.1 only)
 local_secret = "…"           # generated; protects the local API
 poll_interval = 3.0          # seconds between server polls
+accept_placements = "auto"   # auto: set up agents a paired server places here | never
+
+[machines."https://USER.pythonanywhere.com/p/acme"]   # set by `hive join CODE`
+name = "desk"                # this computer's name in that project
+token = "hm_…"               # its machine token: only lists and claims placed agents
+repo = "/path/to/proj"       # the clone placed agents' worktrees go next to
 
 [[slots]]
 name = "claude-2"
@@ -100,6 +108,7 @@ permission_mode = ""         # empty = default (claude: acceptEdits, gemini: aut
                              # codex: workspace-write, agy: accept-edits)
 model = ""                   # empty = the account's default model
 server_url = "https://USER.pythonanywhere.com/p/acme"   # this slot's server or project
+placed = false               # true: set up because the server placed it on this computer
 command = []                 # optional custom headless command, see below
 ```
 

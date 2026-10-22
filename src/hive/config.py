@@ -103,6 +103,7 @@ class Slot:
     permission_mode: str = ""
     model: str = ""  # passed to the CLI's model flag; empty = the account's default
     server_url: str = ""  # this slot's Hive server (project); empty = the machine's server_url
+    placed: bool = False  # set up because the server placed the agent on this paired machine
     command: list[str] = field(default_factory=list)  # optional override template
     session_id: str = ""
     session_started: bool = False
@@ -115,6 +116,10 @@ class MachineConfig:
     local_port: int = 8766
     local_secret: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     poll_interval: float = 3.0
+    # Servers (projects) this computer is paired with: url -> {"name", "token", "repo"}, where
+    # repo is the clone that placed agents' worktrees are made next to.
+    machines: dict[str, dict] = field(default_factory=dict)
+    accept_placements: str = "auto"  # auto: set up agents the server places here | never
     slots: list[Slot] = field(default_factory=list)
 
     @property
@@ -126,8 +131,9 @@ class MachineConfig:
         return slot.server_url or self.server_url
 
     def server_urls(self) -> list[str]:
-        """Every server this machine's slots talk to, in slot order."""
-        return list(dict.fromkeys(self.url_for(s) for s in self.slots)) or [self.server_url]
+        """Every server this machine's slots talk to (or it is paired with), in slot order."""
+        urls = [self.url_for(s) for s in self.slots] + list(self.machines)
+        return list(dict.fromkeys(urls)) or [self.server_url]
 
     def slot(self, name: str) -> Slot:
         for s in self.slots:

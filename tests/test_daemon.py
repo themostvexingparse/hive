@@ -295,7 +295,7 @@ def test_a_slot_that_is_not_logged_in_pauses_until_hive_chat_logs_it_in(tmp_path
     assert not core.account_used(slot)  # an empty account folder: never logged in
     rt.me = {"roles": ["programmer"], "active": True}
     d.need_login(rt)  # the server is unreachable: telling the user there is best effort
-    assert any("hive chat w1" in line for line in rt.sink.buf)
+    assert any("hive agents login w1" in line for line in rt.sink.buf)
     assert d.store.pending_triggers("w1")  # a retry is waiting...
     d.maybe_wake(rt)
     assert not rt.running  # ...but no headless turn starts while it can't log in

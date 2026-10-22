@@ -78,10 +78,11 @@ and presets (`preset = "solo" | "team" | "strict"`).
 
 ## Rung 3 and later
 
-- **Machines joined with a code.** `hive machines invite` prints a short single-use code;
-  `hive join CODE` on the other computer clones or finds the repository and sets up whatever
-  agents are placed on it. The server gains `machines` and `pairing_codes`; daemons reconcile
-  the agents placed on them. Reusable join keys for automation.
+- **Machines joined with a code** (built, see [MACHINES.md](MACHINES.md)).
+  `hive machines invite` prints a short single-use code; `hive join CODE` inside the other
+  computer's clone pairs it, and its daemon sets up whatever agents are placed on it. The
+  server has `machines`, `pairing_codes` and `placements`. Still to come: reusable join keys
+  for automation, and cloning the repository when the computer has no clone yet.
 - **A declarative fleet.** `[[agents]]` blocks (`vendor`, `roles`, `count`, `on`, `model`,
   `permission_mode`) with `hive plan` (shows the difference) and `hive apply`;
   `hive agents export` writes the current fleet out. The server stays the source of truth;
@@ -114,6 +115,22 @@ Phase 1, on this branch:
   precise forms (`hive admin enroll`, `hive join --vendor …`, `hive admin login`). They
   still work, but should lead with the new commands.
 
-Phase 2: machines joined by code and placement on remote machines; launch-time bundles;
-`hive init` asking for the test command. Phase 3: the declarative fleet file. Phase 4: the
-rung 0 chat, and the dashboard's agent and machine panels.
+Phase 2:
+
+- [x] Machines paired with a one-time code (`hive machines invite`, `hive join CODE`);
+  `hive machines` and `hive machines rm`.
+- [x] Agents placed on paired machines (`hive agents add … --on M`,
+  `hive agents edit … --on M|none`); the machine's daemon claims them (a fresh token from
+  the server), sets them up and takes them off again, while it runs.
+- [x] Machine tokens reach only `/machines/me/*`; unpairing cuts off the machine's agents too.
+- [x] Docs: MACHINES rewritten around the three ways to add agents; CLI, CONFIGURATION,
+  SECURITY and PERMISSIONS updated.
+- [ ] Reusable join keys for automation (a code that pairs many machines).
+- [ ] Launch-time bundles; `hive init` asking for the test command.
+
+Decided while building: a paired machine accepts placements automatically
+(`accept_placements = "auto"`, or `"never"`). Pairing is already the owner's consent, and
+an "ask" prompt has nowhere to appear while `hive up` streams output.
+
+Phase 3: the declarative fleet file. Phase 4: the rung 0 chat, and the dashboard's agent and
+machine panels.

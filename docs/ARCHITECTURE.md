@@ -123,7 +123,7 @@ The daemon talks to the server for every [slot](#key-terms) on that machine. It:
 Agents are the vendors' own CLIs: **Claude Code** (`claude`), **Codex** (`codex`),
 **Antigravity CLI** (`agy`) and **Gemini CLI** (`gemini`). Each one is logged in to its own
 account, except that agy keeps one login per computer
-([Accounts](MACHINES.md#log-each-slots-account-in-once)). Google has replaced Gemini CLI with
+([Accounts](MACHINES.md#log-each-agents-account-in-once)). Google has replaced Gemini CLI with
 agy for personal accounts ([Known limitations](LIMITATIONS.md#gemini-cli-and-antigravity-cli)).
 When `hive` launches one, it attaches Hive **for that session only**:
 - the `hive` **MCP server**, which gives the agent its tools (messages, tasks, leases, …).

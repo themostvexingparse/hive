@@ -191,6 +191,31 @@ integrations = Table(
     Column("created", Float, nullable=False),
 )
 
+# Computers paired with a short code (`hive machines invite`, then `hive join CODE` there), and
+# which agent each one runs. A machine's token only reaches the /machines/me endpoints.
+machines = Table(
+    "machines", metadata,
+    Column("name", String(32), primary_key=True),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("os", String(32), nullable=False, default=""),
+    Column("clis", JSON, nullable=False),  # agent CLIs installed there
+    Column("created", Float, nullable=False),
+    Column("last_seen", Float, nullable=False, default=0.0),
+)
+
+pairing_codes = Table(
+    "pairing_codes", metadata,
+    Column("code_hash", String(64), primary_key=True),
+    Column("expires", Float, nullable=False),
+)
+
+placements = Table(
+    "placements", metadata,
+    Column("agent", String(32), primary_key=True),
+    Column("machine", String(32), nullable=False, index=True),
+    Column("claimed", Float, nullable=False, default=0.0),  # when the machine took its token
+)
+
 # Tables an archive flush empties. Their ids must keep counting up afterwards: daemons hold event
 # cursors and cache message/approval ids, and agents remember task numbers. Postgres and MySQL
 # sequences never go back; SQLite reuses max(id)+1 unless the table is AUTOINCREMENT.

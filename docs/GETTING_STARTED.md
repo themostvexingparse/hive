@@ -27,7 +27,7 @@ computers. Nothing about the first setup changes.
   one for the programmer. Codex (`codex`), Antigravity CLI (`agy`) or Gemini CLI (`gemini`)
   work the same way: write `codex`, `agy` or `gemini` instead of `claude` below. (agy has
   one login per computer, so two agy agents on one computer share an account:
-  [Accounts](MACHINES.md#log-each-slots-account-in-once).)
+  [Accounts](MACHINES.md#log-each-agents-account-in-once).)
 
 **In the examples,** `~/code/myapp` is the folder where you cloned your repository; use your
 own path.
@@ -185,9 +185,10 @@ What happens next:
 
 ## Where to go next
 
-- **Add more agents:** `hive agents add …` on this computer. For an agent on another
-  computer, `hive agents add codex --elsewhere` prints one line to run there, inside its
-  clone of the repository ([Enrolling agents and setting up machines](MACHINES.md)).
+- **Add more agents:** `hive agents add …` on this computer. To use another computer, pair
+  it once: `hive machines invite` prints a line to run there (`hive join CODE …`), then
+  `hive agents add codex --on <its name>` places agents on it from here
+  ([Adding agents and setting up machines](MACHINES.md)).
 - **See and manage agents:** `hive agents` lists them; `hive agents edit`, `rm` and
   `rotate` change, remove them or give them a new token.
 - **Require reviews:** `hive config set integration.review reviewer`, and add an agent with

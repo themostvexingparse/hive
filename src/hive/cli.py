@@ -370,16 +370,45 @@ def cmd_init(a):
     ui.out()
     ui.info("The agent bundles in .hive/agent/ load only in sessions launched by `hive`.")
     _prompt_problems(root)
+    checks_step = []
+    if not load_repo_config(root)["integration"].get("checks"):
+        guess = guess_test_command(root)
+        if guess and interactive() and yes(f"Run {ui.cmd(guess)} before any agent's work "
+                                           "reaches main (and refuse work that fails)?"):
+            from . import settings
+            settings.write(root / "hive.toml", "integration.checks", [guess])
+            ui.ok(f"integration.checks = [\"{guess}\"] " + ui.dim("in hive.toml"))
+        else:
+            checks_step = ["Optional: run your tests before work reaches main: " + ui.cmd(
+                f'hive config set integration.checks "{guess or "<your test command>"}"')]
     ui.section("Next")
-    for i, t in enumerate([
-            "Optional: run your tests before work reaches main, e.g. "
-            + ui.cmd('hive config set integration.checks "npm test"'),
+    for i, t in enumerate(checks_step + [
             "Commit these files and push: "
             + ui.cmd('git add hive.toml .hive .gitignore && git commit -m "Set up Hive" '
                      "&& git push"),
             "Add agents: " + ui.cmd("hive agents add claude")
             + ui.dim("  (the first one plans; run it again for one that codes)")], 1):
         ui.out(f"  {ui.num(f'{i}.')} {t}")
+
+
+def guess_test_command(root: Path) -> str:
+    """The repository's usual test command, from the files that give it away ("" if none)."""
+    pkg = root / "package.json"
+    if pkg.exists():
+        try:
+            test = json.loads(pkg.read_text("utf-8")).get("scripts", {}).get("test", "")
+        except (ValueError, OSError):
+            test = ""
+        if test and "no test specified" not in test:
+            return "npm test"
+    if (root / "Cargo.toml").exists():
+        return "cargo test"
+    if (root / "go.mod").exists():
+        return "go test ./..."
+    if (root / "pytest.ini").exists() or (root / "tests").is_dir() and any(
+            (root / f).exists() for f in ("pyproject.toml", "setup.py", "setup.cfg")):
+        return "python -m pytest -q"
+    return ""
 
 
 def default_branch(root: Path) -> str:
@@ -468,8 +497,50 @@ def cmd_overview(a):
     overview.render(overview.collect(Path(a.path), offline=a.offline))
 
 
+def _is_local_url(url: str) -> bool:
+    host = split_project_url(url)[0].split("//")[-1].split("/")[0].rsplit(":", 1)[0]
+    return host.strip("[]") in LOCAL_HOSTS
+
+
+def cmd_join_machine(a):
+    """`hive join CODE`: pair this computer with a project; it then runs whichever agents the
+    admin places on it."""
+    from . import agents, machines
+    repo = Path(a.repo).resolve() if a.repo else agents.clone_here()
+    if repo is None:
+        die("run this inside this computer's clone of the repository (placed agents' "
+            "worktrees are created next to it), or pass --repo <clone>")
+    server = a.server
+    if not server:
+        toml_url = load_repo_config(repo)["server"].get("url", "") \
+            if (repo / "hive.toml").exists() else ""
+        if not toml_url or _is_local_url(toml_url):
+            die("pass --server URL: the Hive server's address as this computer reaches it "
+                "(`hive machines invite` prints the whole line)")
+        server = toml_url
+    server = server.rstrip("/")
+    if not (repo / "hive.toml").exists():
+        ui.warn(f"{repo} has no hive.toml yet: `git pull` it, so agents get Hive's files.")
+    r = call(machines.pair, server, a.name, repo, a.machine_name or "")
+    ui.ok(f"This computer is now {ui.agent(r['name'])} in {ui.path(server)}.")
+    res = machines.sync(server)
+    for line in machines.describe(res):
+        ui.ok(line)
+    for err in res.errors:
+        ui.warn(err)
+    if res.added:
+        offer_login(res.added)
+    else:
+        ui.note("No agents are placed on it yet. On your computer: "
+                + ui.cmd(f"hive agents add claude --on {r['name']}"))
+    ui.section("Then run this computer's agents (it picks up new ones as they're placed)")
+    ui.out("  " + ui.cmd("hive up"))
+
+
 def cmd_join(a):
     from . import agents
+    if not a.token:
+        return cmd_join_machine(a)
     cfg = load_machine_config()
     old = next((s for s in cfg.slots if s.name == a.name), None)
     # The server belongs to this slot alone: other slots on the machine may be in other
@@ -506,6 +577,11 @@ def cmd_join(a):
     offer_login([slot])
     ui.section("Then start this computer's agents")
     ui.out("  " + ui.cmd("hive up"))
+
+
+def agents_logged_out(slot: Slot) -> bool:
+    from .agents import is_logged_in
+    return is_logged_in(slot) is False
 
 
 def offer_login(slots: list[Slot]) -> None:
@@ -636,8 +712,19 @@ def cmd_up(a):
     handlers = [logging.FileHandler(hive_home() / "logs" / "daemon.log", encoding="utf-8")]
     handlers[0].setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     cfg = load_machine_config()
-    if not cfg.slots:
-        die("no slots on this machine; run `hive join` first")
+    if cfg.machines:
+        from . import machines
+        res = machines.sync()
+        for line in machines.describe(res):
+            ui.ok(line)
+        for err in res.errors:
+            ui.warn(f"placement: {err}")
+        if res.added and interactive():
+            offer_login([s for s in res.added if agents_logged_out(s)])
+        cfg = load_machine_config()
+    if not cfg.slots and not cfg.machines:
+        die("no agents on this computer yet: add some with `hive agents add claude` (inside "
+            "your clone), or pair it with a code from `hive machines invite`")
     save_machine_config(cfg)  # persists a generated local secret
     refresh_git_hooks(cfg)
     d = Daemon(cfg)
@@ -673,6 +760,11 @@ def cmd_up(a):
               for s in d.slots.values()])
     if not orch:
         ui.out()
+        if not d.slots:
+            names = ", ".join(m["name"] for m in cfg.machines.values())
+            ui.info(f"No agents are placed on this computer ({names}) yet; they start here "
+                    "within a minute of being placed. On your computer: "
+                    + ui.cmd(f"hive agents add claude --on {names.split(', ')[0]}"))
         ui.info("Streaming agent output below (the admin also sees it with "
                 + ui.cmd("hive watch") + "). Ctrl+C to stop.")
         ui.out()
@@ -1026,8 +1118,10 @@ def cmd_agents_add(a):
             die(f"{vendor!r} isn't one of {', '.join(VENDORS)}")
     if a.name and count > 1:
         die("--name names one agent; leave it out to add several (they're numbered)")
+    if a.on and a.elsewhere:
+        die("--on already says where it runs; leave out --elsewhere")
     repo = None
-    if not a.elsewhere:
+    if not a.elsewhere and not a.on:
         repo = agents.clone_here() or die(
             "run this inside your clone of the repository, where the agents' worktrees are "
             "created; or use --elsewhere for agents that run on another computer")
@@ -1040,6 +1134,14 @@ def cmd_agents_add(a):
     c = admin_client()
     server = c.base.removesuffix("/api/v1")
     roster = call(c.get, "/agents")
+    if a.on:
+        found = next((m for m in call(c.get, "/machines") if m["name"] == a.on), None)
+        if found is None:
+            die(f"no paired computer named {a.on!r}; " + ui.cmd("hive machines")
+                + " lists them, " + ui.cmd("hive machines invite") + " pairs one")
+        if found["clis"] and vendor not in found["clis"]:
+            ui.warn(f"{vendor} wasn't installed on {a.on} when it last checked in "
+                    f"(it has {', '.join(found['clis'])}).")
     taken = {ag["name"] for ag in roster} | {s.name for s in load_machine_config().slots}
     names = [a.name] if a.name else agents.free_names(vendor, count, taken)
     added: list[Slot] = []
@@ -1048,6 +1150,10 @@ def cmd_agents_add(a):
         r = call(c.post, "/agents", {"name": name, "vendor": vendor, "roles": mine})
         roster.append({"name": name, "vendor": vendor, "roles": mine})
         what = f"{ui.agent(name)} ({vendor}, {', '.join(mine)})"
+        if a.on:
+            ui.ok(f"Created {what}.")
+            place_on(c, name, a.on)
+            continue
         if a.elsewhere:
             ui.ok(f"Created {what}. On the computer that will run it, inside its clone, run:")
             ui.out("    " + ui.cmd(join_line(name, r["token"], c)))
@@ -1094,10 +1200,14 @@ def cmd_agents_list(a):
         return ui.dim("keyring") if state is None else \
             ui.state("ok", label="yes") if state else ui.state("failed", label="no")
 
+    def where(ag: dict) -> str:
+        if ag.get("machine"):
+            return ag["machine"] + ("" if ag.get("claimed") else ui.dim(" (not set up yet)"))
+        return "this computer" if ag["name"] in here else ui.dim("elsewhere")
+
     ui.table(["name", "cli", "roles", "state", "where", "logged in"],
              [[ui.agent(ag["name"]), ag["vendor"], ", ".join(ag["roles"]), _agent_state(ag),
-               "this computer" if ag["name"] in here else ui.dim("elsewhere"),
-               login(here.get(ag["name"]))] for ag in roster])
+               where(ag), login(here.get(ag["name"]))] for ag in roster])
     gone = sorted(set(here) - {ag["name"] for ag in roster})
     for name in gone:
         ui.warn(f"{name} is set up on this computer but no longer on the server; clean it up "
@@ -1127,10 +1237,20 @@ def cmd_agents_login(a):
 
 def cmd_agents_edit(a):
     from .agents import parse_roles
-    if a.roles is None and a.model is None and a.permission_mode is None:
-        die("say what to change: --roles, --model or --permission-mode")
+    if a.roles is None and a.model is None and a.permission_mode is None and a.on is None:
+        die("say what to change: --roles, --model, --permission-mode or --on")
     if a.roles is not None:
         set_roles(admin_client(), a.name, parse_roles(a.roles))
+    if a.on is not None:
+        c = admin_client()
+        target = None if a.on.lower() == "none" else a.on
+        place_on(c, a.name, target)
+        here = _local_slots(c.base.removesuffix("/api/v1")).get(a.name)
+        if target and here and not here.placed:
+            # The other computer's claim gives it a new token: this slot would stop working.
+            from .agents import unplace
+            unplace(a.name)
+            ui.info(f"Took {a.name} off this computer (its account folder is kept).")
     if a.model is not None or a.permission_mode is not None:
         _slot_here(a.name)
         cfg = load_machine_config()
@@ -1188,6 +1308,82 @@ def cmd_agents_rotate(a):
         ui.ok(f"New token for {ui.agent(a.name)}; the old one no longer works. On the computer "
               "that runs it, inside its clone, run:")
         ui.out("    " + ui.cmd(join_line(a.name, r["token"], c)))
+
+
+# ---------------------------------------------------------------------- hive machines …
+
+def lan_address() -> str:
+    """This computer's address on its local network, as other computers there reach it."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # no packet is sent; it only picks a route
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
+def cmd_machines_invite(a):
+    c = admin_client()
+    url = c.base.removesuffix("/api/v1")
+    r = call(c.post, "/machines/invite")
+    shown = url
+    if _is_local_url(url):
+        ip = lan_address()
+        base, project = split_project_url(url)
+        port = base.rsplit(":", 1)[1] if base.count(":") > 1 else "8765"
+        shown = project_url(f"http://{ip or '<this-computer>'}:{port}", project)
+        ui.warn(f"Your server's address, {url}, only works on this computer. For another "
+                "computer on your network to reach it, run the server as "
+                + ui.cmd(f"hive server --host 0.0.0.0 --port {port}")
+                + f" (and allow port {port} through the firewall); the line below uses "
+                "this computer's network address.")
+    ui.ok(f"Pairing code {ui.paint(r['code'], 'bold', 'bright_yellow')} "
+          + ui.dim(f"(works once, for {r['expires_in'] // 60} minutes)"))
+    ui.section("On the other computer, inside its clone of the repository, run")
+    ui.out("  " + ui.cmd(f"hive join {r['code']} --server {shown}"))
+    ui.out()
+    ui.note("Then place agents on it from here: "
+            + ui.cmd("hive agents add claude --on <its name>"))
+
+
+def cmd_machines_list(a):
+    rows = call(admin_client().get, "/machines")
+    if not rows:
+        ui.info("No paired computers. Pair one with " + ui.cmd("hive machines invite")
+                + "; agents on this computer don't need it (" + ui.cmd("hive agents add")
+                + ").")
+        return
+    ui.table(["machine", "state", "os", "CLIs", "last seen", "agents"],
+             [[ui.agent(m["name"]), ui.state("online" if m["online"] else "offline"),
+               m["os"], ", ".join(m["clis"]) or ui.dim("none"), ago(m["last_seen"]) + " ago",
+               ", ".join(m["agents"]) or ui.dim("none")] for m in rows])
+
+
+def cmd_machines_rm(a):
+    c = admin_client()
+    if not a.yes:
+        if not interactive():
+            die(f"unpairing {a.name} can't be undone; add --yes to go ahead")
+        if not yes(f"Unpair {a.name}? Its agents stay, but stop running there.",
+                   default=False):
+            die("nothing removed")
+    r = call(c.delete, f"/machines/{a.name}")
+    ui.ok(f"Unpaired {ui.agent(a.name)}; its token no longer works."
+          + (f" Agents to place elsewhere: {', '.join(r['unplaced'])} "
+             + ui.dim("(hive agents edit NAME --on MACHINE)") if r["unplaced"] else ""))
+
+
+def place_on(c: ServerClient, name: str, machine: str | None) -> None:
+    call(c.put, f"/agents/{name}/placement", {"machine": machine})
+    if machine:
+        ui.ok(f"{ui.agent(name)} is placed on {ui.agent(machine)}: it is set up there within a "
+              f"minute if `hive up` runs there, else when it next starts.")
+        ui.note("Log its account in on that computer, once: "
+                + ui.cmd(f"hive agents login {name}")
+                + ui.dim(" (hive up there offers it too)"))
+    else:
+        ui.ok(f"{ui.agent(name)} isn't placed on any paired computer now.")
 
 
 # ---------------------------------------------------------------------- hive config …
@@ -1342,6 +1538,25 @@ def cmd_home(a):
         ui.out(ui.dim("  hive help: the common commands · hive doctor: check everything"))
 
     ui.banner(f"Hive {__version__}", "several coding agents, one coordinated team")
+    mcfg = load_machine_config()
+    if (not url or not token) and mcfg.machines:
+        # A paired computer that runs agents but isn't where the admin works.
+        ui.kv([("paired with", ", ".join(f"{ui.path(u)} as {m['name']}"
+                                         for u, m in mcfg.machines.items())),
+               ("agents here", ", ".join(s.name for s in mcfg.slots) or ui.dim("none yet"))])
+        for s in mcfg.slots:
+            if agents.is_logged_in(s) is False:
+                return step(f"Log {s.name}'s {s.vendor} account in once:",
+                            f"hive agents login {s.name}")
+        try:
+            requests.get(mcfg.local_url + "/slots", timeout=1,
+                         headers={"X-Hive-Local": mcfg.local_secret})
+        except requests.RequestException:
+            return step("Run the agents placed on this computer (in its own terminal):",
+                        "hive up", "New ones are picked up while it runs.")
+        return step("This computer is running its agents. Place more on it from the admin's "
+                    "computer:", "hive agents add claude --on "
+                    + next(iter(mcfg.machines.values()))["name"])
     if not url or not token:
         return step("Start a Hive server on this computer (in its own terminal):",
                     "hive server", "It logs this computer in. For a team server someone "
@@ -1382,7 +1597,6 @@ def cmd_home(a):
         return step("Add an agent that writes code:", "hive agents add claude programmer",
                     "Use another account than the orchestrator's. Add several at once: "
                     "hive agents add 3 claude programmers")
-    mcfg = load_machine_config()
     here = [s for s in mcfg.slots if mcfg.url_for(s).rstrip("/") == url.rstrip("/")]
     for s in here:
         if agents.is_logged_in(s) is False:
@@ -1432,8 +1646,9 @@ Work with the team:
 
 Manage:
   hive agents                    list, add, login, edit, rm, rotate
+  hive machines                  list, invite (pair another computer), rm
+  hive join CODE --server URL    pair this computer, with a code from hive machines invite
   hive config                    list, get, set, unset, explain, edit
-  hive join NAME --token T       set up an agent created on another computer
   hive doctor                    check the whole setup and list fixes
 
 More:
@@ -1536,8 +1751,10 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("words", nargs="*", metavar="[N] CLI [ROLES]",
                    help=f"how many, which CLI ({', '.join(VENDORS)}) and roles, in any order")
     s.add_argument("--name", help="name it (default: <cli>-<n>)")
+    s.add_argument("--on", metavar="MACHINE",
+                   help="run it on this paired computer (see hive machines)")
     s.add_argument("--elsewhere", action="store_true",
-                   help="it runs on another computer: print the line to run there")
+                   help="it runs on another, unpaired computer: print the line to run there")
     s.add_argument("--model", help="the AI model its CLI uses (default: the account's)")
     s.add_argument("--permission-mode", help="the CLI's own permission mode (see hive join)")
     s.add_argument("--no-login", action="store_true", help="don't offer to log in now")
@@ -1552,6 +1769,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--roles", help="replaces its roles, e.g. programmer,tester")
     s.add_argument("--model", help="this computer's slot; `default` for the account's")
     s.add_argument("--permission-mode", help="this computer's slot; `default` to reset")
+    s.add_argument("--on", metavar="MACHINE", help="move it to this paired computer "
+                                                   "(`none`: no paired computer)")
     s.set_defaults(fn=cmd_agents_edit)
     s = ag.add_parser("rm", help="remove an agent (server, and this computer)")
     s.add_argument("name")
@@ -1560,6 +1779,18 @@ def main(argv: list[str] | None = None) -> None:
     s = ag.add_parser("rotate", help="give an agent a new token (the old one stops working)")
     s.add_argument("name")
     s.set_defaults(fn=cmd_agents_rotate)
+
+    s = sub.add_parser("machines", help="pair other computers and see them")
+    s.set_defaults(fn=cmd_machines_list)
+    mg = s.add_subparsers(dest="msub")
+    s = mg.add_parser("list", help="paired computers: state, CLIs, agents")
+    s.set_defaults(fn=cmd_machines_list)
+    s = mg.add_parser("invite", help="a one-time code that pairs another computer")
+    s.set_defaults(fn=cmd_machines_invite)
+    s = mg.add_parser("rm", help="unpair a computer (its agents stay, unplaced)")
+    s.add_argument("name")
+    s.add_argument("-y", "--yes", action="store_true", help="don't ask first")
+    s.set_defaults(fn=cmd_machines_rm)
 
     s = sub.add_parser("config", help="read and change settings (hive.toml, hive.local.toml)")
     s.set_defaults(fn=cmd_config_list, all=False)
@@ -1664,9 +1895,14 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--path", default=".", help="repository (default: current directory)")
     s.set_defaults(fn=cmd_prompts)
 
-    s = sub.add_parser("join", help="set up an agent created on another computer")
-    s.add_argument("name")
-    s.add_argument("--token", required=True)
+    s = sub.add_parser("join", help="pair this computer with a code, or set up one agent",
+                       description="hive join CODE --server URL: pair this computer (the code "
+                                   "is from `hive machines invite`).\nhive join NAME --token T: "
+                                   "set up the agent NAME created elsewhere.")
+    s.add_argument("name", help="a pairing code, or an agent's name (with --token)")
+    s.add_argument("--token", help="the agent's token (not needed with a pairing code)")
+    s.add_argument("--as", dest="machine_name",
+                   help="with a code: this computer's name (default: its host name)")
     s.add_argument("--vendor", choices=VENDORS, help="default: the one it was created with")
     s.add_argument("--server")
     s.add_argument("--repo", help="local clone; the slot worktree is created next to it "

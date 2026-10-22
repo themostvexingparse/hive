@@ -27,7 +27,7 @@ For a first trial, all three can be the same computer.
 | Claude Code CLI (`claude`) | machines running Claude agents | Each Claude agent logs into its own Claude account once. |
 | Gemini CLI (`gemini`) | machines running Gemini agents | Each Gemini agent logs into its own Google account once. Since June 2026 only with a paid Gemini API key or a Gemini Code Assist Standard/Enterprise licence; personal accounts use agy instead ([details](LIMITATIONS.md#gemini-cli-and-antigravity-cli)). |
 | Codex CLI (`codex`) | machines running Codex agents | Each Codex agent logs into its own ChatGPT account once (`codex login`). |
-| Antigravity CLI (`agy`) | machines running agy agents | Google's successor to Gemini CLI. Log in once per computer by running `agy`; all agy agents on that computer share that Google account ([why](MACHINES.md#log-each-slots-account-in-once)). |
+| Antigravity CLI (`agy`) | machines running agy agents | Google's successor to Gemini CLI. Log in once per computer by running `agy`; all agy agents on that computer share that Google account ([why](MACHINES.md#log-each-agents-account-in-once)). |
 | A git remote (`origin`) | the repository | The shared copy of the repository that every machine pushes to: GitHub or any remote all machines can reach. |
 | A reachable server URL | | The address of the Hive server: `http://127.0.0.1:8765` (your own computer) for single-machine trials; a public HTTPS address otherwise. |
 

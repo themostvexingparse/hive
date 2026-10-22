@@ -343,6 +343,30 @@ hive agents rotate claude-2                  # new token; a slot here is updated
 - `rotate` replaces the token. For an agent set up on another computer it prints the
   `hive join` line to run there.
 
+### `hive machines`: pair other computers, then place agents on them
+
+```sh
+# On your computer
+hive machines invite                     # a one-time code, and the line to run on the other computer
+hive machines                            # paired computers: state, CLIs, agents
+hive agents add claude programmer --on desk
+hive agents edit claude-3 --on laptop    # move it (`--on none`: off every paired computer)
+hive machines rm desk                    # unpair (its agents stay, unplaced)
+
+# On the other computer, inside its clone
+hive join K7Q4-M2XD --server http://192.168.1.20:8765 [--as desk]
+hive up
+```
+
+A code works once, for 15 minutes. `hive join CODE` (no `--token`) pairs the computer: it is
+named after its host name unless you pass `--as`, and remembers the clone you ran it in.
+From then on its daemon (`hive up`) asks the server every 30 seconds which agents are placed
+on it, claims new ones (the server gives that computer a fresh token for each), sets up their
+slots next to the clone, and takes off those removed or placed elsewhere, without a restart.
+`hive up` and `hive join` offer to log new agents in. When your server listens only on your
+own computer (`127.0.0.1`), `invite` says how to make it reachable and prints your network
+address instead. Full walkthrough: [Setting up machines](MACHINES.md#on-another-computer-pair-it-once).
+
 ### `hive admin enroll`: create an agent (precise form)
 
 ```sh
@@ -412,7 +436,7 @@ a terminal, it offers to **log the agent's CLI account in**. Otherwise it prints
 | `--repo PATH` | Your clone; the worktree goes next to it. |
 | `--worktree PATH` | Explicit worktree path. |
 | `--config-dir PATH` | The CLI account folder (default `~/.hive/accounts/NAME`). |
-| `--permission-mode MODE` | The CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default), `read-only`, `danger-full-access`, `yolo`; agy: `accept-edits` (default), `auto`, `plan`. The defaults allow file edits; the others allow less or everything ([details](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)). |
+| `--permission-mode MODE` | The CLI's own setting for how much it may do without asking. Claude: `acceptEdits` (default), `bypassPermissions`, …; Gemini: `auto_edit` (default), `yolo`; Codex: `workspace-write` (default), `read-only`, `danger-full-access`, `yolo`; agy: `accept-edits` (default), `auto`, `plan`. The defaults allow file edits; the others allow less or everything ([details](MACHINES.md#on-another-computer-without-pairing)). |
 | `--model MODEL` | The AI model this agent's CLI uses (default: the account's). |
 | `--hive-cmd CMD` | How the git hook calls `hive`. |
 | `--replace` | Move an existing slot of this name to another server or project. What it remembers locally (messages seen, its conversation) is reset. |
@@ -719,6 +743,9 @@ The commands the agent CLIs run are in [§12](#12-commands-the-agent-clis-run).
 | `hive agents edit NAME [--roles R] [--model M] [--permission-mode P]` | Change an agent. |
 | `hive agents rm NAME [--yes]` | Remove an agent: server and this computer. |
 | `hive agents rotate NAME` | Give an agent a new token. |
+| `hive agents add … --on MACHINE` / `hive agents edit NAME --on MACHINE\|none` | Place an agent on a paired computer, or move it. |
+| `hive machines [list]` / `invite` / `rm NAME [--yes]` | Paired computers; a one-time pairing code; unpair one. |
+| `hive join CODE --server URL [--as NAME] [--repo PATH]` | Pair this computer (on the other computer, inside its clone). |
 | `hive config [list [--all]]` | Settings in force and where each comes from (§6). |
 | `hive config get\|explain KEY` | One setting's value; its value in every layer. |
 | `hive config set KEY VALUE [--local]` / `unset KEY [--local]` | Change a setting in `hive.toml` (or `hive.local.toml`). |
@@ -759,7 +786,7 @@ default ([§10](#10-several-projects-on-one-server)).
 
 | Command | Description |
 |---|---|
-| `hive join NAME --token T [--server URL] [--vendor V] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--model MODEL] [--hive-cmd CMD] [--replace]` | Set up an agent created elsewhere on this machine; vendor and clone are inferred ([Join each slot on the machine that will run it](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)). |
+| `hive join NAME --token T [--server URL] [--vendor V] [--repo PATH] [--worktree PATH] [--config-dir PATH] [--permission-mode MODE] [--model MODEL] [--hive-cmd CMD] [--replace]` | Set up an agent created elsewhere on this machine; vendor and clone are inferred ([Setting up machines](MACHINES.md#on-another-computer-without-pairing)). |
 | `hive up [-v] [--headless]` | Run this machine's slots ([Running the fleet](RUNNING.md)). |
 | `hive chat SLOT [--fresh]` | Attach interactively to a slot ([Taking over a slot interactively (`hive chat`)](RUNNING.md#taking-over-a-slot-interactively-hive-chat)). |
 

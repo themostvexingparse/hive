@@ -133,7 +133,7 @@ These need the server's own admin token, not a project's:
 
 On a computer, each agent lives in a **slot**: its own working folder of the repository and
 its own logged-in CLI account, created by
-[`hive join`](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it). A computer can run
+[`hive join`](MACHINES.md#on-another-computer-without-pairing). A computer can run
 slots of several projects. Each slot remembers its own server or project address, and
 `hive up` (which runs a computer's agents) runs them all.
 

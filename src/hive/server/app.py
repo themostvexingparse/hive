@@ -54,7 +54,9 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def _tick():
         hive.tick()
 
-    def auth(admin: bool = False):
+    def auth(admin: bool = False, machine: bool = False):
+        """admin: only the admin. machine: only a paired machine's token (hm_…), which is
+        refused everywhere else, so a machine can never act as an agent or as the user."""
         def deco(fn):
             @wraps(fn)
             def wrapper(*a, **kw):
@@ -63,7 +65,13 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
                 if not token:
                     raise ApiError(401, "no_token", "Authorization: Bearer <token> required")
                 g.owner = hmac.compare_digest(token.encode("utf-8"), admin_token.encode("utf-8"))
-                if g.owner or (check_project_admin and check_project_admin(token)):
+                if machine:
+                    if not token.startswith("hm_"):
+                        raise ApiError(403, "forbidden", "machine token required")
+                    g.actor = hive.authenticate_machine(token)
+                elif token.startswith("hm_") and not g.owner:
+                    raise ApiError(403, "forbidden", "a machine token only works for /machines/me")
+                elif g.owner or (check_project_admin and check_project_admin(token)):
                     g.actor = ADMIN
                 elif admin:
                     raise ApiError(403, "forbidden", "admin token required")
@@ -138,6 +146,44 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth(admin=True)
     def remove_agent(name):
         return jsonify(hive.remove_agent(me(), name))
+
+    @app.put(f"{api}/agents/<name>/placement")
+    @auth(admin=True)
+    def place_agent(name):
+        return jsonify(hive.place_agent(me(), name, body().get("machine") or None))
+
+    # ---------------------------------------------------------------- machines
+    @app.post(f"{api}/machines/invite")
+    @auth(admin=True)
+    def invite_machine():
+        return jsonify(hive.create_pairing_code(me()))
+
+    @app.post(f"{api}/machines/pair")
+    def pair_machine():  # the one-time code is the credential
+        b = body()
+        return jsonify(hive.pair_machine(str(b.get("code", "")), str(b.get("name", "")),
+                                         str(b.get("os", "")), list(b.get("clis") or []))), 201
+
+    @app.get(f"{api}/machines")
+    @auth(admin=True)
+    def list_machines():
+        return jsonify(hive.list_machines(me()))
+
+    @app.delete(f"{api}/machines/<name>")
+    @auth(admin=True)
+    def remove_machine(name):
+        return jsonify(hive.remove_machine(me(), name))
+
+    @app.post(f"{api}/machines/me/placements")
+    @auth(machine=True)
+    def my_placements():
+        b = body()
+        return jsonify(hive.machine_placements(me(), b.get("os"), b.get("clis")))
+
+    @app.post(f"{api}/machines/me/claim/<agent>")
+    @auth(machine=True)
+    def claim_agent(agent):
+        return jsonify(hive.claim_agent(me(), agent))
 
     @app.get(f"{api}/agents/me")
     @auth()

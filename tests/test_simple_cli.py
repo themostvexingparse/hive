@@ -353,6 +353,21 @@ def test_home_walks_through_setup(fleet, capsys):
     assert 'hive start "' in capsys.readouterr().out
 
 
+def test_init_guesses_the_test_command(tmp_path):
+    assert cli.guess_test_command(tmp_path) == ""
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "echo \\"Error: no test '
+                                           'specified\\" && exit 1"}}')
+    assert cli.guess_test_command(tmp_path) == ""  # npm's placeholder isn't a test suite
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    assert cli.guess_test_command(tmp_path) == "npm test"
+    (tmp_path / "package.json").unlink()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    (tmp_path / "tests").mkdir()
+    assert cli.guess_test_command(tmp_path) == "python -m pytest -q"
+    (tmp_path / "go.mod").write_text("module x\n")
+    assert cli.guess_test_command(tmp_path) == "go test ./..."
+
+
 def test_agents_cannot_run_the_new_user_commands():
     from hive import permissions as P
     for rules in P.build_rules({}).values():

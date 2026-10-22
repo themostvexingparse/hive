@@ -55,7 +55,7 @@ def parse_roles(text: str | None) -> list[str]:
 def place(name: str, vendor: str, token: str, server: str, repo: Path | None,
           worktree: Path | None = None, config_dir: str | None = None,
           permission_mode: str = "", model: str = "", hive_cmd: str | None = "hive",
-          replace: bool = False) -> tuple[Slot, list[str]]:
+          replace: bool = False, placed: bool = False) -> tuple[Slot, list[str]]:
     """Make the agent `name` a slot on this computer: its worktree (next to the clone, on
     branch hive/<name>), the git hook, its private CLI settings folder, and its entry in
     machine.toml. Returns the slot and the lines worth telling the user."""
@@ -102,9 +102,12 @@ def place(name: str, vendor: str, token: str, server: str, repo: Path | None,
                      f"{ui.path(server)}; its local state was reset.")
     if not cfg.slots:
         cfg.server_url = server  # the first slot's server is the default for later joins
+    if old:  # re-placing keeps what was chosen for the slot on this computer
+        permission_mode = permission_mode or old.permission_mode
+        model = model or old.model
     slot = Slot(name=name, vendor=vendor, token=token, worktree=str(worktree),
                 config_dir=config_dir, permission_mode=permission_mode or "",
-                model=model or "", server_url=server)
+                model=model or "", server_url=server, placed=placed)
     cfg.slots = [s for s in cfg.slots if s.name != name] + [slot]
     save_machine_config(cfg)
     return slot, notes
