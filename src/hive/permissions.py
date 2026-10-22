@@ -165,6 +165,7 @@ FORBIDDEN = [
     # The simpler commands for the same things (docs/CLI_REDESIGN.md), and reading live output.
     "hive approve", "hive reject", "hive answer", "hive login", "hive agents", "hive config",
     "hive server", "hive watch", "hive chat", "hive machines", "hive apply", "hive plan",
+    "hive api",
 ]
 
 

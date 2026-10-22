@@ -159,7 +159,20 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.post(f"{api}/machines/invite")
     @auth(admin=True)
     def invite_machine():
-        return jsonify(hive.create_pairing_code(me()))
+        b = body()
+        return jsonify(hive.create_pairing_code(me(), bool(b.get("reusable")),
+                                                num(b.get("days", 0), "days", float),
+                                                str(b.get("label") or "")))
+
+    @app.get(f"{api}/machines/keys")
+    @auth(admin=True)
+    def join_keys():
+        return jsonify(hive.list_join_keys(me()))
+
+    @app.delete(f"{api}/machines/keys/<key_id>")
+    @auth(admin=True)
+    def revoke_join_key(key_id):
+        return jsonify(hive.revoke_join_key(me(), key_id))
 
     @app.post(f"{api}/machines/pair")
     def pair_machine():  # the one-time code is the credential

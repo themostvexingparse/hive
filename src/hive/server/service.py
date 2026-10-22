@@ -36,7 +36,10 @@ PAIRING_SECONDS = 15 * 60
 
 
 def _norm_code(code: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", (code or "").upper())
+    """Short codes are typed by people: case and dashes don't matter. Join keys (hk_…) are
+    copied whole and compared exactly."""
+    code = (code or "").strip()
+    return code if code.startswith("hk_") else re.sub(r"[^A-Z0-9]", "", code.upper())
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 RESERVED = {"user", "system", "admin"}
@@ -307,17 +310,49 @@ class Hive:
 
     # ------------------------------------------------------------------ machines
 
-    def create_pairing_code(self, actor: Actor) -> dict:
-        """A short single-use code another computer redeems with `hive join CODE`."""
+    def create_pairing_code(self, actor: Actor, reusable: bool = False, days: float = 0,
+                            label: str = "") -> dict:
+        """A short single-use code another computer redeems with `hive join CODE`; or, with
+        `reusable`, a join key (hk_…) for scripts that pair many computers, valid `days`."""
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
-        code = "-".join("".join(secrets.choice(CODE_ALPHABET) for _ in range(4))
-                        for _ in range(2))
+        if reusable:
+            if not 0 < days <= 365:
+                raise ApiError(400, "bad_arg", "a join key lasts 1 to 365 days")
+            code, ttl = "hk_" + secrets.token_urlsafe(24), days * 86400
+        else:
+            code = "-".join("".join(secrets.choice(CODE_ALPHABET) for _ in range(4))
+                            for _ in range(2))
+            ttl = PAIRING_SECONDS
         with self._write() as c:
             c.execute(pairing_codes.delete().where(pairing_codes.c.expires < now()))
-            c.execute(insert(pairing_codes).values(code_hash=hash_token(_norm_code(code)),
-                                                   expires=now() + PAIRING_SECONDS))
-        return {"code": code, "expires_in": PAIRING_SECONDS}
+            c.execute(insert(pairing_codes).values(
+                code_hash=hash_token(_norm_code(code)), expires=now() + ttl,
+                reusable=reusable, label=(label or "")[:64], created=now(), uses=0))
+        return {"code": code, "expires_in": int(ttl), "reusable": reusable}
+
+    def list_join_keys(self, actor: Actor) -> list[dict]:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._read() as c:
+            rows = c.execute(select(pairing_codes).where(and_(
+                pairing_codes.c.reusable.is_(True), pairing_codes.c.expires >= now()))
+                .order_by(pairing_codes.c.created)).fetchall()
+        return [{"id": r.code_hash[:10], "label": r.label, "created": r.created,
+                 "expires": r.expires, "uses": r.uses} for r in rows]
+
+    def revoke_join_key(self, actor: Actor, key_id: str) -> dict:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        if not re.fullmatch(r"[0-9a-f]{6,64}", key_id or ""):
+            raise ApiError(400, "bad_arg", "a key id is the hex id `hive machines keys` shows")
+        with self._write() as c:
+            n = c.execute(pairing_codes.delete().where(and_(
+                pairing_codes.c.reusable.is_(True),
+                pairing_codes.c.code_hash.like(key_id + "%")))).rowcount
+        if not n:
+            raise ApiError(404, "no_such_key", f"no join key {key_id}")
+        return {"revoked": key_id}
 
     def pair_machine(self, code: str, name: str, os_name: str = "",
                      clis: list[str] | None = None) -> dict:
@@ -334,9 +369,13 @@ class Hive:
             hit = c.execute(select(pairing_codes).where(pairing_codes.c.code_hash == h)).first()
             if hit is None or hit.expires < now():
                 raise ApiError(403, "bad_code", "that code isn't valid (each works once, for "
-                               f"{PAIRING_SECONDS // 60} minutes); ask for a new one with "
-                               "`hive machines invite`")
-            c.execute(pairing_codes.delete().where(pairing_codes.c.code_hash == h))
+                               f"{PAIRING_SECONDS // 60} minutes; join keys until they expire "
+                               "or are revoked); ask for a new one with `hive machines invite`")
+            if hit.reusable:
+                c.execute(update(pairing_codes).where(pairing_codes.c.code_hash == h)
+                          .values(uses=pairing_codes.c.uses + 1))
+            else:
+                c.execute(pairing_codes.delete().where(pairing_codes.c.code_hash == h))
             taken = {r.name for r in c.execute(select(machines.c.name))}
             final, n = base, 2
             while final in taken:

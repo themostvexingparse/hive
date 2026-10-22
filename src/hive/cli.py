@@ -1350,7 +1350,8 @@ def lan_address() -> str:
 def cmd_machines_invite(a):
     c = admin_client()
     url = c.base.removesuffix("/api/v1")
-    r = call(c.post, "/machines/invite")
+    r = call(c.post, "/machines/invite", {"reusable": a.reusable, "days": a.days,
+                                          "label": a.label or ""} if a.reusable else {})
     shown = url
     if _is_local_url(url):
         ip = lan_address()
@@ -1362,6 +1363,16 @@ def cmd_machines_invite(a):
                 + ui.cmd(f"hive server --host 0.0.0.0 --port {port}")
                 + f" (and allow port {port} through the firewall); the line below uses "
                 "this computer's network address.")
+    if r.get("reusable"):
+        ui.ok(f"Join key {ui.paint(r['code'], 'bold', 'bright_yellow')} "
+              + ui.dim(f"(pairs any number of computers for {r['expires_in'] // 86400} days; "
+                       "shown only once: keep it like a password)"))
+        ui.section("On each computer, inside its clone of the repository (e.g. in a script)")
+        ui.out("  " + ui.cmd(f"hive join {r['code']} --server {shown} --as <its name>"))
+        ui.out()
+        ui.note("List keys with " + ui.cmd("hive machines keys") + ", revoke one with "
+                + ui.cmd("hive machines revoke ID") + ".")
+        return
     ui.ok(f"Pairing code {ui.paint(r['code'], 'bold', 'bright_yellow')} "
           + ui.dim(f"(works once, for {r['expires_in'] // 60} minutes)"))
     ui.section("On the other computer, inside its clone of the repository, run")
@@ -1369,6 +1380,23 @@ def cmd_machines_invite(a):
     ui.out()
     ui.note("Then place agents on it from here: "
             + ui.cmd("hive agents add claude --on <its name>"))
+
+
+def cmd_machines_keys(a):
+    rows = call(admin_client().get, "/machines/keys")
+    if not rows:
+        ui.info("No join keys. Make one for scripts with "
+                + ui.cmd("hive machines invite --reusable --days 7"))
+        return
+    ui.table(["id", "label", "made", "expires", "used"],
+             [[r["id"], r["label"] or ui.dim("-"), time.strftime("%Y-%m-%d", time.localtime(
+                 r["created"])), time.strftime("%Y-%m-%d", time.localtime(r["expires"])),
+               str(r["uses"])] for r in rows])
+
+
+def cmd_machines_revoke(a):
+    call(admin_client().delete, f"/machines/keys/{a.id}")
+    ui.ok(f"Join key {a.id} revoked; computers it already paired stay paired.")
 
 
 def cmd_machines_list(a):
@@ -1683,6 +1711,64 @@ def cmd_config_edit(a):
         _after_config_change(root, "", a.local)
 
 
+# ---------------------------------------------------------------------- escape hatches
+
+def no_agent_session(what: str) -> None:
+    """Commands that act with the admin's login must not run inside an agent's session, even
+    when an agent found a way to start them (its shell rules also forbid them)."""
+    if os.environ.get("HIVE_SLOT"):
+        die(f"{what} acts as the admin, so it doesn't run inside an agent's session")
+
+
+def cmd_api(a):
+    """Raw access to the server's API with your admin login, like `gh api`."""
+    no_agent_session("hive api")
+    body = None
+    if a.data is not None:
+        text = sys.stdin.read() if a.data == "-" else a.data
+        try:
+            body = json.loads(text) if text.strip() else {}
+        except ValueError as e:
+            die(f"the body must be JSON: {e}")
+    path = "/" + a.path.strip("/").removeprefix("api/v1/")
+    bad = [f for f in a.field or [] if "=" not in f]
+    if bad:
+        die(f"-f takes KEY=VALUE, not {bad[0]!r}")
+    params = dict(f.split("=", 1) for f in a.field or []) or None
+    c = admin_client(sync=False)
+    out = call(c.request, a.method.upper(), path, json=body, params=params)
+    sys.stdout.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+
+
+def find_plugin(args: list[str], commands) -> tuple[str, list[str]] | None:
+    """`hive NAME …` for a NAME that isn't a Hive command runs `hive-NAME …` from PATH, as git,
+    kubectl and cargo do with their extensions."""
+    it = iter(enumerate(args))
+    for i, arg in it:
+        if arg in ("--color", "--project"):
+            next(it, None)
+            continue
+        if arg.startswith("-"):
+            continue
+        if arg in commands:
+            return None
+        exe = shutil.which(f"hive-{arg}")
+        return (exe, args[i + 1:]) if exe else None
+    return None
+
+
+def run_plugin(exe: str, rest: list[str]) -> None:
+    no_agent_session(f"the plugin {Path(exe).name}")
+    env = dict(os.environ, HIVE_HOME=str(hive_home()))
+    if PROJECT:
+        env["HIVE_PROJECT"] = PROJECT
+    try:
+        code = subprocess.run([exe, *rest], env=env).returncode
+    except KeyboardInterrupt:
+        code = 130
+    raise SystemExit(code)
+
+
 # ---------------------------------------------------------------------- hive (no command)
 
 def cmd_home(a):
@@ -1965,7 +2051,16 @@ def main(argv: list[str] | None = None) -> None:
     s = mg.add_parser("list", help="paired computers: state, CLIs, agents")
     s.set_defaults(fn=cmd_machines_list)
     s = mg.add_parser("invite", help="a one-time code that pairs another computer")
+    s.add_argument("--reusable", action="store_true",
+                   help="a join key that pairs many computers (for scripts)")
+    s.add_argument("--days", type=float, default=7, help="how long a join key works (7)")
+    s.add_argument("--label", help="a note to recognise the join key by")
     s.set_defaults(fn=cmd_machines_invite)
+    s = mg.add_parser("keys", help="the reusable join keys that still work")
+    s.set_defaults(fn=cmd_machines_keys)
+    s = mg.add_parser("revoke", help="stop a join key from pairing more computers")
+    s.add_argument("id", help="as hive machines keys shows it")
+    s.set_defaults(fn=cmd_machines_revoke)
     s = mg.add_parser("rm", help="unpair a computer (its agents stay, unplaced)")
     s.add_argument("name")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask first")
@@ -2153,6 +2248,17 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--vendor", help=f"{', '.join(VENDORS)}; others get Claude Code's format")
     s.set_defaults(fn=cmd_hook)
 
+    s = sub.add_parser("api", help="call the server's API with your admin login (scripts)",
+                       description="examples:\n  hive api GET /fleet\n  hive api GET /tasks -f "
+                                   "state=open\n  hive api POST /messages -d '{\"channel\": "
+                                   "\"#user\", \"body\": \"hi\"}'")
+    s.add_argument("method", choices=["GET", "POST", "PUT", "PATCH", "DELETE", "get", "post",
+                                      "put", "patch", "delete"])
+    s.add_argument("path", help="e.g. /fleet, /agents, /tasks/3 (see docs/SERVER.md)")
+    s.add_argument("-d", "--data", help="JSON body (`-` reads it from standard input)")
+    s.add_argument("-f", "--field", action="append", help="query parameter KEY=VALUE")
+    s.set_defaults(fn=cmd_api)
+
     # --project may come anywhere (`hive status --project acme`); the root parser owns it.
     rest, project = [], None
     it = iter(args)
@@ -2163,8 +2269,12 @@ def main(argv: list[str] | None = None) -> None:
             project = arg.split("=", 1)[1]
         else:
             rest.append(arg)
-    a = p.parse_args((["--project", project] if project is not None else []) + rest)
     global PROJECT
+    plugin = find_plugin(rest, sub.choices)
+    if plugin:
+        PROJECT = project
+        run_plugin(*plugin)
+    a = p.parse_args((["--project", project] if project is not None else []) + rest)
     PROJECT = a.project
     a.fn(a)
 

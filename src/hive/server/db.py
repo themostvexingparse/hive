@@ -207,6 +207,12 @@ pairing_codes = Table(
     "pairing_codes", metadata,
     Column("code_hash", String(64), primary_key=True),
     Column("expires", Float, nullable=False),
+    # A reusable join key (hk_…) pairs any number of computers until it expires or is revoked;
+    # a short code works once.
+    Column("reusable", Boolean, nullable=False, default=False),
+    Column("label", String(64), nullable=False, default=""),
+    Column("created", Float, nullable=False, default=0.0),
+    Column("uses", Integer, nullable=False, default=0),
 )
 
 placements = Table(
@@ -286,4 +292,24 @@ def make_engine(url: str, sqlite_journal: str | None = None, small_pool: bool = 
     else:
         engine = create_engine(url, pool_pre_ping=True, pool_recycle=280, **pool)
     metadata.create_all(engine)
+    _add_missing_columns(engine, (machines, pairing_codes, placements))
     return engine
+
+
+def _add_missing_columns(engine, tables) -> None:
+    """create_all makes missing tables but never changes existing ones. These tables gained
+    columns while they were new; add any a database made earlier lacks (each has a default)."""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    for table in tables:
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            ddl = col.type.compile(dialect=engine.dialect)
+            default = col.default.arg if col.default is not None else ""
+            literal = (("1" if default else "0") if isinstance(default, bool)
+                       else repr(default) if isinstance(default, str) else str(default))
+            with engine.begin() as c:
+                c.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl} "
+                               f"NOT NULL DEFAULT {literal}"))
