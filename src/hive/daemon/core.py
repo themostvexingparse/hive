@@ -591,9 +591,10 @@ class Daemon:
                                        first_in_session=not resume,
                                        project_prompt=self.project_prompt(rt),
                                        seen=seen, handoff=handoff)
-            cmd = wake.build_command(rt.cfg, session, resume, role_class(rt.roles))
             env = wake.slot_env(rt.cfg, self.mcfg.local_url, self.mcfg.local_secret)
+            # First: it generates the bundle the command points at.
             err = wake.prepare_vendor(rt.cfg, env, role_class(rt.roles))
+            cmd = wake.build_command(rt.cfg, session, resume, role_class(rt.roles))
             if err:
                 log.warning("[%s] %s", rt.name, err)
                 rt.sink.write([f"· {err}"])
@@ -990,6 +991,13 @@ class Daemon:
         """Verdict for writing the file `raw` (absolute or relative to the worktree)."""
         rel = self._relpath(rt, raw)
         if rel is None:
+            p = Path(raw) if Path(raw).is_absolute() else Path(rt.cfg.worktree) / raw
+            home = hive_home().resolve()
+            if p.resolve() == home or home in p.resolve().parents:
+                # Tokens (machine.toml), the accounts and each session's generated permission
+                # files live here: an agent writing them could widen its own rights.
+                return {"deny": f"{raw} is in Hive's own folder ({home}), which agents may not "
+                                "edit."}
             return {}
         if rel is False:
             return {"deny": f"{raw} is inside another checkout of this repository (another "

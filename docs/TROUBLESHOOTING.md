@@ -37,10 +37,10 @@ For server-side problems (deployment, database, the dashboard not loading), see
 
 | Symptom | Check |
 |---|---|
-| Hive's tools missing in the orchestrator's session | `hive` must be findable by name in any terminal ([on PATH](INSTALLATION.md#hive-must-be-on-path)); re-run `hive init` and commit; start the orchestrator through `hive up`, not by running `claude` yourself. |
+| Hive's tools missing in the orchestrator's session | `hive` must be findable by name in any terminal ([on PATH](INSTALLATION.md#hive-must-be-on-path)); check `hive up`'s output for "could not build Hive's files"; start the orchestrator through `hive up`, not by running `claude` yourself. |
 | "Hive daemon unreachable; file writes are blocked" | `hive up` isn't running on that computer, or its settings (`~/.hive/machine.toml`) changed. Restart `hive up`. |
 | Agent says "No lease covers …" | Expected: it must lock the file with its `lease_acquire` tool first. If it repeats, see whether another agent holds the file (`hive status` → Leases). |
-| Commands keep being refused | The command isn't in the allowed tier. Add it to `[permissions] allow` or `approval`, re-run `hive init` and commit ([Shell-command permissions](PERMISSIONS.md#customising)). |
+| Commands keep being refused | The command isn't in the allowed tier. Add it to `[permissions] allow` or `approval` (`hive config set permissions.allow …`), then commit and push; agents' next sessions use it ([Shell-command permissions](PERMISSIONS.md#customising)). |
 
 ## Integration
 

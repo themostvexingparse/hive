@@ -96,6 +96,9 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
     if not ignored:
         _problem(problems, ".hive/orchestrator/ isn't in .gitignore, so the orchestrator's "
                            "private memory could be committed.", "hive init")
+    # Each launch generates its agent's bundle (wake.refresh_bundle), so the committed copy in
+    # .hive/agent/ is only read by older Hive versions, or if generating fails: its drift is
+    # shown, not a problem. A bundle that can't be generated is.
     if info["bundles"]:
         try:
             plugin = json.loads((root / ".hive/agent/claude/.claude-plugin/plugin.json")
@@ -103,21 +106,17 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
             info["bundle_version"] = plugin.get("version")
         except (OSError, ValueError):
             pass
-        try:
-            info["drift"] = bundle_drift(root, cfg)
-        except (prompts.PromptError, ValueError) as e:
-            info["drift"] = []
-            _problem(problems, f"The agent bundles can't be generated: {e}")
-        if info["drift"]:
-            why = (f"made by Hive {info['bundle_version']}, this is {__version__}"
-                   if info["bundle_version"] != __version__
-                   else "hive.toml [permissions] or .hive/prompts/ changed since")
-            _problem(problems, f"The agent bundles in .hive/agent/ are out of date ({why}; "
-                               f"{len(info['drift'])} file(s) differ).",
-                     "hive init, then commit and push .hive/agent/")
-    else:
-        _problem(problems, "No agent bundles (.hive/agent/): agents launched here would get no "
-                           "Hive tools or skills.", "hive init")
+    try:
+        info["drift"] = bundle_drift(root, cfg) if info["bundles"] else []
+    except (prompts.PromptError, ValueError) as e:
+        info["drift"] = []
+        _problem(problems, f"Hive can't build the agents' files from hive.toml and "
+                           f".hive/prompts/: {e}. Launches fall back to the committed "
+                           ".hive/agent/ copy.", "fix the file named above")
+    if info["drift"]:
+        info["drift_why"] = (f"made by Hive {info['bundle_version']}, this is {__version__}"
+                             if info["bundle_version"] != __version__
+                             else "hive.toml [permissions] or .hive/prompts/ changed since")
     return info
 
 
@@ -354,12 +353,11 @@ def render(d: dict) -> None:
                             "other": ui.state("pending", label="another hook is installed"),
                             "missing": ui.dim("not installed (hive join installs it)")}
             [repo["hook"]]),
-           ("agent bundles", (ui.state("ok", label="up to date") if repo["bundles"]
-                              and not repo["drift"] else
-                              ui.state("pending", label=f"{len(repo['drift'])} file(s) out of "
-                                       "date") if repo["bundles"] else
-                              ui.state("failed", label="missing"))
-            + (ui.dim(f"  (Hive {repo['bundle_version']}, calls `{repo['bundle_hive_cmd']}`)")
+           ("agent bundles", ui.state("ok", label="generated at each launch")
+            + (ui.dim(f"  (committed .hive/agent/: {len(repo['drift'])} file(s) older, "
+                      f"{repo['drift_why']}; only older Hive versions read it)")
+               if repo["drift"] else
+               ui.dim(f"  (committed .hive/agent/ from Hive {repo['bundle_version']} matches)")
                if repo["bundles"] else ""))])
 
     ui.section("Configuration", ui.dim("hive.toml"))

@@ -272,7 +272,7 @@ def test_hive_prompts_command_previews_the_result(tmp_path, monkeypatch, capsys)
     cap = capsys.readouterr()
     assert "Skill: hive-worker" in cap.out and "Write tests first." in cap.out
     assert "Hi gem-1 on gemini." in cap.out
-    assert "differs from this" in cap.err      # bundles predate worker.md: run hive init
+    assert "differs from this" not in cap.err  # bundles are generated at launch: no hive init
     assert "roles/programmer.md" not in cap.out   # comment-only starter: not listed as a source
     cli_main(["--color", "never", "prompts", "--role", "orchestrator", "--path", str(root)])
     assert "has only comments" in capsys.readouterr().out

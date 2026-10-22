@@ -72,7 +72,9 @@ def test_finds_stale_bundles_and_explains_why(project):
                                   "gemini/skills/hive-worker/SKILL.md",
                                   "codex/skills/hive-worker/SKILL.md",
                                   "agy/skills/hive-worker/SKILL.md"]
-    assert any("out of date" in m and ".hive/prompts/" in m for m in msgs(d))
+    # Launches generate their own bundle now: an older committed copy is shown, not a problem.
+    assert ".hive/prompts/" in d["repo"]["drift_why"]
+    assert not any("bundle" in m or ".hive/agent" in m for m in msgs(d))
     assert [r["status"] for r in d["prompts"] if r["file"] == "worker.md"] == ["active"]
     # Permission changes make the permission files stale too.
     (project / "hive.toml").write_text((project / "hive.toml").read_text()

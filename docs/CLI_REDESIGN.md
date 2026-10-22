@@ -139,6 +139,10 @@ Phase 3:
 - [x] Placements carry the slot's model and permission mode, so the file (and
   `hive agents edit`) can set them for agents on other computers.
 - [x] `hive init` offers the detected test command (from phase 2's list).
-- [ ] Launch-time bundles (from phase 2's list).
+- [x] Launch-time bundles: each launch writes the slot's bundle into
+  `~/.hive/bundles/<slot>/` from the installed Hive and the worktree's settings and prompts
+  (Codex and agy copy it into their private homes as before); the committed `.hive/agent/` is
+  the fallback, and what older Hive versions read. Gemini extensions linked to the committed
+  copy are relinked once. Agents' file edits in Hive's own folder are refused.
 
 Phase 4: the rung 0 chat, and the dashboard's agent and machine panels.

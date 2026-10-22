@@ -236,8 +236,10 @@ in bash, PowerShell and cmd.exe alike:
 
 ## Customising
 
-Edit the `[permissions]` section of `hive.toml`, then re-run `hive init` (which regenerates
-the CLIs' permission files), commit, and push:
+Edit the `[permissions]` section of `hive.toml` (or use `hive config set permissions.allow
+…`), then commit and push. Each agent's next launch builds its CLI's permission files from
+it; you don't need to re-run `hive init`. (`hive.local.toml` changes them for the agents on
+one computer only.)
 
 ```toml
 [permissions]

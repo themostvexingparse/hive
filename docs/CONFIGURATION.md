@@ -21,8 +21,8 @@ PowerShell).
 ## `hive.toml`
 
 In the repository, committed. Upload it to the server with `hive admin push-config` after
-every change (`hive start` also uploads it). Changes to `[permissions]` also need
-`hive init` to regenerate the CLIs' permission files.
+every change (`hive start` also uploads it). Agents use a change once it is on `main`: each
+launch builds the CLIs' permission files from it.
 
 ```toml
 [server]
@@ -167,6 +167,7 @@ The default commands are listed in
 | `machine.toml` | default server URL, local API port and secret, slots with their tokens and server URLs (keep private) |
 | `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive login`, or `hive server`) |
 | `server.toml` | the admin token `hive server` made up and uses when given none (keep private) |
+| `bundles/<slot>/<cli>/` | the Hive plugin, extension or profile attached to that slot's sessions, rewritten at each launch from the installed Hive and the slot's worktree |
 | `config-sync.json` | for each server, a fingerprint of the `hive.toml` last uploaded from here, so a changed one is uploaded automatically |
 | `state.db` | what the daemon remembers between runs: which fleet events each slot has seen, a copy of its messages, why it's waiting to be started, and its conversation ids |
 | `accounts/<slot>/` | each slot's private Claude, Gemini or Codex config, including its login; for agy, its settings, Hive's plugin and its conversations (agy's login is in the computer's keyring) |

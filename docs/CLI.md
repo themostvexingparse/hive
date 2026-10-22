@@ -252,8 +252,8 @@ overriding the one before:
 `set` and `unset` edit the file in place, keeping its comments, check that the result is a
 valid configuration (otherwise nothing changes), and upload a changed `hive.toml`. Values
 are TOML (`true`, `90`, `["a", "b"]`); anything else is text. After changing `hive.toml`,
-commit and push it so every agent's copy has it; after a `permissions.*` change, also run
-`hive init` to regenerate the CLIs' permission files.
+commit and push it so every agent's copy has it; each agent's next launch builds its CLI's
+permission files from it.
 
 ### `hive doctor`: check the whole setup
 

@@ -616,9 +616,10 @@ agent takes over from the orchestrator) is not server configuration. It comes fr
    - **VPS:** `pip install --upgrade` as the `hive` user into `/srv/hive/venv`, then
      `sudo systemctl restart hive`.
 2. **Update the agents' computers too.** They and the server should run the same Hive
-   version: `uv tool install --force /path/to/hive` on each, then re-run `hive init` in the
-   repository and commit the regenerated files in `.hive/agent/` (the *bundles*:
-   [Preparing the repository](REPOSITORY.md)).
+   version: `uv tool install --force /path/to/hive` on each. Agents' bundles are generated
+   at each launch, so there is nothing to regenerate; re-run `hive init` and commit
+   `.hive/agent/` only if some computers stay on an older Hive
+   ([Preparing the repository](REPOSITORY.md)).
    - **This release requires it.** When an agent's work is merged into `main`, the daemon now
      needs a one-time permission from the server
      ([What `lease_release` does](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)).

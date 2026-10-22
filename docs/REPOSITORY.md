@@ -58,8 +58,15 @@ another computer): the bundles reach the agents through git, not through Hive.
 
 ### The bundles are inert
 
-None of the CLIs loads `.hive/agent/` on its own:
-- **Claude Code** gets the plugin only when `hive` passes `--plugin-dir .hive/agent/claude`.
+**At each launch, Hive generates the agent's bundle afresh** into `~/.hive/bundles/<agent>/`,
+from the installed Hive and the agent's own working folder (`hive.toml`, `hive.local.toml`,
+`.hive/prompts/`). So upgrading Hive, or changing `[permissions]` or a prompt file, reaches
+the next session without re-running `hive init`. The committed `.hive/agent/` copy is what
+older Hive versions read, and what a launch falls back to if the bundle can't be generated
+(for example a prompt file that is too large). Agents can't edit Hive's own folder.
+
+None of the CLIs loads a bundle on its own:
+- **Claude Code** gets the plugin only when `hive` passes `--plugin-dir` with its folder.
 - **Gemini** gets the extension only through the agent's own **private** Gemini settings
   folder, never your personal `~/.gemini`
   ([How an agent is launched](RUNNING.md#how-an-agent-is-launched-for-a-headless-turn-wake)).
@@ -83,31 +90,25 @@ so they affected every session. `hive init` removes those Hive entries:
 `<!-- hive:begin -->` blocks in `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`. Your own entries in
 those files are kept. A file is deleted only if Hive's content was all it had.
 
-### Commit, push and upload
+### Commit and push
 
 ```sh
-git add -A
-git commit -m "Add Hive"
+git add hive.toml .hive .gitignore
+git commit -m "Set up Hive"
 git push
-hive admin push-config        # uploads hive.toml to the server (run inside the repo)
 ```
 
 The server keeps its own copy of `hive.toml`, because it enforces the roles, review policy
-and permissions in it. `hive admin push-config` uploads it; it needs your admin login
-([Log in as admin](SERVER.md#log-in-as-admin)). `hive start`, which gives the fleet its goal
-([Starting](LIFECYCLE.md#starting)), also uploads it automatically when run inside the
-repository.
+and permissions in it. Admin commands run inside the repository upload it whenever it
+changed ([CLI.md §6](CLI.md#6-preparing-a-repository)); `hive admin push-config` does it
+explicitly. That needs your admin login ([Log in as admin](SERVER.md#log-in-as-admin)).
 
 ### When to re-run it
 
-Re-run `hive init`, then commit, push and `hive admin push-config`, after:
-- upgrading Hive, so the bundles match the new version;
-- changing the `[permissions]` section of `hive.toml`, since the CLIs' permission files are
-  generated from it;
-- changing `.hive/prompts/orchestrator.md` or `worker.md`, which are built into the skills
-  ([Customising what agents are told](PROMPTS.md)).
-
-`hive overview` tells you when the bundles are stale, and why.
+Only to refresh the committed `.hive/agent/` copy for computers that still run an older Hive
+version, or after upgrading Hive if you want the repository's copy to match. Launches build
+their own bundles, so `[permissions]` and prompt changes need only be committed and pushed.
+`hive doctor` shows how the committed copy compares.
 
 ---
 

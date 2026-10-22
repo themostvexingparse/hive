@@ -467,10 +467,6 @@ def cmd_prompts(a):
         ui.out(ui.dim(f"  (built-in text, {len(builtin.splitlines())} lines; --full shows it)"))
     ui.out(addition.rstrip() if addition else
            ui.dim(f"  No project rules: {pfile} is missing or has only comments."))
-    on_disk = root / ".hive" / "agent" / "claude" / "skills" / skill / "SKILL.md"
-    if on_disk.exists() and on_disk.read_text("utf-8") != builtin + addition:
-        ui.warn(f"{on_disk.relative_to(root).as_posix()} differs from this. Run "
-                + ui.cmd("hive init") + " and commit .hive/agent/ to update it.")
 
     ui.section("Added at the start of each session")
     role_text = "\n\n".join(catalog[r].prompt for r in roles if catalog[r].prompt)
@@ -1610,10 +1606,7 @@ def cmd_config_explain(a):
 def _after_config_change(root: Path, key: str, local: bool) -> None:
     if local:
         return
-    if key.startswith("permissions."):
-        ui.note("Permission rules are also built into the agents' files: run "
-                + ui.cmd("hive init") + " to regenerate them.")
-    ui.note("Commit and push hive.toml so every agent's copy has it.")
+    ui.note("Commit and push hive.toml: agents' sessions use it once it is on main.")
     if load_admin_config().server_url:
         try:
             c = admin_client(sync=False)

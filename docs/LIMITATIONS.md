@@ -78,6 +78,16 @@ These need a real, logged-in account, and would use up some of its allowance:
 - Codex with a real model and account: the interactive orchestrator (`codex resume <id>`) and
   usage-limit messages.
 - [GitHub mode](INTEGRATION.md#github-mode-optional).
+- The simpler interface ([CLI_REDESIGN.md](CLI_REDESIGN.md)), tested with in-process servers
+  and simulated computers only so far:
+  - `hive agents login`, which opens each CLI against the agent's settings folder (the login
+    screens themselves weren't driven);
+  - Hive's files generated at launch (`~/.hive/bundles/<slot>/`), loaded by real sessions of
+    each CLI;
+  - Gemini: re-linking an extension that a slot had linked to the committed
+    `.hive/agent/gemini` folder (Hive reads the link's source from Gemini's
+    `.gemini-extension-install.json`, as Gemini CLI 0.41 writes it);
+  - pairing two real computers over a network.
 
 ---
 

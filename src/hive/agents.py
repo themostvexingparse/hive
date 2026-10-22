@@ -125,6 +125,8 @@ def unplace(name: str) -> tuple[Slot | None, bool]:
     cfg.slots = [s for s in cfg.slots if s.name != name]
     save_machine_config(cfg)
     Store(hive_home() / "state.db").forget(name)
+    import shutil
+    shutil.rmtree(hive_home() / "bundles" / name, ignore_errors=True)  # regenerated if re-added
     wt = Path(slot.worktree)
     if not wt.is_dir():
         return slot, True
