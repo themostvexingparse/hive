@@ -102,12 +102,19 @@ What differs with agy:
   the same call; otherwise the agent gets its output from `run_approved`, and a long command
   run that way can hit the same limit.
 - **A headless turn ends at the first tool call agy wants to ask about.** Hive approves its own
-  tools and the allowed shell commands, and refuses other commands with directions, but tools
-  Hive doesn't check (reading web pages, files outside the worktree) still end the turn.
+  tools, web reads and the allowed shell commands, and holds other commands for an approver,
+  but tools Hive doesn't check (such as files outside the worktree) still end the turn.
 
 ---
 
 ## Current limitations
+
+- Only Claude Code and agy let a command wait for an approver and then run in the agent's own
+  session. In Codex and Gemini CLI the command is refused, and the agent asks with
+  `request_approval`; the Hive daemon then runs the approved command for it.
+- PowerShell script blocks such as `ForEach-Object { $_.Name }` contain expressions Hive can't
+  classify, so a command with one waits for approval even when every program in it is
+  allowed. Pipeline cmdlets with plain parameters (`Where-Object Name -like *.py`) don't.
 
 - Typing to the orchestrator (the agent you chat with) while it's waiting for news needs
   **Esc** first ([Chatting in its terminal](ORCHESTRATOR.md#chatting-in-its-terminal)).

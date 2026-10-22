@@ -326,6 +326,107 @@ def test_hive_approves_allowed_commands_that_claude_codes_own_rules_would_ask_ab
         assert pre(cmd) == {"allow": True}, cmd
         out = format_output("claude", "PreToolUse", pre(cmd))
         assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert pre("curl https://example.com") == {}       # unlisted: left to Claude Code's rules
-    assert "request_approval" in pre("git status; git push origin x")["deny"]
+    assert pre("curl https://example.com") == {"allow": True}  # web reads are allowed now
+    # A dangerous part makes the whole command wait for an approver.
+    d.approval_gate = lambda rt, command, shell, ti: {"gate": command}
+    assert pre("git status; git push origin x") == {"gate": "git status; git push origin x"}
     assert format_output("codex", "PreToolUse", {"allow": True}) is None
+
+
+class FakeApprovals:
+    """The approval part of the server API, in memory. `decide(row)` runs on each read of a
+    pending approval and may decide it."""
+
+    def __init__(self, decide=lambda a: None, sent_to=("reviewer",)):
+        self.rows, self.decide, self.sent_to, self.escalated = {}, decide, list(sent_to), []
+
+    def get(self, path, **params):
+        if path == "/approvals":
+            states = (params.get("state") or "").split(",")
+            return [dict(a) for a in self.rows.values()
+                    if a["agent"] == params.get("agent") and a["state"] in states]
+        a = self.rows[int(path.rsplit("/", 1)[1])]
+        if a["state"] == "requested":
+            self.decide(a)
+        return dict(a)
+
+    def post(self, path, json=None):
+        if path == "/approvals":
+            aid = len(self.rows) + 1
+            self.rows[aid] = {"id": aid, "agent": "w1", "state": "requested", **json}
+            return {**self.rows[aid], "sent_to": self.sent_to}
+        aid, action = int(path.split("/")[2]), path.split("/")[3]
+        a = self.rows[aid]
+        if action == "claim":
+            if a["state"] != "approved":
+                raise HiveError(409, "approval_" + a["state"], "not approved")
+            a["state"] = "executed"
+        elif action == "escalate":
+            self.escalated.append(aid)
+        return dict(a)
+
+
+def approval_daemon(tmp_path, fake, vendor="claude"):
+    slot = Slot(name="w1", vendor=vendor, token="t", worktree=str(tmp_path))
+    d = core.Daemon(MachineConfig(server_url=UNREACHABLE, slots=[slot]),
+                    Store(tmp_path / "state.db"), echo=False)
+    rt = d.slots["w1"]
+    rt.me = {"roles": ["programmer"], "active": True, "can_code": True, "write_globs": []}
+    rt.client = fake
+    return d, rt
+
+
+def bash(d, rt, command, **extra):
+    return d._pre_tool(rt, "running", {"tool_name": "Bash",
+                                       "tool_input": {"command": command, **extra}})
+
+
+def test_a_command_that_needs_approval_waits_for_the_approver_then_runs(tmp_path):
+    def approve(a):
+        a.update(state="approved", decided_by="rev1")
+    fake = FakeApprovals(approve)
+    d, rt = approval_daemon(tmp_path, fake)
+    v = bash(d, rt, "git reset --hard", description="Drop my broken experiment")
+    assert v == {"allow": True}  # the CLI runs it itself, like after a user's "allow"
+    a = fake.rows[1]
+    assert a["command"] == "git reset --hard" and a["reason"] == "Drop my broken experiment"
+    assert a["state"] == "executed"  # used up: the next run needs a new approval
+    assert bash(d, rt, "git reset --hard") == {"allow": True} and len(fake.rows) == 2
+    # Commands on no list go the same way; allowed ones never ask.
+    assert bash(d, rt, "ftp example.com") == {"allow": True} and len(fake.rows) == 3
+    assert bash(d, rt, "curl https://example.com") == {"allow": True} and len(fake.rows) == 3
+    assert "never allowed" in bash(d, rt, "hive admin token")["deny"]  # forbidden: no request
+
+
+def test_a_refused_or_undecided_command_and_the_retry(tmp_path, monkeypatch):
+    def deny(a):
+        a.update(state="denied", decided_by="rev1", note="revert just that file instead")
+    d, rt = approval_daemon(tmp_path, FakeApprovals(deny))
+    v = bash(d, rt, "git reset --hard")["deny"]
+    assert "rev1 didn't approve" in v and "revert just that file" in v
+
+    monkeypatch.setattr(core, "HOOK_APPROVAL_WAIT", 0)  # nobody decides in time
+    fake = FakeApprovals()
+    d, rt = approval_daemon(tmp_path / "b", fake)
+    v = bash(d, rt, "git clean -fd")["deny"]
+    assert "#1" in v and "still pending" in v and "run the same command again" in v
+    assert fake.escalated == [1]  # undecided: handed on to the orchestrator
+    assert bash(d, rt, "git clean -fd")["deny"]  # asking again waits on the same request
+    assert len(fake.rows) == 1 and fake.escalated == [1]
+    fake.rows[1].update(state="approved", decided_by="orch")  # decided while the agent slept
+    assert bash(d, rt, "git clean -fd") == {"allow": True} and fake.rows[1]["state"] == "executed"
+
+    # Sent straight to the orchestrator (no reviewer): nothing to hand on.
+    fake = FakeApprovals(sent_to=["orchestrator"])
+    d, rt = approval_daemon(tmp_path / "c", fake)
+    bash(d, rt, "git clean -fd")
+    assert fake.escalated == []
+
+
+def test_in_a_session_someone_types_in_they_decide_like_any_user(tmp_path):
+    fake = FakeApprovals()
+    d, rt = approval_daemon(tmp_path, fake)
+    rt.attached = True  # `hive chat w1`
+    assert "ask" in bash(d, rt, "git reset --hard")
+    assert bash(d, rt, "ftp example.com") == {}  # unlisted: Claude Code asks
+    assert not fake.rows  # no approver was asked

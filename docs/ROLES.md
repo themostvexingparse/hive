@@ -39,7 +39,10 @@ everything in the repository's `.hive/` folder.
   repository's `main` branch ([Leases, git integration and reviews](INTEGRATION.md)).
 - **planner:** helps the orchestrator plan. Active during the `planning` phase.
 - **reviewer:** reviews other agents' work before it reaches `main`, when reviews are on
-  ([Reviews](INTEGRATION.md#reviews)).
+  ([Reviews](INTEGRATION.md#reviews)). Reviewers also decide other agents' requests to run
+  commands that need approval, before the orchestrator
+  ([How approval works](PERMISSIONS.md#how-approval-works-for-workers)). Any role you define
+  with `approval_decide` in its `tools` does the same.
 - **tester:** writes and runs tests.
 
 Combining roles:

@@ -63,6 +63,30 @@ READ_ONLY = [
     "gh run view", "gh run list", "gh auth status",
 ]
 
+# Moving around, inspecting and reshaping text in pipelines; safe for every role. `xargs` is
+# checked by the command it runs.
+SHELL_BASICS = [
+    "cd", "pushd", "popd", "test", "true", "false", "sleep", "date", "printf", "basename",
+    "dirname", "realpath", "readlink", "tr", "jq", "column", "nl", "md5sum", "sha1sum",
+    "sha256sum", "xargs",
+    # PowerShell
+    "Set-Location", "sl", "Start-Sleep", "Get-Date", "Where-Object", "Select-Object", "select",
+    "Sort-Object", "sort", "ForEach-Object", "Group-Object", "Format-Table", "ft",
+    "Format-List", "fl", "Out-String", "ConvertTo-Json", "ConvertFrom-Json", "Join-Path",
+    "Split-Path",
+]
+
+# Reading from the web. Sending data (uploads, POST/PUT/PATCH/DELETE) needs approval: see
+# dangerous().
+NETWORK = ["curl", "wget", "Invoke-WebRequest", "iwr", "Invoke-RestMethod", "irm"]
+
+# Inspecting containers; starting, stopping or removing them needs approval (unlisted).
+DOCKER = [
+    "docker ps", "docker images", "docker logs", "docker inspect", "docker version",
+    "docker info", "docker compose ps", "docker compose logs", "docker compose config",
+    "docker-compose ps", "docker-compose logs", "docker-compose config",
+]
+
 # Running a project's tests and static checks; every role (the orchestrator verifies reports
 # and the reviewer verifies work by running them).
 TESTS = [
@@ -82,6 +106,8 @@ BUILD = [
     "mvn", "gradle", "gradlew", "ruff", "black", "prettier", "eslint",
     # Browsers, e.g. headless screenshots to check a web page
     "msedge", "chrome", "chromium", "chromium-browser", "google-chrome", "firefox",
+    # Text tools that can rewrite files
+    "sed", "awk", "tee",
     # POSIX file operations
     "mkdir", "touch", "cp", "mv", "rm", "rmdir",
     # cmd.exe file operations
@@ -89,6 +115,15 @@ BUILD = [
     # PowerShell file operations
     "New-Item", "Copy-Item", "Move-Item", "Rename-Item", "Remove-Item", "Set-Content",
     "Add-Content", "Out-File",
+]
+
+# Installing and inspecting dependencies: coding roles. Installs run third-party code, which is
+# why the "strict" preset leaves this list out, like BUILD.
+PACKAGES = [
+    "pip install", "pip show", "pip list", "pip freeze", "pip3 install", "pip3 show",
+    "pip3 list", "python -m pip", "python3 -m pip", "py -m pip", "uv add", "uv pip",
+    "uv lock", "poetry", "cargo add", "cargo update", "go get", "go mod", "dotnet add",
+    "dotnet restore", "npm ls", "npm view", "npm outdated", "composer", "bundle",
 ]
 
 # Ordinary, recoverable git history work in the agent's own branch.
@@ -160,11 +195,14 @@ def build_rules(cfg: dict) -> dict[str, dict[str, list[str]]]:
     approval = [a for a in dict.fromkeys(APPROVAL + extra_approval) if a not in forbidden]
     rules = {}
     for cls in ROLE_CLASSES:
-        allow = ([] if preset == "none" else READ_ONLY + TESTS) + checks + extra_allow
+        allow = ([] if preset == "none" else READ_ONLY + SHELL_BASICS + TESTS) + checks \
+            + extra_allow
+        if preset == "standard":
+            allow += NETWORK + DOCKER
         if cls == "worker" and preset != "none":
             allow += GIT_HISTORY
             if preset == "standard":
-                allow += BUILD
+                allow += BUILD + PACKAGES
         rules[cls] = {"allow": [a for a in dict.fromkeys(allow)
                                 if a not in forbidden and a not in approval],
                       "approval": list(approval), "forbidden": list(forbidden)}
@@ -414,9 +452,58 @@ def dangerous(command: str) -> str | None:
             return "permission change"
         if prog in ("sudo", "su", "doas", "runas", "gsudo"):
             return "privilege elevation"
+        if prog in _NET_PROGRAMS and _sends_data(prog, args):
+            return "sends data over the network"
         if prog == "start-process" and "runas" in low:
             return "privilege elevation"
     return None
+
+
+_NET_PROGRAMS = {"curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm"}
+_SEND_METHODS = {"post", "put", "patch", "delete"}
+
+
+def _sends_data(prog: str, args: list[str]) -> bool:
+    """Whether a curl / wget / Invoke-WebRequest call uploads or sends data, or uses a
+    method that changes things on the server. Plain downloads and reads are fine."""
+    if prog in ("curl", "wget") and any(_ps_web_param(a) for a in args):
+        prog = "invoke-webrequest"  # Windows PowerShell 5 aliases both to Invoke-WebRequest
+    for i, a in enumerate(args):
+        nxt = args[i + 1].lower() if i + 1 < len(args) else ""
+        low = a.lower()
+        if prog == "curl":
+            if low.startswith(("--data", "--json", "--form", "--upload-file")):
+                return True
+            if re.fullmatch(r"-[A-Za-z]+", a) and set(a[1:]) & {"d", "F", "T"}:
+                return True  # short options, possibly bundled: -sd, -F, -T
+            if a in ("-X", "--request") and nxt in _SEND_METHODS:
+                return True
+            if (a.startswith("-X") or low.startswith("--request=")) and \
+                    a.split("=", 1)[-1].lstrip("-X").lower() in _SEND_METHODS:
+                return True
+        elif prog == "wget":
+            if low.startswith(("--post-data", "--post-file", "--body-data", "--body-file")):
+                return True
+            if low == "--method" and nxt not in ("get", "head", ""):
+                return True
+            if low.startswith("--method=") and low.split("=", 1)[1] not in ("get", "head"):
+                return True
+        else:  # PowerShell: Invoke-WebRequest / Invoke-RestMethod, any abbreviation
+            name = low.split(":", 1)
+            if _ps_param(a, "method", minimum=2):
+                value = name[1] if len(name) > 1 else nxt
+                if value.strip("'\"$") in _SEND_METHODS:
+                    return True
+            if _ps_param(a, "body", minimum=2) or _ps_param(a, "infile", minimum=3):
+                return True
+    return False
+
+
+def _ps_web_param(arg: str) -> bool:
+    """An Invoke-WebRequest parameter such as -Uri or -OutFile (not a curl short option)."""
+    return len(arg) > 2 and arg[1] != "-" and any(
+        _ps_param(arg, n, minimum=3) for n in ("uri", "outfile", "method", "body", "infile",
+                                               "headers", "usebasicparsing", "contenttype"))
 
 
 def pushes_to(command: str, branch: str) -> bool:
@@ -460,9 +547,10 @@ def claude_settings(rules: dict[str, list[str]], cls: str) -> dict:
              + tools(rules["allow"])}
     if cls == "orchestrator":  # interactive: dangerous commands ask the user
         perms["ask"] = tools(rules["approval"])
-        perms["deny"] = tools(rules["forbidden"])
-    else:  # headless: blocked here, run via request_approval instead
-        perms["deny"] = tools(rules["forbidden"] + rules["approval"])
+    # Workers' dangerous commands aren't listed: Hive's hook holds them for an approver and
+    # then allows them, which a deny rule here would override. Without the hook, headless
+    # Claude Code refuses unlisted commands anyway.
+    perms["deny"] = tools(rules["forbidden"])
     return {"permissions": perms}
 
 
@@ -512,8 +600,8 @@ def agy_settings(rules: dict[str, list[str]], cls: str) -> dict:
              "ask": [], "deny": [_agy_command(p) for p in rules["forbidden"]]}
     if cls == "orchestrator":  # interactive: dangerous commands ask the user
         perms["ask"] = [_agy_command(p) for p in rules["approval"]]
-    else:  # headless: blocked here, run via request_approval instead
-        perms["deny"] += [_agy_command(p) for p in rules["approval"]]
+    # Workers' dangerous commands aren't listed: Hive's hook holds them for an approver and
+    # then approves them (as for Claude Code); without the hook agy refuses them headless.
     return {"permissions": perms}
 
 

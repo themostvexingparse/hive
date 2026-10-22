@@ -396,6 +396,11 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def claim_approval(aid):
         return jsonify(hive.claim_approval(me(), aid))
 
+    @app.post(f"{api}/approvals/<int:aid>/escalate")
+    @auth()
+    def escalate_approval(aid):
+        return jsonify(hive.escalate_approval(me(), aid))
+
     @app.post(f"{api}/approvals/<int:aid>/result")
     @auth()
     def approval_result(aid):

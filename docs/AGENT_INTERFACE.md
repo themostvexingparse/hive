@@ -58,6 +58,8 @@ them in its `tools`) add the
 given a `result` and a report, it also completes the task and files the report:
 [What `lease_release` does](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)).
 
+**Reviewers** add `review_verdict` and `approval_decide` (below).
+
 **The orchestrator** adds:
 - `await_events(timeout_seconds)`: wait for something to happen (below);
 - `task_create`, `task_assign`, `task_cancel`: manage tasks;
@@ -65,7 +67,8 @@ given a `result` and a report, it also completes the task and files the report:
   question (a [decision](GLOSSARY.md#decision)); `freeze` stops the fleet until you answer;
 - `status_publish(summary, body, level)`: post a status update for you;
 - `report_request`: ask an agent for a report;
-- `approval_decide(approval_id, approve, note)`: approve or deny a dangerous command;
+- `approval_decide(approval_id, approve, note)`: approve or deny another agent's command
+  that needs approval (reviewers decide first; the orchestrator gets the rest);
 - `review_verdict`: approve or reject work under [review](INTEGRATION.md#reviews);
 - `lease_force_release`: take a lease away from an agent;
 - `role_reassign`: change an agent's roles;
@@ -129,8 +132,15 @@ and differs in two ways:
   what `UserPromptSubmit` does. agy runs `SessionStart` only for new conversations.
 - In a headless turn agy refuses any tool call its own rules would ask about, and then
   **ends the turn**. So Hive's `PreToolUse` hook decides instead: it approves Hive's tools and
-  the commands your [permissions](PERMISSIONS.md) allow, and refuses other commands with an
-  explanation the agent can act on (do it differently, or `request_approval`).
+  the commands your [permissions](PERMISSIONS.md) allow, and holds other commands for an
+  approver, as for Claude Code (below).
+
+**A command that needs approval waits in `PreToolUse`** (Claude Code and agy): the hook
+files an approval request and holds the command, for up to four minutes and using no tokens,
+until a reviewer or the orchestrator decides; then it allows or refuses it
+([How approval works](PERMISSIONS.md#how-approval-works-for-workers)). For this the Claude Code
+and agy bundles give `PreToolUse` a five-minute time limit instead of ten seconds, so Hive
+always answers before the CLI would give up on the hook.
 
 When a hook denies something, the denial includes the reason and what to do instead (for
 example, "call `lease_acquire` first"). That is what you see in the live output as a failed

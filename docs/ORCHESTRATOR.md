@@ -115,7 +115,8 @@ instructions in `.hive/prompts/orchestrator.md` in the repository
   handle it first ([Messages](COORDINATION.md#messages-and-priorities));
 - raise decisions;
 - request reports and read every report;
-- approve or deny workers' dangerous shell commands ([Shell-command permissions](PERMISSIONS.md));
+- approve or deny workers' commands that need approval, when no reviewer is available or
+  none decided within a minute and a half ([Shell-command permissions](PERMISSIONS.md));
 - take away [leases](INTEGRATION.md#leases) (agents' locks on files) that an agent no longer
   needs or can't release, e.g. because its computer died;
 - propose role changes (changes to required roles, `orchestrator` and `programmer`, need

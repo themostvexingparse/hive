@@ -52,7 +52,8 @@ def test_agy_settings_follow_the_three_tiers():
     worker = P.agy_settings(rules["worker"], "worker")["permissions"]
     orch = P.agy_settings(rules["orchestrator"], "orchestrator")["permissions"]
     push = r"command(regex:^git\s+push(\s.*)?$)"
-    assert push in worker["deny"] and push in orch["ask"] and push not in orch["deny"]
+    # Workers' dangerous commands wait in Hive's hook for an approver, so agy mustn't deny them.
+    assert push not in worker["deny"] and push in orch["ask"] and push not in orch["deny"]
     assert r"command(regex:^hive\s+decide(\s.*)?$)" in orch["deny"]
     assert "mcp(hive_hive/*)" in worker["allow"] and "mcp(hive_hive/*)" in orch["allow"]
     assert r"command(regex:^git\s+commit(\s.*)?$)" in worker["allow"]
@@ -73,7 +74,7 @@ def test_every_part_of_a_command_must_be_allowed():
     allow = P.build_rules({})["worker"]["allow"]
     assert P.allowed("git status --short", allow)
     assert P.allowed("git add a.py && git commit -m 'x; y'", allow)
-    assert not P.allowed("git status && curl http://x", allow)
+    assert not P.allowed("git status && ftp example.com", allow)
     assert not P.allowed("", allow)
 
 
@@ -125,7 +126,8 @@ def test_agy_home_gets_plugin_enabled_and_role_settings(tmp_path):
     assert data["model"] == "Gemini 4 Argon (Low)"
     assert data["trustedWorkspaces"] == [os.path.normpath(str(tmp_path))]
     worker_deny = data["permissions"]["deny"]
-    assert r"command(regex:^git\s+push(\s.*)?$)" in worker_deny
+    assert r"command(regex:^hive\s+admin(\s.*)?$)" in worker_deny  # the worker's rules
+    assert r"command(regex:^git\s+push(\s.*)?$)" not in worker_deny
 
     # With a committed bundle, that is what the slot gets, with the rules for its role.
     init_repo(tmp_path, "http://srv")
@@ -305,13 +307,14 @@ def test_agy_shell_commands_are_approved_or_refused_by_hive(daemon):
     assert pre(d, rt, "run_command", CommandLine="git add a && git commit -m x") == \
         {"allow": True}
     assert "not allowed" in pre(d, rt, "run_command", CommandLine="git push origin main")["deny"]
-    assert "request_approval" in pre(d, rt, "run_command", CommandLine="git reset --hard")["deny"]
     assert "never allowed" in pre(d, rt, "run_command", CommandLine="hive admin token")["deny"]
-    unlisted = pre(d, rt, "run_command", CommandLine="curl https://example.com")["deny"]
-    assert "isn't on the project's list" in unlisted and "request_approval" in unlisted
+    # Dangerous and unlisted commands wait for an approver (tested in test_daemon.py).
+    d.approval_gate = lambda rt, command, shell, ti: {"gate": command}
+    assert pre(d, rt, "run_command", CommandLine="git reset --hard") == {"gate": "git reset --hard"}
+    assert pre(d, rt, "run_command", CommandLine="ftp example.com") == {"gate": "ftp example.com"}
     # The orchestrator's interactive session leaves unlisted commands to agy, which asks.
     rt.me = {**rt.me, "roles": ["orchestrator"]}
-    assert pre(d, rt, "run_command", CommandLine="curl https://example.com") == {}
+    assert pre(d, rt, "run_command", CommandLine="ftp example.com") == {}
     assert "ask" in pre(d, rt, "run_command", CommandLine="git reset --hard")
 
 

@@ -1218,10 +1218,48 @@ class Hive:
             aid = c.execute(insert(approvals).values(
                 agent=actor.name, command=command, shell=shell, reason=reason[:4000],
                 task_id=task_id, state="requested", created=now())).inserted_primary_key[0]
+            # Reviewers decide first; with none available the orchestrator gets it at once.
+            roles = self._approver_roles(c, f, actor.name) or ["orchestrator"]
+            for r in roles:
+                self._emit(c, "approval.requested", actor.name, f"role:{r}", id=aid,
+                           agent=actor.name, command=command, shell=shell,
+                           reason=reason[:2000], task_id=task_id)
+            return {**row(c.execute(select(approvals).where(approvals.c.id == aid)).first()),
+                    "sent_to": roles}
+
+    def _approver_roles(self, c, f: dict, requester: str) -> list[str]:
+        """Roles besides the orchestrator's that may approve commands (the reviewer's, and
+        custom ones with approval_decide) which an online agent with quota left, other than
+        the requester, holds."""
+        catalog = self._catalog(f)
+        roles = {n for n, r in catalog.items()
+                 if n != "orchestrator" and "approval_decide" in r.tools}
+        if not roles:
+            return []
+        t = now()
+        held: set[str] = set()
+        for a in c.execute(select(agents)).fetchall():
+            a = row(a)
+            if a["name"] != requester and t - a["last_seen"] < self.offline_after \
+                    and a["quota_until"] <= t:
+                held |= roles & set(a["roles"])
+        return sorted(held)
+
+    def escalate_approval(self, actor: Actor, aid: int) -> dict:
+        """The requester's daemon hands a request no reviewer decided in time to the
+        orchestrator."""
+        with self._write() as c:
+            self._fleet(c)
+            a = self._approval(c, aid)
+            if a["agent"] != actor.name:
+                raise ApiError(403, "not_requester", f"approval #{aid} belongs to {a['agent']}")
+            if a["state"] != "requested":
+                return {"escalated": False, "state": a["state"]}
             self._emit(c, "approval.requested", actor.name, "role:orchestrator", id=aid,
-                       agent=actor.name, command=command, shell=shell, reason=reason[:2000],
-                       task_id=task_id)
-            return row(c.execute(select(approvals).where(approvals.c.id == aid)).first())
+                       agent=a["agent"], command=a["command"], shell=a["shell"],
+                       reason=(a["reason"] or "")[:2000], task_id=a["task_id"],
+                       escalated=True)
+            return {"escalated": True, "state": a["state"]}
 
     def _approval(self, c, aid: int, write: bool = True) -> dict:
         a = row(c.execute(select(approvals).where(approvals.c.id == aid)).first())

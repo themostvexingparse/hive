@@ -88,10 +88,15 @@ BUILTIN_ROLES: dict[str, Role] = {
                 "tasks (task_create) with clear specs, dependencies and path hints."),
     ),
     "reviewer": Role(
-        name="reviewer", tools=BASE_TOOLS | {"review_verdict"}, task_kinds=("review",),
-        fallback_to="orchestrator",
+        # Reviewers decide other agents' command approvals first; the orchestrator gets the
+        # ones no reviewer takes (see Hive.request_approval / escalate_approval).
+        name="reviewer", tools=BASE_TOOLS | {"review_verdict", "approval_decide"},
+        task_kinds=("review",), fallback_to="orchestrator",
+        wake_on=Role.wake_on + ("approval.requested",),
         prompt=("You are a REVIEWER. Inspect the diff of tasks in review (git diff main...<branch>) "
-                "and call review_verdict(approve, notes). Be specific about required changes."),
+                "and call review_verdict(approve, notes). Be specific about required changes. "
+                "You also decide other agents' requests to run commands that need approval "
+                "(approval_decide), as the hive-worker skill describes."),
     ),
     "tester": Role(
         name="tester", can_code=True, write_globs=("tests/**",),

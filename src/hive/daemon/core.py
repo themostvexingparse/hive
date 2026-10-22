@@ -15,6 +15,7 @@ from .. import globs as G
 from .. import permissions as P
 from .. import prompts
 from .. import ui
+from ..hooks import APPROVAL_VENDORS, HOOK_APPROVAL_WAIT
 from ..permissions import role_class
 from ..config import MachineConfig, Slot, find_repo_root, hive_home, load_repo_config
 from . import gitops, wake
@@ -41,6 +42,7 @@ MIN_GAP_SECONDS = 10
 MAX_WAKES_PER_HOUR = 20
 MAX_STOP_BLOCKS = 3
 AUTO_RELEASE_MAX_WAIT = 1800  # wait at most this long for a running turn to finish
+APPROVAL_ESCALATE_AFTER = 90  # a request reviewers haven't decided goes to the orchestrator
 
 CLAUDE_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 GEMINI_WRITE_TOOLS = {"write_file", "replace", "edit"}
@@ -103,6 +105,7 @@ class SlotRuntime:
         self.attached = False  # a human-facing interactive session owns this slot
         self.awaiting = False  # the interactive agent is blocked in await_events
         self.waiting_approvals: set[int] = set()  # request_approval calls blocked on a decision
+        self.escalated_approvals: set[int] = set()  # handed on to the orchestrator
         # Decisions a blocked request_approval call already consumed; its event may arrive later.
         self.consumed_approvals: deque[int] = deque(maxlen=200)
         self.sink: StreamSink | None = None
@@ -388,7 +391,8 @@ class Daemon:
             if p["id"] in rt.waiting_approvals or p["id"] in rt.consumed_approvals:
                 return  # the blocked request_approval call picks the decision up itself
             verdict = "APPROVED" if p["approve"] else "denied"
-            nxt = (f" Run it now with run_approved({p['id']})." if p["approve"] else "")
+            nxt = (" Run the same command again: Hive lets it through once (or call "
+                   f"run_approved({p['id']}))." if p["approve"] else "")
             self.trigger(rt, "approval.decided",
                          f"{p['by']} {verdict} your request #{p['id']} to run `{p['command']}`"
                          f"{': ' + p['note'] if p.get('note') else ''}.{nxt}")
@@ -798,16 +802,19 @@ class Daemon:
             shell = default_shell() if rt.cfg.vendor == "codex" else tool_shell(tool)
             command = command_text(ti.get("command") or ti.get("CommandLine") or "")
             verdict = self._check_shell(rt, command, shell)
-            if verdict:
+            if verdict.get("kind") == "forbidden" or rt.cfg.vendor not in APPROVAL_VENDORS:
                 return verdict
-            if agy:
-                return self._agy_shell(rt, command, shell)
-            # Claude Code's own rules only match a command's start, so they ask about compound
-            # commands (`a; b`) and full program paths that Hive's parser allows: approve those.
-            if rt.cfg.vendor == "claude" and \
-                    P.allowed(command, rt.rules[role_class(rt.roles)]["allow"]):
+            # The CLIs' own rules only match a command's start, so they ask about compound
+            # commands (`a; b`) and full program paths that Hive's parser allows (and a
+            # headless agy turn ends when asked): approve those.
+            if not verdict and P.allowed(command, rt.rules[role_class(rt.roles)]["allow"]):
                 return {"allow": True}
-            return {}
+            if rt.is_orchestrator:
+                return verdict  # its dangerous commands ask the user; the rest the CLI decides
+            if rt.attached:  # someone is typing in this session: they decide, like any user
+                return {"ask": "Hive: a worker needs approval for this command. Confirm only "
+                               "if you intend it."} if verdict else {}
+            return self.approval_gate(rt, command, shell, ti)
         if agy and tool in AGY_WRITE_TOOLS:
             raw = next((ti[k] for k in AGY_PATH_ARGS if isinstance(ti.get(k), str)), "")
             if not raw:
@@ -835,20 +842,95 @@ class Daemon:
                     return verdict
         return {}
 
-    def _agy_shell(self, rt: SlotRuntime, command: str, shell: str) -> dict:
-        """agy: a command that passed the hard limits. In a headless turn agy refuses anything
-        its rules would ask about and then ends the turn, so Hive approves the project's
-        allowed commands itself and refuses the rest with what to do instead. The
-        orchestrator's interactive session asks the user."""
-        if P.allowed(command, rt.rules[role_class(rt.roles)]["allow"]):
+    def approval_gate(self, rt: SlotRuntime, command: str, shell: str,
+                      tool_input: dict) -> dict:
+        """A worker's command that needs approval (dangerous, or on no list) waits here, as
+        at a user's "allow?" prompt, while a reviewer or the orchestrator decides; once
+        approved, the CLI runs it itself. Runs inside the PreToolUse hook, so it answers
+        within HOOK_APPROVAL_WAIT. An approval granted after the hook gave up lets the same
+        command through once when the agent runs it again."""
+        try:
+            aid = None
+            for a in reversed(rt.client.get("/approvals", agent=rt.name,
+                                            state="approved,requested", limit=50)):
+                if a["command"] != command:
+                    continue
+                if a["state"] == "approved":
+                    if self._claim(rt, a["id"]):
+                        return {"allow": True}
+                elif aid is None:
+                    aid = a["id"]  # asked before and still undecided: keep waiting on it
+            if aid is None:
+                task = self.store.get(rt.name, "session_task", None)
+                reason = str(tool_input.get("description") or tool_input.get("toolSummary")
+                             or "").strip() or (f"Needed for task #{task}." if task else
+                                                "Needed for the current work.")
+                aid = self._new_approval(rt, command, reason, shell, task)
+            state = self.wait_for_approval(rt, aid, HOOK_APPROVAL_WAIT)
+        except HiveError as e:
+            return {"deny": f"Hive couldn't ask for approval of this command ({e.message}). "
+                            "Do it another way, or try again later."}
+        if state.get("state") == "approved" and self._claim(rt, aid):
             return {"allow": True}
-        if rt.is_orchestrator:
-            return {}
-        return {"deny": "This command isn't on the project's list of commands agents may run "
-                        "without asking ([permissions] in hive.toml), and nobody can confirm "
-                        "it during your turn. Do it another way, or, if you need exactly this "
-                        f"command, call request_approval(command={command!r}, shell={shell!r}, "
-                        "reason=<why it is needed and what it affects>)."}
+        if state.get("state") == "denied":
+            note = f": {state['note']}" if state.get("note") else "."
+            return {"deny": f"{state.get('decided_by') or 'The approver'} didn't approve this "
+                            f"command{note} Follow the note, or find another way."}
+        return {"deny": f"Approval #{aid} for this command is still pending. Record where you "
+                        "are with task_update(task_id, note=...), then end your turn; you'll "
+                        "be woken when it's decided. Then run the same command again."}
+
+    def _new_approval(self, rt: SlotRuntime, command: str, reason: str, shell: str,
+                      task_id) -> int:
+        r = rt.client.post("/approvals", {"command": command, "reason": reason, "shell": shell,
+                                          "task_id": task_id})
+        if "orchestrator" in (r.get("sent_to") or []):
+            rt.escalated_approvals.add(r["id"])  # no reviewer could take it: nothing to hand on
+        return r["id"]
+
+    def _claim(self, rt: SlotRuntime, aid: int) -> bool:
+        """Use up an approval for a command the CLI is about to run itself."""
+        try:
+            rt.client.post(f"/approvals/{aid}/claim")
+        except HiveError:
+            return False  # expired, or used meanwhile
+        rt.consumed_approvals.append(aid)
+        return True
+
+    def wait_for_approval(self, rt: SlotRuntime, aid: int, seconds: float) -> dict:
+        """Wait, without using tokens, for a decision on approval `aid`. A request reviewers
+        haven't decided goes to the orchestrator after APPROVAL_ESCALATE_AFTER seconds, or
+        when the wait ends undecided."""
+        start = time.time()
+        rt.waiting_approvals.add(aid)
+        state: dict = {}
+        try:
+            while not self.stop_event.is_set():
+                state = rt.client.get(f"/approvals/{aid}")
+                if state["state"] != "requested":
+                    break
+                if time.time() - start >= APPROVAL_ESCALATE_AFTER:
+                    self.escalate(rt, aid)
+                if time.time() - start >= seconds:
+                    break
+                self.stop_event.wait(2)
+            if state.get("state") == "requested":
+                self.escalate(rt, aid)
+        finally:
+            if state.get("state") not in (None, "requested"):
+                rt.consumed_approvals.append(aid)  # its event must not queue another wake
+            rt.waiting_approvals.discard(aid)
+        return state
+
+    def escalate(self, rt: SlotRuntime, aid: int) -> None:
+        if aid in rt.escalated_approvals:
+            return
+        try:
+            rt.client.post(f"/approvals/{aid}/escalate")
+            rt.escalated_approvals.add(aid)
+        except HiveError as e:
+            log.warning("[%s] could not hand approval #%s to the orchestrator: %s",
+                        rt.name, aid, e)
 
     def _check_write(self, rt: SlotRuntime, raw: str) -> dict:
         """Verdict for writing the file `raw` (absolute or relative to the worktree)."""
@@ -939,8 +1021,8 @@ class Daemon:
 
     def request_approval(self, rt: SlotRuntime, command: str, reason: str, shell: str,
                          task_id: int | None, wait_seconds: float) -> dict:
-        """Ask the orchestrator to approve a dangerous command; by default wait (without using
-        tokens) for the decision and, if approved, run it straight away."""
+        """Ask a reviewer (or the orchestrator) to approve a command; by default wait
+        (without using tokens) for the decision and, if approved, run it straight away."""
         try:
             shell = resolve_shell(shell)
         except ValueError as e:
@@ -948,23 +1030,8 @@ class Daemon:
         verdict = self._check_shell(rt, command, shell)
         if verdict.get("kind") == "forbidden":
             raise HiveError(403, "forbidden_command", verdict["deny"])
-        r = rt.client.post("/approvals", {"command": command, "reason": reason, "shell": shell,
-                                          "task_id": task_id})
-        aid = r["id"]
-        end = time.time() + max(0.0, min(wait_seconds, 1500.0))
-        rt.waiting_approvals.add(aid)
-        state: dict = {}
-        try:
-            while time.time() < end and not self.stop_event.is_set():
-                state = rt.client.get(f"/approvals/{aid}")
-                if state["state"] != "requested":
-                    break
-                self.stop_event.wait(2)
-            state = rt.client.get(f"/approvals/{aid}")
-        finally:
-            if state.get("state") not in (None, "requested"):
-                rt.consumed_approvals.append(aid)  # its event must not queue another wake
-            rt.waiting_approvals.discard(aid)
+        aid = self._new_approval(rt, command, reason, shell, task_id)
+        state = self.wait_for_approval(rt, aid, max(0.0, min(wait_seconds, 1500.0)))
         if state["state"] == "approved":
             return {"approval_id": aid, "decision": "approved", "note": state.get("note"),
                     **self.run_approved(rt, aid)}
@@ -972,8 +1039,8 @@ class Daemon:
             return {"approval_id": aid, "decision": "denied", "note": state.get("note"),
                     "message": "Not approved. Follow the note or find a safer approach."}
         return {"approval_id": aid, "decision": "pending",
-                "message": "No decision yet. End your turn; you will be woken when the "
-                           f"orchestrator decides. If approved, call run_approved({aid})."}
+                "message": "No decision yet. End your turn; you will be woken when it is "
+                           f"decided. If approved, call run_approved({aid})."}
 
     def run_approved(self, rt: SlotRuntime, aid: int) -> dict:
         """Run an approved command exactly once, in this agent's worktree."""
@@ -1363,7 +1430,8 @@ def summarize_event(ev: dict) -> str:
         return f"Orchestrator failover: {p['old']} → {p['new']}"
     if t == "approval.requested":
         return f"{p['agent']} requests APPROVAL #{p['id']} to run `{p['command'][:500]}` " \
-               f"({p['shell']}{', task #' + str(p['task_id']) if p.get('task_id') else ''}). " \
+               + ("(no reviewer decided it, so it's yours) " if p.get("escalated") else "") \
+               + f"({p['shell']}{', task #' + str(p['task_id']) if p.get('task_id') else ''}). " \
                f"Reason: {p['reason'][:800]} — decide with approval_decide({p['id']}, " \
                "approve, note); the agent is waiting."
     if t == "report.submitted":

@@ -27,6 +27,14 @@ EVENTS = {
     # turn stands for the user's prompt (see agy_input).
     "PreInvocation": "post_tool",
 }
+# CLIs whose PreToolUse hook can approve a tool call: for them a worker's command that needs
+# approval waits in the hook while a reviewer or the orchestrator decides, like at a user's
+# "allow?" prompt. Hive answers within HOOK_APPROVAL_WAIT; the CLI's own limit for the hook
+# (PRE_TOOL_HOOK_TIMEOUT, set by `hive init`) is longer, since a hook that times out may let
+# the tool through.
+APPROVAL_VENDORS = ("claude", "agy")
+HOOK_APPROVAL_WAIT = 240
+PRE_TOOL_HOOK_TIMEOUT = 300
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "replace", "edit",
                "apply_patch", "edit_file", "write_to_file", "replace_file_content",
                "multi_replace_file_content", "sed_file", "notebook_edit"}
@@ -109,7 +117,8 @@ def run_hook(raw_event: str, vendor: str | None) -> int:
     if vendor == "agy":
         event, data = agy_input(raw_event, data)
     try:
-        verdict = d.post(f"/hook/{event}", data, timeout=5)
+        verdict = d.post(f"/hook/{event}", data,
+                         timeout=HOOK_APPROVAL_WAIT + 30 if event == "pre_tool" else 5)
     except Exception as e:
         if event == "pre_tool" and data.get("tool_name") in WRITE_TOOLS:
             verdict = {"deny": f"Hive daemon unreachable ({type(e).__name__}); file writes are "

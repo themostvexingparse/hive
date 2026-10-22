@@ -173,10 +173,24 @@ def test_dangerous_command_runs_after_orchestrator_approval(world):
     (build / "sub").mkdir(parents=True)
     (build / "sub" / "out.o").write_text("x")
 
-    # The hook blocks it with instructions; forbidden commands are blocked outright.
-    v = daemon.handle_hook("prog1", "pre_tool", {"tool_name": "Bash",
-                                                 "tool_input": {"command": "rm -r build"}})
-    assert "request_approval" in v["deny"]
+    # The hook holds the command while an approver (here the orchestrator: no reviewer is
+    # enrolled) decides, then lets the CLI run it; forbidden commands are blocked outright.
+    held = {}
+
+    def run_in_cli():
+        held["v"] = daemon.handle_hook("prog1", "pre_tool", {
+            "tool_name": "Bash", "tool_input": {"command": "rm -r build",
+                                                "description": "Remove stale build output"}})
+
+    th = threading.Thread(target=run_in_cli)
+    th.start()
+    waiting = wait_for(lambda: admin.get("/approvals", state="requested"),
+                       what="approval request from the hook")[0]
+    assert waiting["reason"] == "Remove stale build output" and th.is_alive()
+    daemon.call_tool("orch", "approval_decide", {"approval_id": waiting["id"], "approve": True})
+    th.join(30)
+    assert held["v"] == {"allow": True}
+    assert admin.get(f"/approvals/{waiting['id']}")["state"] == "executed"  # used up
     v = daemon.handle_hook("prog1", "pre_tool", {"tool_name": "Bash", "tool_input": {
         "command": "git status && git push origin main"}})
     assert "lease_release" in v["deny"]

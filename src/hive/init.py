@@ -29,6 +29,7 @@ import tomli_w
 from . import __version__, permissions
 from . import prompts
 from .config import load_repo_config
+from .hooks import APPROVAL_VENDORS, PRE_TOOL_HOOK_TIMEOUT
 from .roles import BUILTIN_ROLES, load_roles
 
 HIVE_TOML = """\
@@ -130,10 +131,12 @@ access), call `decision_request(kind="stuck", task_id=..., question=..., context
 include concrete options.
 
 ## Approving commands
-Workers can't run dangerous commands on their own: pushes, history rewrites (`reset --hard`,
-`clean`, `branch -D`, …), recursive or forced deletes. When one needs such a command, you get
-an `approval.requested` event, and the worker is usually blocked waiting for you. Decide
-quickly with `approval_decide(approval_id, approve, note)`.
+Workers can't run some commands on their own: pushes, history rewrites (`reset --hard`,
+`clean`, `branch -D`, …), recursive or forced deletes, sending data over the network, and
+commands on none of the project's lists. Reviewers decide those requests first. You get an
+`approval.requested` event when no reviewer is available or none decided within a minute and a
+half; the worker is usually blocked waiting. Decide quickly with
+`approval_decide(approval_id, approve, note)`.
 
 **Approve** when all of these hold:
 - the command is needed for the agent's current task;
@@ -226,13 +229,20 @@ You are one agent in a Hive fleet. Your wake prompt says who you are and why you
    with uncommitted changes in leased files until you have.
 
 ## Commands that need approval
-Reading, tests, builds and ordinary git work (commit, merge, rebase, stash, checkout, …) run
-directly. Some commands need the orchestrator's approval:
-- pushes;
-- history rewrites (`reset --hard`, `clean`, `branch -D`, …);
-- recursive or forced deletes.
+Reading, tests, builds, package installs, web reads and ordinary git work (commit, merge,
+rebase, stash, checkout, …) run directly. These need a reviewer's or the orchestrator's
+approval:
+- pushes, history rewrites (`reset --hard`, `clean`, `branch -D`, …) and recursive or forced
+  deletes;
+- sending data over the network (uploads, POST/PUT/PATCH/DELETE requests);
+- commands on none of the project's lists.
 
-If a command is blocked for that reason:
+In Claude Code and agy you just run the command: it **waits** (a few minutes at most) while an
+approver decides, then runs, or is refused with the approver's note. If it's still undecided,
+you're told so: record your progress with `task_update(note=...)`, end your turn, and when
+you're woken with the decision, run the same command again.
+
+Otherwise, when a command is blocked and the message says to:
 1. Call `request_approval(command, reason, shell)` with the **exact** command and why it is
    needed. Prefer the narrowest command that works. Set `shell` to the shell the command is
    written for: `bash` (Git Bash on Windows), `powershell` or `cmd`. The default `auto` means
@@ -265,6 +275,18 @@ first.
 ## Reviewer role
 For a review request, inspect `git diff origin/main...<sha>`, run the tests, then
 `review_verdict(task_id, approve, notes)` with specific required changes.
+
+You also decide other agents' **command approvals** (`approval.requested`), before the
+orchestrator: the requesting agent is waiting, so decide promptly with
+`approval_decide(approval_id, approve, note)`.
+- **Approve** when the command is needed for that agent's task, affects only its own worktree,
+  its own `hive/<agent>` branch or files its leases cover, and is the narrowest command that
+  does the job.
+- **Deny, saying what to do instead,** when it would touch other agents' work, shared branches
+  or remote state, delete more than needed, send data somewhere it shouldn't, or a safer
+  command exists.
+- **Leave it** to the orchestrator (don't decide) when it's unclear or outside the repository;
+  it gets the request after a minute and a half.
 """
 
 GEMINI_CONTEXT = """\
@@ -289,10 +311,15 @@ LEGACY_INSTRUCTION_FILES = ("CLAUDE.md", "GEMINI.md", "AGENTS.md")
 LEGACY_BLOCK = re.compile(r"\n*<!-- hive:begin -->.*?<!-- hive:end -->\n?", re.S)
 
 
+def _hook_timeout(event: str, vendor: str) -> int:
+    """Seconds the CLI gives a hook. PreToolUse may wait for a command's approval."""
+    return PRE_TOOL_HOOK_TIMEOUT if event == "PreToolUse" and vendor in APPROVAL_VENDORS else 10
+
+
 def _hooks(events: list[str], vendor: str, hive_cmd: str) -> dict:
     out = {}
     for ev in events:
-        entry = {"hooks": [{"type": "command", "timeout": 10,
+        entry = {"hooks": [{"type": "command", "timeout": _hook_timeout(ev, vendor),
                             "command": f"{hive_cmd} hook {ev} --vendor {vendor}"}]}
         if ev in ("PreToolUse", "PostToolUse", "BeforeTool", "AfterTool"):
             entry["matcher"] = "*"
@@ -305,7 +332,7 @@ def _agy_hooks(hive_cmd: str) -> dict:
     list of handlers."""
     out = {}
     for ev in AGY_HOOKS:
-        handler = {"type": "command", "timeout": 10,
+        handler = {"type": "command", "timeout": _hook_timeout(ev, "agy"),
                    "command": f"{hive_cmd} hook {ev} --vendor agy"}
         out[ev] = [{"matcher": "*", "hooks": [handler]}] if ev == "PreToolUse" else [handler]
     return {AGY_PLUGIN: out}

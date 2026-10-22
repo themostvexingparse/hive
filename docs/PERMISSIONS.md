@@ -10,12 +10,13 @@ three tiers:
 | Tier | Examples | What happens |
 |---|---|---|
 | **1. Allowed** | reading, tests, git history work, builds | Runs directly. |
-| **2. Needs approval** | `git push`, `git reset --hard`, `rm -rf`, `sudo` | A worker asks; **the orchestrator** (the agent that coordinates the others) approves or denies, and Hive's [daemon](GLOSSARY.md#daemon) on the worker's computer runs the exact command once. |
+| **2. Needs approval** | `git push`, `git reset --hard`, `rm -rf`, `sudo`, sending data with `curl`, and any command on no list | The command waits while **a reviewer**, or the orchestrator when no reviewer takes it, approves or denies it; once approved it runs, as if a person had clicked "allow". |
 | **3. Never** | `hive decide`, `hive admin` (commands that would act as you), pushing to `main` | Refused, with no way to approve. |
 
 The aim is to need as little human intervention as possible while staying safe: routine work
-never waits for anyone, dangerous commands wait for the orchestrator, not for you, and the
-few commands that would let an agent act as you are impossible.
+never waits for anyone, dangerous and unknown commands wait for a reviewer or the
+orchestrator, not for you, and the few commands that would let an agent act as you are
+impossible.
 
 ---
 
@@ -52,11 +53,16 @@ A *preset* is a ready-made starting set of rules; you choose it in `hive.toml`
 | Group | Examples | Orchestrator | Workers |
 |---|---|---|---|
 | Reading | `git status/diff/log/show/blame/fetch/reflog`, `ls`, `cat`, `grep`, `rg`, `find`, `tree`, PowerShell `Get-ChildItem`/`Get-Content`/`Select-String`, read-only GitHub CLI (`gh repo view/list`, `gh pr view/list/diff/checks`, `gh issue view/list`, `gh search`, …) | ✓ | ✓ |
+| Shell basics and pipelines | `cd`, `pushd`/`popd`, `test`, `sleep`, `date`, `printf`, `basename`/`dirname`/`realpath`, `tr`, `jq`, `xargs` (checked by the command it runs), checksums; PowerShell `Set-Location`, `Where-Object`, `Select-Object`, `Sort-Object`, `ForEach-Object`, `Group-Object`, `Format-Table`/`Format-List`, `ConvertTo-Json`/`ConvertFrom-Json`, `Join-Path`/`Split-Path` | ✓ | ✓ |
+| Web reads | `curl`, `wget`, `Invoke-WebRequest`, `Invoke-RestMethod` for downloads and API reads. Sending data needs approval (below). | ✓ | ✓ |
+| Docker, read-only | `docker ps/images/logs/inspect/version/info`, `docker compose ps/logs/config` | ✓ | ✓ |
 | Tests and checks | `pytest`, `python -m pytest`, `npm test`, `cargo test`, `go test`, `ruff check`, `mypy`, `tsc --noEmit`, plus every test command you listed under `checks` in `hive.toml` ([Checks](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)) | ✓ | ✓ |
 | Git history work | `git add`, `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `checkout`, `switch`, `restore`, `stash`, `tag`, `mv`, `rm`, `am`, `apply` | – | ✓ |
-| Building and running | `python`, `node`, `uv run`, `npm run`, `npm install`, `npx`, `make`, `cargo build`, `go build`, formatters and linters, `mkdir`, `touch`, `cp`, `mv`, plain `rm`, `Copy-Item`/`Move-Item`/`New-Item`/`Remove-Item`, browsers (`msedge`, `chrome`, `chromium`, `firefox`, e.g. headless screenshots of a page) | – | ✓ |
+| Building and running | `python`, `node`, `uv run`, `npm run`, `npm install`, `npx`, `make`, `cargo build`, `go build`, formatters and linters, `mkdir`, `touch`, `cp`, `mv`, plain `rm`, `Copy-Item`/`Move-Item`/`New-Item`/`Remove-Item`, browsers (`msedge`, `chrome`, `chromium`, `firefox`, e.g. headless screenshots of a page), `sed`, `awk`, `tee` | – | ✓ |
+| Packages | `pip install/show/list/freeze`, `python -m pip`, `uv add`, `uv pip`, `uv lock`, `poetry`, `cargo add/update`, `go get`, `go mod`, `dotnet add/restore`, `npm ls/view/outdated`, `composer`, `bundle` | – | ✓ |
 
-The orchestrator only reads and runs tests: it never codes.
+The orchestrator only reads and runs tests: it never codes. The `strict` preset leaves out
+web reads, docker, building and packages.
 
 **Web access** is allowed for every role: Claude Code's `WebFetch` and `WebSearch`, Gemini
 CLI's `web_fetch` and `google_web_search`, and agy's `read_url` and browser actions
@@ -79,6 +85,8 @@ These publish, discard or rewrite history, or delete recursively:
 | Recursive or forced deletes | POSIX `rm -r`/`-rf`/`-f`/`--recursive`, `find -delete`, `find -exec rm …`, `… \| xargs rm -rf`; cmd.exe `del /s /q /f`, `rd /s`, `rmdir /s`; PowerShell `Remove-Item -Recurse`/`-Force` (any abbreviation, any position) and its aliases `rm`, `del`, `ri`, `rd` |
 | Elevation and permissions | `sudo`, `su`, `doas`, `runas`, `gsudo`, `Start-Process -Verb RunAs`; `chmod -R`, `chown -R`, `takeown`, `Set-Acl`, `icacls` with `/grant`, `/deny`, `/t`, … |
 | Machine-level | `dd`, `mkfs`, `shred`, `format`, `diskpart`, `Format-Volume`, `Clear-Disk`, `reg delete`, `Remove-ItemProperty`, `shutdown`, `Stop-Computer`, `Restart-Computer`, `Set-ExecutionPolicy` |
+| Sending data over the network | `curl` with `-d`/`--data…`/`--json`/`-F`/`-T`/`-X POST`/`PUT`/`PATCH`/`DELETE`; `wget --post-data`/`--post-file`/`--method` (other than GET); PowerShell `Invoke-WebRequest`/`Invoke-RestMethod` (and Windows PowerShell's `curl`/`wget` aliases) with `-Method Post`/`Put`/`Patch`/`Delete`, `-Body` or `-InFile` |
+| Anything on no list | e.g. `docker run`, `ftp`, a tool your project uses that Hive doesn't know. Add it to `allow` if agents need it routinely ([Customising](#customising)). |
 
 Agents rarely need any of these: getting work into `main` (pushing included) goes through
 Hive's `lease_release` tool, which needs no approval
@@ -86,35 +94,45 @@ Hive's `lease_release` tool, which needs no approval
 
 ### How approval works for workers
 
-**The orchestrator approves, not you.**
-1. The worker's CLI blocks the command, and the hook tells it to ask for approval with Hive's
-   `request_approval` tool, giving the command and a reason.
-2. The orchestrator is started (woken) within seconds. It approves or denies with a note,
-   following criteria in its [skill](GLOSSARY.md#skill) (written procedure):
-   - the command is needed for the task;
-   - it affects only the agent's own working folder of the repository (its
-     [worktree](GLOSSARY.md#worktree)) and its own branch;
+**A reviewer approves first, then the orchestrator; not you.**
+1. **The command waits.** In Claude Code and agy the worker just runs the command. Hive's
+   pre-command [hook](GLOSSARY.md#hook) holds it, using none of the account's model usage,
+   and files an approval request with the command and its reason (the description the CLI
+   gives the command, or the task it's for).
+2. **Reviewers decide first.** Every online [reviewer](ROLES.md) (other than the requester) is
+   woken within seconds and approves or denies with a note, following criteria in its
+   [skill](GLOSSARY.md#skill) (written procedure):
+   - the command is needed for the requesting agent's task;
+   - it affects only that agent's own working folder of the repository (its
+     [worktree](GLOSSARY.md#worktree)), its own branch, or files it has leased;
    - it's the narrowest command that works.
+3. **The orchestrator gets what reviewers don't take:** at once when no reviewer is online,
+   and after a minute and a half when none has decided. It applies the same criteria, and
+   escalates to you with a question only when consequences are unclear or reach outside the
+   repository.
+4. **Approved: the command runs** in the worker's own session, as if a person had clicked
+   "allow", and the worker sees its real output. Denied: the worker gets the note.
+5. **No decision within four minutes:** the worker is told to record where it is and end its
+   turn. It's woken with the decision, runs the same command again, and Hive lets it through
+   once.
 
-   It escalates to you with a question only when consequences are unclear or reach outside
-   the repository.
-3. **The Hive daemon runs the exact approved command once** in the worker's worktree, with a
-   10-minute limit, and returns the output to the agent. It uses the shell the command was
-   written for:
-   - `bash`: [Git Bash](GLOSSARY.md#git-bash) on Windows;
-   - `powershell`: PowerShell 7 (`pwsh`) if installed, otherwise Windows PowerShell;
-   - `cmd`: Windows only.
+**Codex and Gemini CLI** can't be approved from a hook, so there the worker gets a refusal
+saying to use Hive's `request_approval` tool. The same approvers decide, and then **the Hive
+daemon runs the exact approved command once** in the worker's worktree, with a 10-minute
+limit, and returns the output. It uses the shell the command was written for:
+- `bash`: [Git Bash](GLOSSARY.md#git-bash) on Windows;
+- `powershell`: PowerShell 7 (`pwsh`) if installed, otherwise Windows PowerShell;
+- `cmd`: Windows only.
 
-   The hook tells the agent which shell it used. `auto` means PowerShell on Windows and bash
-   elsewhere.
+`request_approval` waits for the answer (using none of the account's model usage), so the
+worker usually gets the result within the same run (*turn*); otherwise it's woken when the
+answer comes and runs the command with the `run_approved` tool.
 
-**Why the worker usually doesn't have to start again:** `request_approval` waits for the
-answer (up to 10 minutes, using none of the account's model usage), so the worker usually
-gets the result within the same run (*turn*). If no answer arrives in time, it ends its turn,
-is started again when the answer comes, and runs the command with the `run_approved` tool.
+**In a session you're typing in** (an agent you took over with `hive chat`), the CLI asks
+*you* instead, like any interactive session.
 
 You can approve or deny pending requests yourself in the dashboard's *Approvals* panel, just
-as the orchestrator can ([The web dashboard](MONITORING.md#the-web-dashboard)).
+as reviewers and the orchestrator can ([The web dashboard](MONITORING.md#the-web-dashboard)).
 
 ### Approval rules
 
@@ -151,13 +169,14 @@ daemon again just before it runs an approved command.
 
 ## Anything else
 
-Commands not covered by these lists are refused in headless sessions. In a session you're
-typing in (the orchestrator's, or an agent you took over with `hive chat`;
+A worker's command that is on none of the lists is treated like a dangerous one: it waits for
+a reviewer's or the orchestrator's approval (in Claude Code and agy; in Codex and Gemini CLI
+it is refused, and the worker can use `request_approval`). In a session you're typing in
+(the orchestrator's, or an agent you took over with `hive chat`;
 [Running the fleet](RUNNING.md#taking-over-a-slot-interactively-hive-chat)), you're asked
 instead.
 
-If agents keep hitting refusals for a command your project needs, add it to `allow` or
-`approval`.
+If agents keep asking for a command your project needs, add it to `allow`.
 
 ---
 
@@ -199,11 +218,11 @@ in bash, PowerShell and cmd.exe alike:
 
 - In a headless turn, agy refuses every tool call its own rules would ask about, and then
   ends the turn without an answer. So for agy agents Hive's hook makes the decision for every
-  shell command: it approves commands in the *allowed* tier itself, refuses the *approval* and
-  *forbidden* tiers as for the other CLIs, and refuses any other command with a note: do it
-  another way, or `request_approval` if that exact command is needed. Hive's own tools are
-  approved the same way. The rules in the settings file apply only when the daemon can't be
-  reached.
+  shell command: it approves commands in the *allowed* tier itself, refuses the *forbidden*
+  tier, and holds every other command until a reviewer or the orchestrator decides
+  ([How approval works](#how-approval-works-for-workers)). Hive's own tools are approved the
+  same way. The rules in the settings file apply only when the daemon can't be reached; then
+  agy refuses anything not allowed.
 - The orchestrator's interactive session leaves commands outside the *allowed* tier to agy,
   which asks you.
 - agy writes files inside the worktree without asking (`--mode accept-edits` is the default for

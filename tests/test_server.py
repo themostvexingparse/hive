@@ -486,3 +486,39 @@ def test_dashboard_is_served_without_external_assets(tmp_path):
     assert r.status_code == 200 and r.mimetype == "text/html"
     assert "Hive admin" in html and 'id="out"' in html
     assert "<script src=" not in html and "<link rel=\"stylesheet\"" not in html  # self-contained
+
+
+def test_reviewers_decide_command_approvals_first_and_the_orchestrator_gets_the_rest(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+
+    def requested(who, aid):
+        return [e for e in ag[who].get("/events")["events"]
+                if e["type"] == "approval.requested" and e["payload"]["id"] == aid]
+
+    # No reviewer yet: the orchestrator gets the request at once.
+    a = ag["prog1"].post("/approvals", {"command": "rm -r build", "reason": "x"}, expect=201)
+    assert a["sent_to"] == ["orchestrator"] and requested("orch", a["id"])
+
+    tok = admin.post("/agents", {"name": "rev1", "vendor": "claude", "roles": ["reviewer"]},
+                     expect=201)["token"]
+    ag["rev1"] = Client(hive_client(hive), tok)
+    ag["rev1"].post("/agents/me/heartbeat", {})  # online
+    b = ag["prog1"].post("/approvals", {"command": "git reset --hard", "reason": "y"},
+                         expect=201)
+    assert b["sent_to"] == ["reviewer"]
+    assert requested("rev1", b["id"]) and not requested("orch", b["id"])
+
+    # Only the requester's daemon hands an undecided request on, to the orchestrator.
+    ag["prog2"].post(f"/approvals/{b['id']}/escalate", expect=403)
+    assert ag["prog1"].post(f"/approvals/{b['id']}/escalate", expect=200)["escalated"]
+    assert requested("orch", b["id"])[-1]["payload"]["escalated"]
+
+    # A reviewer may decide; nobody decides their own request; a decided one isn't handed on.
+    ag["prog1"].post(f"/approvals/{b['id']}/decide", {"approve": True}, expect=403)
+    ag["rev1"].post(f"/approvals/{b['id']}/decide", {"approve": True, "note": "ok"},
+                    expect=200)
+    assert not ag["prog1"].post(f"/approvals/{b['id']}/escalate", expect=200)["escalated"]
+    # A reviewer's own request goes to the orchestrator: no other reviewer is there.
+    c = ag["rev1"].post("/approvals", {"command": "rm -r out", "reason": "z"}, expect=201)
+    assert c["sent_to"] == ["orchestrator"]
