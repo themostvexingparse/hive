@@ -70,11 +70,18 @@ def sync_config(c: ServerClient, strict: bool = False, quiet: bool = False) -> N
     it to that server, so nobody has to remember `hive admin push-config`. Only from a main
     clone: an agent's worktree may hold an older main. With strict, an upload error stops the
     command; otherwise it is a warning."""
+    from .config import shared_config
     root = find_repo_root()
     if not root or not (root / ".git").is_dir():
         return
-    raw = (root / "hive.toml").read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        data = shared_config(root)
+    except (ValueError, OSError) as e:  # TOMLDecodeError is a ValueError
+        if strict:
+            die(f"hive.toml: {e}")
+        ui.warn(f"hive.toml wasn't uploaded: {e}")
+        return
+    digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
     try:
         record = json.loads(_sync_record().read_text("utf-8"))
     except (OSError, ValueError):
@@ -83,13 +90,13 @@ def sync_config(c: ServerClient, strict: bool = False, quiet: bool = False) -> N
     if record.get(where) == digest and not strict:
         return
     try:
-        c.put("/config", tomllib.loads(raw.decode("utf-8")))
-    except (HiveError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        c.put("/config", data)
+    except HiveError as e:
         if strict:
-            fail(e) if isinstance(e, HiveError) else die(f"hive.toml: {e}")
-        if getattr(e, "code", "") == "unreachable":
+            fail(e)
+        if e.code == "unreachable":
             return  # the command itself says so
-        ui.warn(f"hive.toml wasn't uploaded: {getattr(e, 'message', e)}")
+        ui.warn(f"hive.toml wasn't uploaded: {e.message}")
         return
     if record.get(where) != digest and not quiet:
         ui.info(f"Uploaded {ui.path('hive.toml')} to the server (it changed).")
@@ -333,13 +340,16 @@ def cmd_admin_backup(a):
 
 
 def cmd_admin_push_config(a):
+    from .config import shared_config
     root = find_repo_root() or die("no hive.toml found (run `hive init`)")
-    with open(root / "hive.toml", "rb") as f:
-        data = tomllib.load(f)
     c = admin_client(sync=False)
     if (root / ".git").is_dir():
         sync_config(c, strict=True, quiet=True)  # also records it, so it isn't sent again
     else:
+        try:
+            data = shared_config(root)
+        except ValueError as e:
+            die(f"hive.toml: {e}")
         call(c.put, "/config", data)
     ui.ok("Uploaded hive.toml to the server.")
 
@@ -855,8 +865,11 @@ def cmd_start(a):
     if root and (root / ".git").is_dir():
         sync_config(c, strict=True)
     elif root:
-        with open(root / "hive.toml", "rb") as f:
-            call(c.put, "/config", tomllib.load(f))
+        from .config import shared_config
+        try:
+            call(c.put, "/config", shared_config(root))
+        except ValueError as e:
+            die(f"hive.toml: {e}")
     f = call(c.post, "/fleet/start", {"goal": a.goal})
     ui.ok(f"Fleet is {ui.state(f['state'])}; orchestrator {ui.agent(f['orchestrator'])} is "
           "planning.")
@@ -1589,6 +1602,22 @@ def _config_root() -> Path:
                        + ui.cmd("hive init"))
 
 
+def _config_target(a, key: str = "") -> tuple[Path | None, Path, str]:
+    """(repository root or None, the file a change goes to, its layer name)."""
+    from .config import LOCAL_ONLY_SECTIONS, user_config_path
+    if getattr(a, "user", False):
+        if a.local:
+            die("choose one: --local or --user")
+        return find_repo_root(), user_config_path(), "user"
+    root = _config_root()
+    if a.local:
+        return root, local_config_path(root), LOCAL_TOML
+    if key.split(".")[0] in LOCAL_ONLY_SECTIONS:
+        die(f"{key} is set per computer, never in the committed hive.toml: add --local (this "
+            "repository on this computer) or --user (every repository on this computer)")
+    return root, root / "hive.toml", "hive.toml"
+
+
 def cmd_config_list(a):
     from . import settings
     root = find_repo_root()
@@ -1627,16 +1656,23 @@ def cmd_config_explain(a):
           + [(layer, settings.show(v) if v is not None else ui.dim("—"))
              for layer, _, v in e["layers"]])
     ui.out()
-    if e["source"] == LOCAL_TOML:
-        ui.note("Set in hive.local.toml: it applies on this computer only (its daemon and "
-                "agents); the server and other computers use hive.toml's value.")
+    if a.key.startswith("hooks."):
+        ui.note("Hooks run on this computer, from hive.local.toml or ~/.hive/config.toml only "
+                "(never from hive.toml), while hive up runs here.")
+    elif e["source"] in (LOCAL_TOML, "user"):
+        ui.note(f"Set in {'hive.local.toml' if e['source'] == LOCAL_TOML else '~/.hive/config.toml'}"
+                ": it applies on this computer only (its daemon and agents); the server and "
+                "other computers use hive.toml's value.")
+    elif e["source"] == "preset":
+        ui.note("From the preset hive.toml names (fleet.preset); a value in hive.toml "
+                "overrides it.")
     else:
         ui.note("hive.toml values apply to the whole fleet; " + ui.cmd(
             f"hive config set {a.key} <value> --local") + " overrides one on this computer.")
 
 
-def _after_config_change(root: Path, key: str, local: bool) -> None:
-    if local:
+def _after_config_change(root: Path | None, key: str, local: bool) -> None:
+    if local or root is None:
         return
     ui.note("Commit and push hive.toml: agents' sessions use it once it is on main.")
     if load_admin_config().server_url:
@@ -1650,11 +1686,14 @@ def _after_config_change(root: Path, key: str, local: bool) -> None:
 def _validate_or_restore(root: Path, path: Path, before: str | None) -> None:
     """The edited files must still make a valid configuration; otherwise undo the edit."""
     from . import permissions
+    from .config import preset_layer
     from .roles import load_roles
     try:
         cfg = load_repo_config(root)
         load_roles(cfg.get("roles"))
         permissions.build_rules(cfg)
+        if root:
+            preset_layer(_read_hive_toml(root))
     except (ValueError, TypeError) as e:
         if before is None:
             path.unlink(missing_ok=True)
@@ -1663,27 +1702,36 @@ def _validate_or_restore(root: Path, path: Path, before: str | None) -> None:
         die(f"not changed: {e}")
 
 
+def _read_hive_toml(root: Path) -> dict:
+    p = root / "hive.toml"
+    return tomllib.loads(p.read_text("utf-8")) if p.exists() else {}
+
+
 def cmd_config_set(a):
     from . import settings
-    root = _config_root()
-    path = local_config_path(root) if a.local else root / "hive.toml"
+    try:
+        settings.split_key(a.key)
+    except settings.SettingError as e:
+        die(str(e))
+    root, path, layer = _config_target(a, a.key)
     try:
         value = settings.parse_value(" ".join(a.value), a.key)
         before = path.read_text("utf-8") if path.exists() else None
+        path.parent.mkdir(parents=True, exist_ok=True)
         settings.write(path, a.key, value)
     except settings.SettingError as e:
         die(str(e))
     _validate_or_restore(root, path, before)
-    if a.local and settings.ensure_ignored(path.parent):
+    if layer == LOCAL_TOML and settings.ensure_ignored(path.parent):
         ui.info(f"Added {LOCAL_TOML} to .gitignore (it holds this computer's settings).")
-    ui.ok(f"{a.key} = {settings.show(value)} " + ui.dim(f"in {path.name}"))
-    _after_config_change(root, a.key, a.local)
+    ui.ok(f"{a.key} = {settings.show(value)} " + ui.dim(f"in {path}" if layer == "user"
+                                                         else f"in {path.name}"))
+    _after_config_change(root, a.key, layer != "hive.toml")
 
 
 def cmd_config_unset(a):
     from . import settings
-    root = _config_root()
-    path = local_config_path(root) if a.local else root / "hive.toml"
+    root, path, layer = _config_target(a)
     try:
         before = path.read_text("utf-8") if path.exists() else None
         removed = settings.unset(path, a.key)
@@ -1695,20 +1743,20 @@ def cmd_config_unset(a):
     now_ = settings.explain(root, a.key)
     ui.ok(f"Removed {a.key} from {path.name}; it is now "
           f"{settings.show(now_['value'])} " + ui.dim(f"(from {now_['source']})"))
-    _after_config_change(root, a.key, a.local)
+    _after_config_change(root, a.key, layer != "hive.toml")
 
 
 def cmd_config_edit(a):
-    root = _config_root()
-    path = local_config_path(root) if a.local else root / "hive.toml"
+    root, path, layer = _config_target(a)
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or \
         ("notepad" if os.name == "nt" else "vi")
     before = path.read_text("utf-8") if path.exists() else None
+    path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([*editor.split(), str(path)])
     if path.exists() and path.read_text("utf-8") != (before or ""):
         _validate_or_restore(root, path, before)
         ui.ok(f"Saved {path.name}.")
-        _after_config_change(root, "", a.local)
+        _after_config_change(root, "", layer != "hive.toml")
 
 
 # ---------------------------------------------------------------------- escape hatches
@@ -2086,9 +2134,13 @@ def main(argv: list[str] | None = None) -> None:
             s.add_argument("value", nargs="+", help='TOML (true, 90, ["npm test"]) or text')
         s.add_argument("--local", action="store_true",
                        help=f"in {LOCAL_TOML}: this computer only, never uploaded")
+        s.add_argument("--user", action="store_true",
+                       help="in ~/.hive/config.toml: you, in every repository on this computer")
         s.set_defaults(fn=fn)
-    s = cg.add_parser("edit", help="open hive.toml (--local: hive.local.toml) in your editor")
+    s = cg.add_parser("edit", help="open hive.toml (--local: hive.local.toml, --user: "
+                                   "~/.hive/config.toml) in your editor")
     s.add_argument("--local", action="store_true")
+    s.add_argument("--user", action="store_true")
     s.set_defaults(fn=cmd_config_edit)
 
     s = sub.add_parser("approve", help="approve the plan (or the yes/no question) waiting")

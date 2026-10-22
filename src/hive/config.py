@@ -21,7 +21,23 @@ DEFAULT_REPO_CONFIG = {
                  "orchestrator_fresh_after_hours": 12},
     "roles": {},
     "permissions": {"preset": "standard", "allow": [], "approval": [], "deny": []},
+    # A named bundle of the settings below, set in hive.toml (FLEET_PRESETS).
+    "fleet": {"preset": "custom"},
+    # Shell commands run on this computer when the fleet does something (docs/CONFIGURATION.md).
+    # Read only from this computer's own files (hive.local.toml, ~/.hive/config.toml), never
+    # from the committed hive.toml: a repository must not run commands on every computer.
+    "hooks": {"on_decision": "", "on_task_done": "", "on_main": "", "on_frozen": "",
+              "on_state": "", "on_message": ""},
 }
+
+# fleet.preset: a starting point that hive.toml's own settings override.
+FLEET_PRESETS = {
+    "custom": {},
+    "solo": {"integration": {"review": "off"}},
+    "team": {"integration": {"review": "reviewer"}},
+    "strict": {"integration": {"review": "reviewer"}, "permissions": {"preset": "strict"}},
+}
+LOCAL_ONLY_SECTIONS = ("hooks",)
 
 
 def hive_home() -> Path:
@@ -68,25 +84,64 @@ def _read_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
+USER_TOML = "config.toml"  # ~/.hive/config.toml: this user's settings, every project
+
+
+def user_config_path() -> Path:
+    return hive_home() / USER_TOML
+
+
+def preset_layer(toml: dict) -> dict:
+    name = str((toml.get("fleet") or {}).get("preset", "custom"))
+    if name not in FLEET_PRESETS:
+        raise ValueError(f"fleet.preset must be one of {', '.join(FLEET_PRESETS)}, not {name!r}")
+    return FLEET_PRESETS[name]
+
+
 def config_layers(root: Path | None) -> list[tuple[str, Path | None, dict]]:
-    """(layer name, file, its settings), lowest priority first: built-in defaults, hive.toml
-    (committed: the whole fleet), hive.local.toml (this computer only)."""
+    """(layer name, file, its settings), lowest priority first: built-in defaults, the preset
+    hive.toml names, ~/.hive/config.toml (this user), hive.toml (committed: the whole fleet),
+    hive.local.toml (this computer only)."""
     layers: list[tuple[str, Path | None, dict]] = [("default", None, DEFAULT_REPO_CONFIG)]
+    toml = _read_toml(root / "hive.toml") if root else {}
+    try:
+        preset = preset_layer(toml)
+    except ValueError:
+        preset = {}  # reported where the configuration is checked (hive config, the server)
+    layers.append(("preset", None, preset))
+    layers.append(("user", user_config_path(), _read_toml(user_config_path())))
     if root:
-        layers.append(("hive.toml", root / "hive.toml", _read_toml(root / "hive.toml")))
+        layers.append(("hive.toml", root / "hive.toml", toml))
         local = local_config_path(root)
         layers.append((LOCAL_TOML, local, _read_toml(local)))
     return layers
 
 
+def _merge(cfg: dict, data: dict) -> None:
+    for k, v in data.items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+
+
 def load_repo_config(root: Path | None) -> dict:
+    """The settings in force on this computer, every layer merged. Hooks come only from this
+    computer's own files (LOCAL_ONLY_SECTIONS)."""
     cfg = {k: dict(v) for k, v in DEFAULT_REPO_CONFIG.items()}
-    for _, _, data in config_layers(root)[1:]:
-        for k, v in data.items():
-            if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                cfg[k].update(v)
-            else:
-                cfg[k] = v
+    for name, _, data in config_layers(root)[1:]:
+        if name == "hive.toml":
+            data = {k: v for k, v in data.items() if k not in LOCAL_ONLY_SECTIONS}
+        _merge(cfg, data)
+    return cfg
+
+
+def shared_config(root: Path) -> dict:
+    """What the server gets: hive.toml over the preset it names. Nothing of this computer's
+    own (user or local settings) is in it."""
+    toml = _read_toml(root / "hive.toml")
+    cfg: dict = {k: dict(v) for k, v in preset_layer(toml).items()}
+    _merge(cfg, {k: v for k, v in toml.items() if k not in LOCAL_ONLY_SECTIONS})
     return cfg
 
 

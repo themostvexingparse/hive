@@ -33,6 +33,15 @@ def _git(cwd: Path, *args: str) -> str:
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
+def _toml_section(root: Path, section: str) -> dict | None:
+    """One section of hive.toml itself (not merged with the other layers)."""
+    import tomllib
+    try:
+        return tomllib.loads((root / "hive.toml").read_text("utf-8")).get(section)
+    except (OSError, ValueError):
+        return None
+
+
 def _common_dir(path: Path) -> Path | None:
     """The shared .git directory of a clone or any of its worktrees."""
     if not path.is_dir():
@@ -113,6 +122,12 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
         _problem(problems, f"Hive can't build the agents' files from hive.toml and "
                            f".hive/prompts/: {e}. Launches fall back to the committed "
                            ".hive/agent/ copy.", "fix the file named above")
+    toml_hooks = {k: v for k, v in (_toml_section(root, "hooks") or {}).items() if v}
+    if toml_hooks:
+        _problem(problems, f"hive.toml sets [hooks] ({', '.join(sorted(toml_hooks))}), which Hive "
+                           "ignores there: a committed file must not run commands on every "
+                           "computer.", "move them to hive.local.toml: hive config set "
+                           f"hooks.{sorted(toml_hooks)[0]} \"…\" --local")
     if info["drift"]:
         info["drift_why"] = (f"made by Hive {info['bundle_version']}, this is {__version__}"
                              if info["bundle_version"] != __version__

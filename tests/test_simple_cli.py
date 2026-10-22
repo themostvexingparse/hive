@@ -120,10 +120,10 @@ def test_local_layer_applies_in_worktrees_and_explains_itself(tmp_path):
     for root in (clone, wt):  # an agent's worktree sees its clone's local settings
         assert load_repo_config(root)["integration"]["shell"] == "powershell"
         assert [name for name, _, _ in config_layers(root)] == [
-            "default", "hive.toml", "hive.local.toml"]
+            "default", "preset", "user", "hive.toml", "hive.local.toml"]
     e = settings.explain(clone, "integration.shell")
     assert e["value"] == "powershell" and e["source"] == "hive.local.toml"
-    assert [v for _, _, v in e["layers"]] == ["native", "native", "powershell"]
+    assert [v for _, _, v in e["layers"]] == ["native", None, None, "native", "powershell"]
     assert settings.explain(clone, "sessions.max_wakes")["source"] == "hive.toml"
     assert settings.explain(clone, "repo.main")["source"] == "default"
 

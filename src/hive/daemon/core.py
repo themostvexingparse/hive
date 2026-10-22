@@ -39,6 +39,7 @@ ROSTER_FIELDS = ("name", "vendor", "roles", "online", "busy", "has_task", "exhau
                  "attached")
 COALESCE_SECONDS = 3
 PLACEMENT_SECONDS = 30  # how often a paired machine asks which agents are placed on it
+HOOK_POLL_SECONDS = 5  # how often [hooks] look for new fleet events
 MIN_GAP_SECONDS = 10
 MAX_WAKES_PER_HOUR = 20
 MAX_STOP_BLOCKS = 3
@@ -195,7 +196,8 @@ class Daemon:
         for rt in self.slots.values():
             self.refresh(rt)
             self.warn_if_logged_out(rt)
-        loops = [self.poll_loop, self.heartbeat_loop, self.wake_loop, self.stream_loop]
+        loops = [self.poll_loop, self.heartbeat_loop, self.wake_loop, self.stream_loop,
+                 self.hooks_loop]
         if self.mcfg.machines:
             loops.append(self.placement_loop)
         for target in loops:
@@ -206,6 +208,57 @@ class Daemon:
             ui.warn(f"{rt.name}'s account folder is empty: its {rt.cfg.vendor} CLI has "
                     f"probably never been logged in, and a headless turn can't log in. "
                     f"Log it in with `hive agents login {rt.name}` in another terminal.")
+
+    # ------------------------------------------------------------------ hooks on events
+
+    def hooks_loop(self) -> None:
+        while not self.stop_event.wait(HOOK_POLL_SECONDS):
+            try:
+                self.run_hooks()
+            except Exception:
+                log.exception("event hooks failed")
+
+    def run_hooks(self) -> int:
+        """Run this computer's [hooks] for new fleet events, once per server (read with the
+        first slot of that server). The first look only notes where the events are, so
+        starting `hive up` never replays old ones. Returns how many hooks started."""
+        from .. import eventhooks
+        started = 0
+        by_server: dict[str, SlotRuntime] = {}
+        for rt in list(self.slots.values()):
+            by_server.setdefault(self.mcfg.url_for(rt.cfg).rstrip("/"), rt)
+        for server, rt in by_server.items():
+            hooks = load_repo_config(rt.repo_root).get("hooks") or {}
+            key = f"hooks:{server}"
+            if not any(hooks.values()):
+                self.store.put("_hooks", key, None)  # start fresh if hooks are added later
+                continue
+            cursor = self.store.get("_hooks", key)
+            try:
+                if cursor is None:
+                    self.store.put("_hooks", key, rt.client.get("/events", since=0,
+                                                                limit=1)["head"])
+                    continue
+                data = rt.client.get("/events", since=cursor, limit=200)
+            except HiveError as e:
+                log.debug("hooks: events from %s failed: %s", server, e)
+                continue
+            done = set(self.store.get("_hooks", f"{key}:tasks", []) or [])
+            for ev in data["events"]:
+                hit = eventhooks.match(ev)
+                if not hit or not hooks.get(hit[0]):
+                    continue
+                if hit[0] == "on_task_done":  # a task completes, then integrates: once
+                    tid = (ev.get("payload") or {}).get("id")
+                    if tid in done:
+                        continue
+                    done.add(tid)
+                eventhooks.run(hooks[hit[0]], ev, hit[1], cwd=rt.cfg.worktree or None)
+                started += 1
+            if data["events"]:
+                self.store.put("_hooks", key, data["events"][-1]["seq"])
+                self.store.put("_hooks", f"{key}:tasks", sorted(done)[-500:])
+        return started
 
     # ------------------------------------------------------------------ placed agents
 
