@@ -11,8 +11,8 @@ There are three places you may install Hive:
 | Where | Why it needs Hive |
 |---|---|
 | **The server** | The one program that holds the fleet's shared state. It runs as `hive server`, or as a Python web app ([WSGI](GLOSSARY.md#wsgi)) on a web host. For public hosting, follow [DEPLOYMENT.md](DEPLOYMENT.md) instead of this page. |
-| **Your computer** | Runs admin commands, the ones you use to control the fleet (`hive admin …`, `hive start`, `hive decide`, …). Usually also runs the orchestrator, the agent you chat with. |
-| **Every agent machine** | Any computer that runs agents. It runs `hive join` (adds an agent to the computer) and `hive up` (runs them). The agents' CLIs also call `hive mcp` and `hive hook` themselves, to get Hive's tools and automatic checks. |
+| **Your computer** | Runs admin commands, the ones you use to control the fleet (`hive`, `hive agents …`, `hive start`, `hive approve`, …). Usually also runs the orchestrator, the agent you chat with. |
+| **Every agent machine** | Any computer that runs agents. It runs `hive agents add` or `hive join` (adds agents to the computer) and `hive up` (runs them). The agents' CLIs also call `hive mcp` and `hive hook` themselves, to get Hive's tools and automatic checks. |
 
 For a first trial, all three can be the same computer.
 

@@ -121,12 +121,14 @@ git add hive.toml .hive .gitignore && git commit -m "Set up Hive" && git push
 hive agents add claude               # 3. the orchestrator (the first agent plans)
 hive agents add claude programmer    #    and a programmer; each offers to log its account in
 
-hive up                              # 4. the orchestrator opens here, to chat with
-hive start "Add CSV export to the reports page"   # 5. in another terminal
-hive approve                         #    approve the plan when it's ready
+hive up                              # 4. runs the agents (the orchestrator opens here)
+hive                                 # 5. in another terminal: the chat with the team.
+                                     #    Type the goal; approve the plan with y.
 ```
 
-Lost? Run `hive` on its own: it says where things stand and the one next step.
+`hive` on its own always knows what's next: until the team is set up it shows the one next
+step, then it is the chat. The same works as single commands
+(`hive start "…"`, `hive approve`), and the chat's slash commands are those commands.
 `hive help` lists the common commands; every older, more precise command still works
 (`hive help --all`).
 
@@ -153,7 +155,7 @@ The design of this interface: [CLI_REDESIGN.md](docs/CLI_REDESIGN.md).
 | [Running the server](docs/SERVER.md) | The admin token and database, running locally, and logging in as admin. |
 | [Deploying the server](docs/DEPLOYMENT.md) | Hosting on PythonAnywhere or a VPS: capacity planning with measured numbers, upgrades, backups, monitoring and hardening. |
 | [Several projects on one server](docs/PROJECTS.md) | Hosting several repositories and fleets on one server, each with its own database and admin token. |
-| [Preparing the repository](docs/REPOSITORY.md) | What `hive init` creates and why it doesn't affect your own CLI sessions; checking everything with `hive overview`. |
+| [Preparing the repository](docs/REPOSITORY.md) | What `hive init` creates and why it doesn't affect your own CLI sessions; checking everything with `hive doctor`. |
 | [Enrolling agents and setting up machines](docs/MACHINES.md) | Creating agents, adding them to computers as *slots* (an agent's own working folder and account), and logging their accounts in. |
 
 ### Running a fleet
@@ -208,6 +210,6 @@ real CLI. Some integration points haven't yet been exercised with live, logged-i
 
 Contributions are welcome. If something doesn't work as described, or you have an idea,
 please [open an issue](https://github.com/themostvexingparse/hive/issues): include what you
-ran, what you expected, and what happened instead (`hive overview` output helps). Pull
+ran, what you expected, and what happened instead (`hive doctor` output helps). Pull
 requests are welcome too; [Development](docs/DEVELOPMENT.md) explains how to run the tests
 and where things live in the source.

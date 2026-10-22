@@ -59,42 +59,50 @@ changed since the last upload, and say so in one line. `hive admin push-config` 
 ## Rung 2: settings
 
 ```
-built-in defaults  <  hive.toml  <  hive.local.toml
-                      (committed:    (this computer only, git-ignored;
-                       the fleet)     next to your clone's hive.toml)
+built-in defaults < preset < ~/.hive/config.toml < hive.toml < hive.local.toml
+                    (named in   (you, every repo    (committed:  (this computer only,
+                     hive.toml)  on this computer)   the fleet)   git-ignored)
 ```
 
 - `hive.toml` is what the server enforces and every agent shares.
 - `hive.local.toml` changes only how this computer's Hive works: its daemon's checks shell,
   session limits and so on. It is never uploaded. Slots read it from their clone, so their
   worktrees see it too.
-- `hive config set KEY VALUE` writes `hive.toml`; `--local` writes `hive.local.toml`. Values
-  are TOML (`true`, `90`, `["npm test"]`); anything else is a string.
+- `hive config set KEY VALUE` writes `hive.toml`; `--local` writes `hive.local.toml`,
+  `--user` writes `~/.hive/config.toml`. Values are TOML (`true`, `90`, `["npm test"]`);
+  anything else is a string.
+- `fleet.preset` (`solo`, `team`, `strict`) is a starting bundle that `hive.toml` overrides;
+  the server gets `hive.toml` over its preset, never this computer's own settings.
+- `[hooks]` (commands run on fleet events) are read only from this computer's own files.
 - `hive config explain KEY` prints the value in force, the layer it came from, and every
   layer's value.
 
-Later: a per-user layer (`~/.hive/config.toml`) for CLI preferences, environment variables,
-and presets (`preset = "solo" | "team" | "strict"`).
+Not built: settings from environment variables. The `HIVE_*` names are already taken by
+other things (`HIVE_SERVER_URL`, `HIVE_PROJECT`, …), so a setting like `HIVE_INTEGRATION_REVIEW`
+would be ambiguous; `hive config set … --user` covers the same need.
 
 ## Rung 3 and later
 
 - **Machines joined with a code** (built, see [MACHINES.md](MACHINES.md)).
   `hive machines invite` prints a short single-use code; `hive join CODE` inside the other
   computer's clone pairs it, and its daemon sets up whatever agents are placed on it. The
-  server has `machines`, `pairing_codes` and `placements`. Still to come: reusable join keys
-  for automation, and cloning the repository when the computer has no clone yet.
+  server has `machines`, `pairing_codes` and `placements`. Reusable join keys
+  (`hive machines invite --reusable`) pair many computers from scripts. Not built: cloning
+  the repository when the computer has no clone yet (`hive join` needs one).
 - **A declarative fleet** (built, see [CLI.md](CLI.md#hive-plan-and-hive-apply-the-fleet-as-a-file)).
   `[[agents]]` blocks (`name`, `vendor`, `roles`, `count`, `on`, `model`,
   `permission_mode`) in `hive.fleet.toml`, with `hive plan` (shows the difference) and
   `hive apply`; `hive agents export` writes the current fleet out. The server stays the
   source of truth; the file is applied to it, like `kubectl apply`.
-- **Rung 0 chat.** `hive` opens a chat with the orchestrator in Hive's own window, with
-  decisions as prompts Hive itself draws (so only your keypress approves) and slash
-  commands that mirror rung 1 (`/agents add` ≡ `hive agents add`).
-- **No generated files to commit.** Bundles and permission files generated when an agent
-  starts, so a `[permissions]` change never needs `hive init` again.
-- **Escape hatches.** `hive api METHOD PATH`, hooks on fleet events in `hive.toml`,
-  `hive-<name>` plugins on PATH.
+- **Rung 0 chat** (built, see [CLI.md](CLI.md#hive-the-chat-with-the-team)). `hive` opens
+  a chat with the orchestrator once the team runs, with decisions as prompts Hive itself
+  answers (so only your keypress approves) and slash commands that are the rung 1 commands
+  (`/agents add` ≡ `hive agents add`). It talks through `#user`, so it works with the
+  orchestrator wherever it runs; the orchestrator's skill tells it to answer there.
+- **No generated files to commit** (built). Bundles and permission files generated when
+  an agent starts, so a `[permissions]` change never needs `hive init` again.
+- **Escape hatches** (built). `hive api METHOD PATH`, hooks on fleet events (in this
+  computer's own settings, not `hive.toml`), `hive-<name>` plugins on PATH.
 
 ## Rollout
 
@@ -112,9 +120,8 @@ Phase 1, on this branch:
 - [x] `hive doctor`.
 - [x] Docs: README quick start, Getting started and CLI.md use the new commands;
   CONFIGURATION and PERMISSIONS list the new files and forbidden commands.
-- [ ] Docs: MACHINES, SERVER, REPOSITORY, PROJECTS and TROUBLESHOOTING still show the
-  precise forms (`hive admin enroll`, `hive join --vendor …`, `hive admin login`). They
-  still work, but should lead with the new commands.
+- [x] Docs: every guide leads with the new commands; the precise forms are documented as
+  such in CLI.md and MACHINES.
 
 Phase 2:
 
@@ -126,8 +133,9 @@ Phase 2:
 - [x] Machine tokens reach only `/machines/me/*`; unpairing cuts off the machine's agents too.
 - [x] Docs: MACHINES rewritten around the three ways to add agents; CLI, CONFIGURATION,
   SECURITY and PERMISSIONS updated.
-- [ ] Reusable join keys for automation (a code that pairs many machines).
-- [ ] Launch-time bundles. (`hive init` asking for the test command: done in phase 3.)
+- [x] Reusable join keys for automation (`hive machines invite --reusable`, `keys`,
+  `revoke`).
+- [x] Launch-time bundles and `hive init` asking for the test command (done in phase 3).
 
 Decided while building: a paired machine accepts placements automatically
 (`accept_placements = "auto"`, or `"never"`). Pairing is already the owner's consent, and
@@ -150,4 +158,11 @@ Phase 4:
 - [x] The dashboard's *Agents & computers* dialog: add agents (on a paired computer, or with
   a `hive join` line), change roles, placement and model, remove agents, pair and unpair
   computers. (Its JavaScript is syntax-checked; it hasn't been clicked through in a browser.)
-- [ ] The rung 0 chat.
+- [x] The rung 0 chat: `hive` (or `hive chat`), `hive next` for the next-step screen.
+
+Phase 5 (escape hatches and the rest of rung 2):
+
+- [x] `hive api`, and `hive-<name>` plugins; neither runs inside an agent's session.
+- [x] Presets (`fleet.preset`) and the per-user layer (`~/.hive/config.toml`).
+- [x] Hooks on fleet events (`[hooks]`), run by the daemon, from this computer's own files.
+- [x] `hive agents rotate` for an agent on a paired computer: it takes the new token itself.

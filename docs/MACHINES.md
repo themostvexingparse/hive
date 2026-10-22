@@ -120,6 +120,11 @@ its clone. Log each agent's account in once, on that computer: `hive agents logi
 - **Refuse placements** on a computer: set `accept_placements = "never"` in its
   `~/.hive/machine.toml`.
 
+**Many computers, from a script:** `hive machines invite --reusable --days 7` makes a join key
+(`hk_…`) that pairs any number of computers until it expires or you revoke it
+(`hive machines keys`, `hive machines revoke ID`); run
+`hive join hk_… --server URL --as <name>` on each.
+
 A pairing code is a password that works once for 15 minutes: share it like one. A paired
 computer's token (`hm_…`, in its `machine.toml`) can only ask which agents are placed on it
 and claim them: it can't act as an agent or as you ([Security](SECURITY.md)).
@@ -209,7 +214,7 @@ its conversations; Hive passes that folder to agy as its home directory
 
 Use a different account per agent. That is the point of separate folders. `hive agents`
 shows which agents on this computer are logged in, and `hive doctor`
-([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview))
+([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-doctor))
 reports those that have never been.
 
 ---

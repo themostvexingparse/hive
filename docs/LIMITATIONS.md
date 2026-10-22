@@ -87,7 +87,10 @@ These need a real, logged-in account, and would use up some of its allowance:
   - Gemini: re-linking an extension that a slot had linked to the committed
     `.hive/agent/gemini` folder (Hive reads the link's source from Gemini's
     `.gemini-extension-install.json`, as Gemini CLI 0.41 writes it);
-  - pairing two real computers over a network.
+  - pairing two real computers over a network;
+  - the chat window (`hive`) in a real terminal: its logic is tested with scripted input,
+    and typing while a reply arrives redraws the prompt line without the text typed so far
+    (it is kept, and sent with Enter).
 
 ---
 
@@ -128,8 +131,6 @@ What differs with agy:
 
 - Typing to the orchestrator (the agent you chat with) while it's waiting for news needs
   **Esc** first ([Chatting in its terminal](ORCHESTRATOR.md#chatting-in-its-terminal)).
-- The orchestrator isn't yet told to reply in the `#user` channel to messages you send there,
-  so replies to messages from the dashboard or `hive say` may appear only in its terminal.
 - Plans the orchestrator writes to `.hive/plans/` aren't copied between computers; the plan
   reaches you in the approval question, and reaches programmers in their task descriptions.
 - Hive doesn't yet notice agents messaging each other in an endless loop, and can't send you

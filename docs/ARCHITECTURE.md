@@ -160,8 +160,7 @@ This is what happens in a typical run. Each step links to the page that explains
    and the orchestrator is woken ([Starting](LIFECYCLE.md#starting)).
 2. **The orchestrator plans.** It studies the repository, may ask you clarifying questions,
    and creates tasks. Until you approve, they are only drafts.
-3. **You approve the plan** (`hive decide <id> approve`, where `<id>` is the decision's
-   number from `hive decisions`; or the dashboard). The drafts become
+3. **You approve the plan** (`y` in the chat, `hive approve`, or the dashboard). The drafts become
    open tasks and the fleet enters `running` ([Planning and approval](LIFECYCLE.md#planning-and-approval)).
 4. **The server assigns tasks.** Each open task whose dependencies are done goes to an idle,
    online agent whose role handles its kind ([Tasks](COORDINATION.md#tasks)).

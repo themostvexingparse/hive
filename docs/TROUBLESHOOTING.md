@@ -3,8 +3,8 @@
 This page lists common problems with a Hive fleet (your team of AI agents) and their fixes.
 Terms are explained in the [glossary](GLOSSARY.md).
 
-**Start with `hive overview`**, run inside your repository
-([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview)). It
+**Start with `hive doctor`**, run inside your repository
+([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-doctor)). It
 checks most of the causes below and prints the fix for each problem it finds.
 
 Then, depending on the symptom, look at:
@@ -19,7 +19,7 @@ Then, depending on the symptom, look at:
 
 For server-side problems (deployment, database, the dashboard not loading), see
 [DEPLOYMENT.md §14](DEPLOYMENT.md#14-troubleshooting). For CLI error messages, see
-[CLI.md §14](CLI.md#14-error-messages-and-what-to-do).
+[CLI.md §15](CLI.md#15-error-messages-and-what-to-do).
 
 ---
 
@@ -27,11 +27,11 @@ For server-side problems (deployment, database, the dashboard not loading), see
 
 | Symptom | Check |
 |---|---|
-| `hive start` fails with `invalid_fleet` | The message lists missing roles: exactly one orchestrator and at least one programmer must have been created with `hive admin enroll` ([Roles](ROLES.md), [Enrolling agents](MACHINES.md)). |
-| `hive up` stops with "could not reach the Hive server" | The server is down or unreachable from this computer, or an agent's token was replaced on the server (*rotated*) so the old one no longer works. `hive overview` shows which. |
+| `hive start` fails with `invalid_fleet` | The message lists missing roles: exactly one orchestrator and at least one programmer must have been created with `hive agents add` ([Roles](ROLES.md), [Enrolling agents](MACHINES.md)). |
+| `hive up` stops with "could not reach the Hive server" | The server is down or unreachable from this computer, or an agent's token was replaced on the server (*rotated*) so the old one no longer works. `hive doctor` shows which. |
 | An agent never starts working (is never *woken*) | Is `hive up` running on its computer? Run `hive status`: is it online, or out of quota? Is the fleet in a state where its role may act ([What each role may do](LIFECYCLE.md#what-each-role-may-do-in-each-state))? Check `~/.hive/logs/daemon.log`. |
 | Orchestrator doesn't respond to typing | It's waiting inside its `await_events` tool: press Esc first ([Chatting in its terminal](ORCHESTRATOR.md#chatting-in-its-terminal)). |
-| Fleet stuck in `frozen` | An agent is stuck and the orchestrator is waiting for your answer. Run `hive decisions` and answer the open one with `hive decide`. `hive reset` is the emergency exit. |
+| Fleet stuck in `frozen` | An agent is stuck and the orchestrator is waiting for your answer. Run `hive decisions` and answer the open one (`hive approve`, `hive answer`, or in the chat). `hive reset` is the emergency exit. |
 
 ## Tools and hooks
 

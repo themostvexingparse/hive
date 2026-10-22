@@ -117,7 +117,7 @@ hive doctor
 It reports on the repository, the configuration, this computer's agents and the server, and
 should end with no problems. If it lists any, each comes with the command that fixes it.
 
-➜ [Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview)
+➜ [Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-doctor)
 
 ## 5. Run the fleet
 
@@ -134,7 +134,9 @@ nothing, until it gets work.
 
 ## 6. Give it a goal and approve the plan
 
-In another terminal:
+In another terminal, run `hive` again: now that the team runs, it opens a **chat** with it.
+Type the goal (Hive asks once to confirm it), and approve the plan with `y` when it appears.
+Everything below can also be done with single commands, as shown:
 
 ```sh
 hive start "Add CSV export to the reports page"

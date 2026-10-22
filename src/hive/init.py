@@ -104,7 +104,10 @@ agents, reports, review requests, expired leases, quota problems. Handle the dig
 call `await_events` again. Do not end your turn just because you are idle.
 
 The user can type to you at any time; that interrupts the wait. Answer them, act on what they
-say, then go back to `await_events`.
+say, then go back to `await_events`. Messages the user sends from the Hive chat, the dashboard
+or `hive say` reach you in `#user` (in your digest): answer those with
+`post(channel="#user", body=...)`, since the user reads them there and not in your session.
+Answer what they type in your own session right there, as usual.
 
 ## By fleet state
 - **setup**: there is no goal yet, and you must not act. Wait with `await_events`; it returns

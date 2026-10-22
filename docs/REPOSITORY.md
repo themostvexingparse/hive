@@ -17,7 +17,7 @@ work on a repository as a Hive **fleet**, the repository needs two things:
 `hive init` writes all of that. You run it once, commit the result, and re-run it after
 upgrading Hive or changing your prompt files (your own additions to the agents'
 instructions; [Customising what agents are told](PROMPTS.md)). This page explains what
-`hive init` creates, why none of it affects your own CLI sessions, and how `hive overview`
+`hive init` creates, why none of it affects your own CLI sessions, and how `hive doctor`
 checks the whole setup afterwards.
 
 ---
@@ -112,9 +112,9 @@ their own bundles, so `[permissions]` and prompt changes need only be committed 
 
 ---
 
-## Checking a project's setup (`hive overview`)
+## Checking a project's setup (`hive doctor`)
 
-Run `hive overview` anywhere inside the repository (or `hive overview PATH`) for a full
+Run `hive doctor` anywhere inside the repository (or `hive doctor PATH`) for a full
 report on its Hive setup, ending with a list of problems and the command that fixes each one.
 It never changes anything, so run it whenever something seems off. The table below uses
 terms explained elsewhere: **slots** are agents set up on this computer
@@ -144,9 +144,9 @@ terms explained elsewhere: **slots** are agents set up on this computer
   shared with another slot;
 - a server URL that differs between `hive.toml` and this machine;
 - an unreachable server, or credentials it refuses;
-- a server whose review policy differs from `hive.toml`, meaning the copy uploaded with
-  `hive admin push-config` is out of date;
-- slots set up here but not created on the server (`hive admin enroll`);
+- a server whose review policy differs from `hive.toml`, meaning the uploaded copy is out of
+  date (any admin command run in the repository uploads it);
+- slots set up here but not created on the server (`hive agents add`);
 - required roles nobody holds (a fleet needs an orchestrator and a programmer).
 
 ### Which server it asks
@@ -155,7 +155,7 @@ The one this project really uses. `hive.toml`'s `[server] url` is informational 
 ([`hive.toml` reference](CONFIGURATION.md#hivetoml)), so the overview picks, in this order:
 1. the server this project's slots on this computer connect to (recorded in
    `~/.hive/machine.toml` by `hive join --server`);
-2. the server your admin login points at (`~/.hive/admin.toml`, set by `hive admin login`);
+2. the server your admin login points at (`~/.hive/admin.toml`, set by `hive login`);
 3. `hive.toml`'s value, only if neither exists.
 
 The Fleet section names the source. It also lists the other addresses whenever they differ,

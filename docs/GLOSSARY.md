@@ -74,8 +74,8 @@ Only you can sign in. ➜ [Watching the fleet](MONITORING.md#the-web-dashboard)
 ### `hive` command
 
 The one program you install. Its subcommands run the server (`hive server`), set up a
-repository (`hive init`), add agents (`hive admin enroll`, `hive join`), run machines
-(`hive up`) and steer the fleet (`hive start`, `hive decide`, …). ➜ [CLI.md](CLI.md)
+repository (`hive init`), add agents (`hive agents add`, `hive join`), run machines
+(`hive up`) and steer the fleet (`hive`, `hive start`, `hive approve`, …). ➜ [CLI.md](CLI.md)
 
 ---
 
@@ -150,7 +150,7 @@ its limit, Hive pauses that agent for an hour and the [scheduler](#scheduler) sk
 
 ### Admin, you
 
-The person running the fleet. Admin commands (`hive admin …`, `hive start`, `hive decide`, …)
+The person running the fleet. Admin commands (`hive agents …`, `hive start`, `hive approve`, …)
 and the dashboard need the [admin token](#admin-token).
 
 ### Admin token
@@ -166,7 +166,8 @@ talk to the server as that agent, and can do only what the agent's [roles](#role
 
 ### Enroll
 
-Creating an agent on the server: `hive admin enroll NAME --vendor … --roles …`. Prints its
+Creating an agent on the server: `hive agents add CLI [ROLES]` (which also sets it up on
+this computer), or `hive admin enroll NAME --vendor … --roles …`, which prints its
 [agent token](#agent-token). ➜ [Enrolling agents](MACHINES.md#on-this-computer)
 
 ### Join
@@ -202,7 +203,7 @@ Which phase the fleet is in: `setup`, `planning`, `awaiting_approval`, `running`
 ### Decision
 
 A question the orchestrator asks *you*, with options. Only you can answer it
-(`hive decide`, or the dashboard). The plan approval is one; a [stuck](#stuck-freeze)
+(in the chat, `hive approve` / `hive answer`, or the dashboard). The plan approval is one; a [stuck](#stuck-freeze)
 agent's question is another. ➜ [Answering decisions](ORCHESTRATOR.md#answering-decisions)
 
 ### Stuck, freeze

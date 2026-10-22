@@ -807,7 +807,18 @@ def cmd_up(a):
         d.stop()
 
 
+def open_team_chat(c: ServerClient | None = None) -> None:
+    """The chat with the orchestrator (hive/chat.py), its slash commands run here."""
+    from .chat import Chat
+    no_agent_session("The chat")
+    c = c or admin_client()
+    ui.banner(f"Hive {__version__}", "talk to the team · /help · /quit")
+    Chat(c, run_command=lambda argv: main(argv)).run()
+
+
 def cmd_chat(a):
+    if not a.slot:
+        return open_team_chat()
     import requests
     cfg = load_machine_config()
     slot = next((s for s in cfg.slots if s.name == a.slot), None) or die(f"no slot {a.slot}")
@@ -1332,6 +1343,17 @@ def cmd_agents_rm(a):
 
 def cmd_agents_rotate(a):
     c = admin_client()
+    ag = next((x for x in call(c.get, "/agents") if x["name"] == a.name), None) or \
+        die(f"no agent named {a.name!r}")
+    if ag.get("machine"):
+        # Placed afresh, its computer claims it again, and the claim gives it a new token.
+        p = ag.get("placement") or {}
+        call(c.put, f"/agents/{a.name}/placement", {"machine": None})
+        call(c.put, f"/agents/{a.name}/placement", {"machine": ag["machine"], **p})
+        call(c.post, f"/agents/{a.name}/token")  # the old token stops working right away
+        ui.ok(f"{ui.agent(a.name)}'s token was replaced; {ag['machine']} takes a new one at its "
+              "next check (within a minute while hive up runs there).")
+        return
     r = call(c.post, f"/agents/{a.name}/token")
     cfg = load_machine_config()
     slot = next((s for s in cfg.slots if s.name == a.name and
@@ -1819,8 +1841,9 @@ def run_plugin(exe: str, rest: list[str]) -> None:
 
 # ---------------------------------------------------------------------- hive (no command)
 
-def cmd_home(a):
-    """Where things stand, and the one next step: the first rung of docs/CLI_REDESIGN.md."""
+def cmd_home(a, chat: bool = True):
+    """Where things stand, and the one next step: the first rung of docs/CLI_REDESIGN.md.
+    Once the team exists and runs, in a terminal, it opens the chat with it instead."""
     from . import agents
     import requests
     cfg = load_admin_config()
@@ -1906,7 +1929,10 @@ def cmd_home(a):
                          headers={"X-Hive-Local": mcfg.local_secret})
         except requests.RequestException:
             return step("Start this computer's agents (in its own terminal):", "hive up",
-                        "The orchestrator opens there for you to chat with.")
+                        "Then run hive again here to talk to the team.")
+    if chat and interactive():
+        # The team exists and runs: from here on, `hive` is the conversation with it.
+        return open_team_chat(c)
     if open_:
         d = open_[0]
         ui.section(f"Waiting for you: decision #{d['id']}")
@@ -1923,7 +1949,8 @@ def cmd_home(a):
 HELP = """\
 usage: hive [COMMAND] ...
 
-Several coding agents, one coordinated team. Run hive on its own to see what to do next.
+Several coding agents, one coordinated team. Run hive on its own: it shows the next step,
+and once the team runs, it is the chat with it (hive next always shows the step).
 
 Set up:
   hive server                    run a Hive server on this computer (logs you in)
@@ -1933,6 +1960,7 @@ Set up:
   hive up                        run this computer's agents
 
 Work with the team:
+  hive                           the chat with the team (/help inside it)
   hive start "GOAL"              give the team a goal
   hive status                    what is going on
   hive decisions                 what the team is asking you
@@ -2263,10 +2291,14 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--no-follow", dest="follow", action="store_false")
     s.set_defaults(fn=cmd_watch)
 
-    s = sub.add_parser("chat", help="attach interactively to a slot's session")
-    s.add_argument("slot")
-    s.add_argument("--fresh", action="store_true", help="start a new session")
+    s = sub.add_parser("chat", help="talk to the team (or, with a name, open that agent's own "
+                                    "CLI session here)")
+    s.add_argument("slot", nargs="?", help="an agent on this computer: attach to its session")
+    s.add_argument("--fresh", action="store_true", help="with a name: start a new session")
     s.set_defaults(fn=cmd_chat)
+    s = sub.add_parser("next", help="where things stand and the next step (hive without the "
+                                    "chat)")
+    s.set_defaults(fn=lambda a: cmd_home(a, chat=False))
 
     s = sub.add_parser("start", help="start the fleet with a goal (→ planning)")
     s.add_argument("goal")

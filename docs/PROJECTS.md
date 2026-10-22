@@ -28,7 +28,7 @@ programmer agent called `dev`. `host` stands for your server's address, e.g.
 project's data refers to another, and one project can't see another's data even through a
 bug in a query.
 - **Agent tokens** (the password each agent gets when you create it with
-  `hive admin enroll`) work only in their own project, so the same agent name can exist in
+  `hive agents add`) work only in their own project, so the same agent name can exist in
   two projects.
 - **A project's admin token** is admin there and nowhere else. You can hand it to someone who
   runs that project without giving them the rest of the server.
@@ -38,7 +38,7 @@ bug in a query.
   working unchanged as the `default` project.
 
 **A project's address is used wherever a server address is.** You pass
-`https://host/p/acme` to `hive admin login` (save your admin login), `hive init` (prepare the
+`https://host/p/acme` to `hive login` (save your admin login), `hive init` (prepare the
 repository) and `hive join` (add an agent to a computer) exactly as you would pass
 `https://host`.
 
@@ -63,15 +63,13 @@ project's address wherever you'd use the server's:
 ```sh
 cd acme-repo
 hive init --server https://host/p/acme      # hive.toml now names the project
-hive admin push-config                      # inside the repo: acts on the project it names
-hive admin enroll dev --vendor claude --roles programmer   # prints `hive join … --server https://host/p/acme`
+hive agents add claude                      # inside the repo: acts on the project it names
 ```
 
 - `hive init` prepares the repository for Hive and writes its settings file, `hive.toml`,
   which records the project's address ([Preparing the repository](REPOSITORY.md)).
-- `hive admin push-config` uploads `hive.toml` to the project on the server.
-- `hive admin enroll` creates an agent (here a Claude Code programmer called `dev`) and
-  prints its token plus the `hive join` command to run on the computer that will host it.
+- `hive agents add` creates an agent in that project and sets it up on this computer; any
+  admin command run inside the repository also uploads `hive.toml` to the project.
 
 From here on, setup is the same as for a single project: [enroll agents and join
 machines](MACHINES.md), then [run the fleet](RUNNING.md).
@@ -80,10 +78,10 @@ machines](MACHINES.md), then [run the fleet](RUNNING.md).
 
 ## Which project an admin command acts on
 
-Admin commands are the `hive` commands you use to control a fleet (`hive admin …`,
-`hive start`, `hive status`, `hive decide`, …). They pick their project in this order:
+Admin commands are the `hive` commands you use to control a fleet (`hive`, `hive agents …`,
+`hive start`, `hive status`, `hive approve`, …). They pick their project in this order:
 1. `--project NAME` anywhere on the command line (or the `HIVE_PROJECT` environment
-   variable), on the server you logged in to with `hive admin login`.
+   variable), on the server you logged in to with `hive login`.
 2. Otherwise, the project named by the `hive.toml` of the repository you're in (its
    `[server]` section has `url = "…/p/NAME"`).
 3. Otherwise, the server you logged in to (its `default` project).

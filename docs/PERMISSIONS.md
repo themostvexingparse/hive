@@ -11,7 +11,7 @@ three tiers:
 |---|---|---|
 | **1. Allowed** | reading, tests, git history work, builds | Runs directly. |
 | **2. Needs approval** | `git push`, `git reset --hard`, `rm -rf`, `sudo`, sending data with `curl`, and any command on no list | The command waits while **a reviewer**, or the orchestrator when no reviewer takes it, approves or denies it; once approved it runs, as if a person had clicked "allow". |
-| **3. Never** | `hive decide`, `hive admin` (commands that would act as you), pushing to `main` | Refused, with no way to approve. |
+| **3. Never** | `hive approve`, `hive decide`, `hive admin`, `hive agents`, … (commands that would act as you), pushing to `main` | Refused, with no way to approve. |
 
 The aim is to need as little human intervention as possible while staying safe: routine work
 never waits for anyone, dangerous and unknown commands wait for a reviewer or the
@@ -263,7 +263,7 @@ deny = ["kubectl delete"]                       # extra commands agents may neve
   never-allowed, and the built-in dangerous commands always need approval, whatever the
   preset.
 
-`hive overview` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview))
+`hive doctor` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-doctor))
 shows the preset and how many entries each tier has, for the orchestrator and for workers.
 
 ---

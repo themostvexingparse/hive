@@ -217,6 +217,19 @@ def test_pair_a_computer_and_place_agents_on_it(two_computers, tmp_path, capsys)
     assert res.updated == ["claude-1"] and d.slots["claude-1"].cfg.model == "m9"
     assert load_machine_config().slot("claude-1").model == "m9"
 
+    # A placed agent's new token reaches its computer by itself, settings kept.
+    old = load_machine_config().slot("claude-1").token
+    as_admin()
+    cli.main(["agents", "rotate", "claude-1"])
+    as_worker()
+    with pytest.raises(HiveError):
+        ServerClient(url, old).get("/agents/me")
+    d.sync_placements()
+    new = load_machine_config().slot("claude-1")
+    assert new.token != old and new.model == "m9"
+    assert ServerClient(url, new.token).get("/agents/me")["name"] == "claude-1"
+    assert d.slots["claude-1"].client.get("/agents/me")["name"] == "claude-1"
+
     # The paired computer's home screen knows what it is.
     capsys.readouterr()
     cli.main(["--color", "never"])

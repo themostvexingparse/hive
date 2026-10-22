@@ -20,8 +20,8 @@ PowerShell).
 
 ## `hive.toml`
 
-In the repository, committed. Upload it to the server with `hive admin push-config` after
-every change (`hive start` also uploads it). Agents use a change once it is on `main`: each
+In the repository, committed. Admin commands run inside the repository upload it to the
+server whenever it changed (`hive admin push-config` does it explicitly). Agents use a change once it is on `main`: each
 launch builds the CLIs' permission files from it.
 
 ```toml
@@ -57,7 +57,31 @@ deny = ["kubectl delete"]              # never
 [roles.docs-writer]          # custom roles / overrides
 can_code = true
 task_kinds = ["docs"]
+
+[fleet]
+preset = "custom"            # custom | solo | team | strict: a starting bundle of the above
 ```
+
+The same settings can be given in two more files, which apply to one computer only and are
+never uploaded ([`hive config`](CLI.md#hive-config-read-and-change-settings) explains the
+order): `hive.local.toml` next to `hive.toml` in your clone (git-ignored), and
+`~/.hive/config.toml`, yours in every repository on that computer. Those two are also where
+**hooks** go, the commands this computer's daemon runs when the fleet does something; Hive
+ignores a `[hooks]` section in `hive.toml`:
+
+```toml
+# hive.local.toml or ~/.hive/config.toml
+[hooks]
+on_decision = 'notify-send "Hive" "$HIVE_SUMMARY"'     # a decision waits for you
+on_task_done = ""            # a task finished
+on_main = ""                 # main moved
+on_frozen = ""               # the fleet froze on a stuck agent
+on_state = ""                # the fleet's state changed
+on_message = ""              # an agent wrote to you in #user
+```
+
+Each hook runs in a shell with `HIVE_EVENT`, `HIVE_SUMMARY` and `HIVE_EVENT_JSON` set, from
+the worktree of one of this computer's agents, and is stopped after 2 minutes.
 
 | Key | Explained in |
 |---|---|
@@ -71,6 +95,8 @@ task_kinds = ["docs"]
 | `[orchestrator] heartbeat_hours` | [Running the fleet](RUNNING.md#the-machine-with-the-orchestrator-your-computer) (headless orchestrator) |
 | `[sessions]` | [Wake rules](RUNNING.md#wake-rules) and [the orchestrator's session](RUNNING.md#the-machine-with-the-orchestrator-your-computer). `max_context_tokens` uses the context size Claude Code reports; for Codex and Gemini CLI agents only `per_task` and `max_wakes` apply. `0` turns a limit off. |
 | `[permissions]` | [Shell-command permissions](PERMISSIONS.md#customising) |
+| `[fleet] preset` | [`hive config`](CLI.md#hive-config-read-and-change-settings): `solo` (no reviews), `team` (reviews by a `reviewer`), `strict` (reviews and the `strict` permission preset) |
+| `[hooks]` | above; only in `hive.local.toml` or `~/.hive/config.toml` |
 | `[roles.<name>]` | [Custom roles and overrides](ROLES.md#custom-roles-and-overrides) |
 
 ---
@@ -150,7 +176,7 @@ The default commands are listed in
 | `HIVE_SERVER_URL` | admin CLI | Overrides the server URL in `admin.toml`. |
 | `HIVE_PROJECT` | admin CLI | The project admin commands act on, like `--project` ([Several projects](PROJECTS.md#which-project-an-admin-command-acts-on)). |
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
-| `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off ([Coloured output](CLI.md#16-coloured-output)). |
+| `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off ([Coloured output](CLI.md#17-coloured-output)). |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |
 | `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` / `CODEX_HOME` | set by Hive per slot | Keep each account's CLI config separate. |
 | `USERPROFILE`, `HOME`, `GIT_CONFIG_GLOBAL` | set by Hive for agy slots | agy has no config-folder setting, so the slot's folder becomes its home directory; git keeps your `~/.gitconfig` ([agy home folder](RUNNING.md#agy-home-folder)). |
@@ -167,6 +193,7 @@ The default commands are listed in
 | `machine.toml` | default server URL, local API port and secret, slots with their tokens and server URLs (keep private) |
 | `admin.toml` | admin server URL and token, plus `[servers]`: other servers' or projects' admin tokens (only where you ran `hive login`, or `hive server`) |
 | `server.toml` | the admin token `hive server` made up and uses when given none (keep private) |
+| `config.toml` | your own settings, in every repository on this computer (`hive config set … --user`), including hooks |
 | `bundles/<slot>/<cli>/` | the Hive plugin, extension or profile attached to that slot's sessions, rewritten at each launch from the installed Hive and the slot's worktree |
 | `config-sync.json` | for each server, a fingerprint of the `hive.toml` last uploaded from here, so a changed one is uploaded automatically |
 | `state.db` | what the daemon remembers between runs: which fleet events each slot has seen, a copy of its messages, why it's waiting to be started, and its conversation ids |

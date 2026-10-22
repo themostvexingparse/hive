@@ -3,7 +3,7 @@
 `hive` is the one command for everything in Hive: running the server, setting up a
 repository, adding agents, running the computers that host them, and steering the **fleet**
 (the team of AI agents working on your repository). This guide shows each command with
-examples. [§15](#15-command-summary) is the one-table summary of every command and option;
+examples. [§16](#16-command-summary) is the one-table summary of every command and option;
 the [configuration reference](CONFIGURATION.md) has every config file and environment
 variable. If Hive is new to you, read [How Hive works](ARCHITECTURE.md) first; the
 [glossary](GLOSSARY.md) explains every term.
@@ -33,11 +33,12 @@ variable. If Hive is new to you, read [How Hive works](ARCHITECTURE.md) first; t
 9. [Steering the fleet](#9-steering-the-fleet)
 10. [Several projects on one server](#10-several-projects-on-one-server)
 11. [Backups](#11-backups)
-12. [Commands the agent CLIs run](#12-commands-the-agent-clis-run)
-13. [Common recipes](#13-common-recipes)
-14. [Error messages and what to do](#14-error-messages-and-what-to-do)
-15. [Command summary](#15-command-summary)
-16. [Coloured output](#16-coloured-output)
+12. [Scripts and extensions](#12-scripts-and-extensions)
+13. [Commands the agent CLIs run](#13-commands-the-agent-clis-run)
+14. [Common recipes](#14-common-recipes)
+15. [Error messages and what to do](#15-error-messages-and-what-to-do)
+16. [Command summary](#16-command-summary)
+17. [Coloured output](#17-coloured-output)
 
 ---
 
@@ -237,17 +238,35 @@ hive config set integration.shell powershell --local   # in hive.local.toml: thi
 hive config unset integration.shell --local       # back to hive.toml's value
 hive config explain integration.shell             # its value in every layer, and which wins
 hive config edit                                  # open hive.toml in $EDITOR
+hive config set fleet.preset strict               # start from a bundle of settings
+hive config set sessions.max_wakes 20 --user      # your default, in every repository here
+hive config set hooks.on_decision "notify-send Hive \"\$HIVE_SUMMARY\"" --local
 ```
 
 Settings are named `<section>.<name>`, as in the file (`roles.<role>.<name>` for
-[custom roles](ROLES.md#custom-roles-and-overrides)). They come from three layers, each
+[custom roles](ROLES.md#custom-roles-and-overrides)). They come from five layers, each
 overriding the one before:
 
 | Layer | File | Applies to |
 |---|---|---|
 | `default` | built into Hive | everything not set below |
+| `preset` | the bundle `fleet.preset` in `hive.toml` names | the whole fleet (`hive.toml`'s own settings override it) |
+| `user` | `~/.hive/config.toml` (`--user`) | you, in every repository on this computer; never uploaded |
 | `hive.toml` | committed in the repository | the whole fleet; uploaded to the server |
-| `hive.local.toml` | next to `hive.toml` in your clone, git-ignored | this computer only: its daemon and its agents' worktrees; never uploaded |
+| `hive.local.toml` | next to `hive.toml` in your clone, git-ignored (`--local`) | this computer only: its daemon and its agents' worktrees; never uploaded |
+
+**Presets** (`fleet.preset`): `custom` (the default: nothing extra), `solo` (no reviews),
+`team` (reviews by an agent with the `reviewer` role), `strict` (reviews, and the `strict`
+[permission preset](PERMISSIONS.md)). The server gets `hive.toml` over its preset.
+
+**Hooks** (`hooks.*`) are shell commands this computer's daemon (`hive up`) runs when the
+fleet does something: `on_decision` (a decision waits for you), `on_task_done`, `on_main`
+(`main` moved), `on_frozen`, `on_state` (the fleet's state changed) and `on_message` (an
+agent wrote to you in `#user`). Each gets `HIVE_EVENT`, `HIVE_SUMMARY` (one line for a
+person) and `HIVE_EVENT_JSON` in its environment, and is stopped after 2 minutes. They are
+read only from `hive.local.toml` or `~/.hive/config.toml`, never from the committed
+`hive.toml`, so a repository can't run commands on every computer; `hive config set hooks.…`
+without `--local` or `--user` is refused, and `hive doctor` flags any in `hive.toml`.
 
 `set` and `unset` edit the file in place, keeping its comments, check that the result is a
 valid configuration (otherwise nothing changes), and upload a changed `hive.toml`. Values
@@ -366,6 +385,19 @@ slots next to the clone, and takes off those removed or placed elsewhere, withou
 `hive up` and `hive join` offer to log new agents in. When your server listens only on your
 own computer (`127.0.0.1`), `invite` says how to make it reachable and prints your network
 address instead. Full walkthrough: [Setting up machines](MACHINES.md#on-another-computer-pair-it-once).
+
+**Join keys, for scripts** that set up many computers:
+
+```sh
+hive machines invite --reusable --days 7 --label ci   # prints hk_…, shown only once
+hive machines keys                                    # keys that still work, and how often used
+hive machines revoke 3f9a1c2b07                       # stop it pairing more (paired ones stay)
+# then on each computer, inside its clone:
+hive join hk_… --server https://hive.example.com --as build-07
+```
+
+A join key pairs any number of computers until it expires or is revoked; keep it like a
+password.
 
 ### `hive plan` and `hive apply`: the fleet as a file
 
@@ -517,6 +549,39 @@ computer, otherwise Hive's tools and automatic checks won't work in the session.
 ---
 
 ## 9. Steering the fleet
+
+### `hive`: the chat with the team
+
+Once the team exists (and, for agents on this computer, `hive up` runs), `hive` in a terminal
+opens the chat. `hive chat` opens it too; `hive next` shows the next-step screen instead.
+
+```
+> Add CSV export to the reports page
+? Start the team on this goal? [Y/n]
+• the fleet is planning
+claude-1: I'll split this into the exporter and the button; one question first…
+
+┌ Decision #1 · start_approval · freezes the fleet
+│ Approve the 2-task plan?
+│ …
+└ y = approve · n = send back with a note
+> y
+√ Decision #1 answered: approve
+> /agents add codex reviewer
+```
+
+- **Messages:** a line goes to the orchestrator in `#user` (in setup, it becomes the goal once
+  you confirm). Its replies, status updates and the fleet's state appear as they happen.
+- **Decisions** appear as prompts: `y` approves, `n` asks what to change and sends the plan
+  back; other questions take `/answer …`. Hive answers them on your keypress, never the
+  AI.
+- **Slash commands are the `hive` commands:** `/agents add codex` runs `hive agents add codex`,
+  `/status`, `/plan`, `/config …` and so on; `/watch AGENT` follows an agent's live output in
+  the chat (`/watch off` stops); `/help`; `/quit` leaves (the team keeps working).
+  Commands that take over a terminal (`server`, `up`, `join`) run in their own.
+
+It works wherever the orchestrator runs: headless under `hive up --headless`, or in its own
+terminal under `hive up`.
 
 ### `hive start`: give the fleet a goal
 
@@ -697,7 +762,29 @@ and downloads it to your computer. For MySQL or Postgres, use the database's own
 
 ---
 
-## 12. Commands the agent CLIs run
+## 12. Scripts and extensions
+
+### `hive api`: the server's API with your admin login
+
+```sh
+hive api GET /fleet
+hive api GET /tasks -f state=open
+hive api POST /messages -d '{"channel": "#user", "body": "Prioritise the API"}'
+hive api PATCH /agents/claude-2 -d - < roles.json
+```
+
+It prints the JSON the server answers, for anything the commands don't cover (the endpoints
+are in `src/hive/server/app.py`). Agents may never run it.
+
+### Plugins: `hive NAME` runs `hive-NAME`
+
+A program called `hive-NAME` on your PATH becomes `hive NAME …`, as with git, kubectl and
+cargo. It gets the remaining arguments, plus `HIVE_HOME` and (with `--project`)
+`HIVE_PROJECT`, and can call `hive api` for anything on the server. Hive's own commands
+always win over a plugin of the same name. Neither plugins nor `hive api` run inside an
+agent's session.
+
+## 13. Commands the agent CLIs run
 
 You don't run these yourself. They are listed so you recognise them in configuration files and
 lists of running programs.
@@ -710,11 +797,11 @@ lists of running programs.
 
 ---
 
-## 13. Common recipes
+## 14. Common recipes
 
 **Check everything after a change.**
 ```sh
-hive overview
+hive doctor
 ```
 
 **Move a slot to another server or project.**
@@ -747,7 +834,7 @@ then type. From anywhere else: `hive say "…"`.
 
 ---
 
-## 14. Error messages and what to do
+## 15. Error messages and what to do
 
 | Message | Meaning and fix |
 |---|---|
@@ -758,24 +845,29 @@ then type. From anywhere else: `hive say "…"`.
 | `token belongs to 'x', not 'y'` | The token is for another agent; check the name you passed to `hive join`. |
 | `this machine already has a slot named 'dev', for …` | Another server or project's slot has that name. Use another name, or `--replace` to move the slot. |
 | `no slots on this machine; run hive join first` | `hive up` has nothing to run. |
-| `could not reach the Hive server for …` | `hive up` couldn't check with the server which agent a slot is. Check the server is up and the tokens in `~/.hive/machine.toml` are valid; `hive overview` helps. |
+| `could not reach the Hive server for …` | `hive up` couldn't check with the server which agent a slot is. Check the server is up and the tokens in `~/.hive/machine.toml` are valid; `hive doctor` helps. |
 | `no project named 'x' on this server` | Wrong project name in the URL, or the project was archived (`hive admin project list`). |
 | `no hive.toml found (run hive init)` | Run the command inside a repository prepared with `hive init`. |
 
-For anything else, `hive overview` lists problems with their fixes, and [Troubleshooting](TROUBLESHOOTING.md) covers the rest.
+For anything else, `hive doctor` lists problems with their fixes, and [Troubleshooting](TROUBLESHOOTING.md) covers the rest.
 
 ---
 
-## 15. Command summary
+## 16. Command summary
 
 Every command and option in one place. The sections above explain each one with examples.
-The commands the agent CLIs run are in [§12](#12-commands-the-agent-clis-run).
+The commands the agent CLIs run are in [§13](#13-commands-the-agent-clis-run).
 
 ### Everyday
 
 | Command | Description |
 |---|---|
-| `hive` | Where things stand, and the one next step. |
+| `hive` | Where things stand and the next step; once the team runs, the chat with it (§9). |
+| `hive chat` / `hive next` | The chat; the next-step screen. |
+| `hive api METHOD PATH [-d JSON] [-f K=V]` | The server's API with your admin login (§12). |
+| `hive NAME …` | Runs the plugin `hive-NAME` from PATH (§12). |
+| `hive machines invite --reusable [--days N] [--label L]` / `keys` / `revoke ID` | Join keys for scripts. |
+| `hive config set KEY VALUE --user` | A setting of yours, in every repository on this computer. |
 | `hive help [--all] [COMMAND]` | The common commands; `--all` every command; or one command's help. |
 | `hive login [--server URL] [--token T]` | Log in as admin; asks for what's missing, the token without echoing it (§5). |
 | `hive agents add [N] CLI [ROLES] [--name N] [--elsewhere] [--model M] [--permission-mode P] [--no-login]` | Create agents and set them up on this computer, or print the `join` line for another (§7). |
@@ -835,7 +927,7 @@ default ([§10](#10-several-projects-on-one-server)).
 
 ---
 
-## 16. Coloured output
+## 17. Coloured output
 
 
 Everything Hive prints for a person is coloured and laid out the same way on Windows, macOS

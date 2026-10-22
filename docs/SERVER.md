@@ -104,7 +104,7 @@ internet.
 On your computer:
 
 ```sh
-hive admin login --server https://USER.pythonanywhere.com --token <admin token>
+hive login --server https://USER.pythonanywhere.com --token <admin token>
 ```
 
 Use your server's address: `http://127.0.0.1:8765` for a local trial, or for example
@@ -112,13 +112,13 @@ Use your server's address: `http://127.0.0.1:8765` for a local trial, or for exa
 username.
 
 This checks the token against the server and saves it in `~/.hive/admin.toml` (user-only
-permissions). Every user-side command (`hive start`, `hive status`, `hive decide`, …) uses
+permissions). Every user-side command (`hive start`, `hive status`, `hive approve`, …) uses
 it, so you log in once per computer. `HIVE_SERVER_URL` and `HIVE_ADMIN_TOKEN` environment
 variables override the file.
 
 If the server hosts [several projects](PROJECTS.md), each project has its own address,
 `https://<server>/p/<project>`, and its own admin token. You can log in to just one of them:
-`hive admin login --server https://…/p/acme --token <project admin token>`, where `acme` is
+`hive login --server https://…/p/acme --token <project admin token>`, where `acme` is
 an example project name. That login is kept beside the server's, and used only for that
 project.
 

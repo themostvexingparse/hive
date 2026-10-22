@@ -185,8 +185,8 @@ This mode is implemented but not yet tested against GitHub
 ## Reviews
 
 A review means another agent must approve a programmer's work before it reaches `main`. Set
-`review` in the `[integration]` section of `hive.toml`, then upload the settings with
-`hive admin push-config`:
+`review` in the `[integration]` section of `hive.toml`, for example with
+`hive config set integration.review reviewer` (which also uploads it):
 
 | Value | Behaviour |
 |---|---|
