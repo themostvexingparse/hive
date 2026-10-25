@@ -45,7 +45,10 @@ variable. If Hive is new to you, read [How Hive works](ARCHITECTURE.md) first; t
 ## 1. Where each command runs
 
 **Not sure what to run?** `hive` on its own looks at your setup and prints the one next
-step. `hive help` lists the common commands, `hive help --all` every one. The design behind
+step. `hive help` lists the common commands, `hive help --all` every one, and
+`hive help TOPIC` explains one thing in detail: a command (`hive help agents add`, with its
+options) or a subject (`hive help hooks`, `hive help permissions`, `hive help leases`);
+`hive help topics` lists them all. The design behind
 this interface is in [CLI_REDESIGN.md](CLI_REDESIGN.md).
 
 | Where | Who | Commands |
@@ -877,7 +880,7 @@ The commands the agent CLIs run are in [§13](#13-commands-the-agent-clis-run).
 | `hive NAME …` | Runs the plugin `hive-NAME` from PATH (§12). |
 | `hive machines invite --reusable [--days N] [--label L]` / `keys` / `revoke ID` | Join keys for scripts. |
 | `hive config set KEY VALUE --user` | A setting of yours, in every repository on this computer. |
-| `hive help [--all] [COMMAND]` | The common commands; `--all` every command; or one command's help. |
+| `hive help [--all] [TOPIC…]` | The common commands; `--all` every command; `TOPIC` (a command or a subject) explained in detail, with a command's options; `topics` lists every topic. |
 | `hive login [--server URL] [--token T]` | Log in as admin; asks for what's missing, the token without echoing it (§5). |
 | `hive agents add [N] CLI [ROLES] [--name N] [--elsewhere] [--model M] [--permission-mode P] [--no-login]` | Create agents and set them up on this computer, or print the `join` line for another (§7). |
 | `hive agents [list]` | Every agent: CLI, roles, state, where it runs, login. |
@@ -961,7 +964,7 @@ a file, a git hook or an agent's CLI is plain text, and what Hive's tools and ho
 the agents is never coloured. To force colour on or off,
 these settings are checked in order and the first one set wins:
 
-1. `hive --color always|never|auto ...` (before the subcommand);
+1. `--color always|never|auto`, anywhere on the line (`hive --color never status`, `hive status --color never`);
 2. `HIVE_COLOR=always|never`;
 3. `NO_COLOR=1` (off);
 4. `FORCE_COLOR=1` (on).

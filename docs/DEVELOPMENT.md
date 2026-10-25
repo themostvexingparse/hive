@@ -62,9 +62,35 @@ account's allowance.
 | `src/hive/permissions.py` | shell-command parsing and the permission tiers |
 | `src/hive/overview.py` | `hive overview` |
 | `src/hive/cli.py` | the `hive` command |
+| `src/hive/help/`, `helpdocs.py` | the pages `hive help TOPIC` shows (below), and finding and showing them |
 | `src/hive/roles.py`, `globs.py`, `config.py`, `ui.py` | shared logic and terminal output |
 | `scripts/simulate_load.py` | storage and request-cost simulation behind [DEPLOYMENT.md §3](DEPLOYMENT.md#3-capacity-planning-how-much-data-and-load-to-expect) |
 | `scripts/audit/` | probes used by the code audits |
+
+### Help pages (`hive help TOPIC`)
+
+Each file in `src/hive/help/` is one page, `NAME.md`, shown by `hive help NAME`. They ship
+inside the package, so editing a page needs no code change. A page starts with a header:
+
+```markdown
+---
+title: Hooks: run your own commands when the fleet does something
+keywords: hook, notify, on_decision
+see: config, up
+---
+# Hooks on fleet events
+…
+```
+
+- `title` is its line in `hive help topics`; `keywords` are other words that find it (each
+  keyword on one page only); `see` names related pages, listed at the end.
+- The body is Markdown: `#`/`##` headings, ```` ``` ```` code blocks, `- ` lists, `` `code` ``
+  and `**bold**` are styled in the terminal; keep lines under 92 characters.
+- `hive help WORDS` finds the page named `WORDS` (spaces as hyphens), else the page with
+  that keyword, else the page of the first word (`agents add` → `agents`), else the pages
+  that mention it. When the words are a command, its options follow the page.
+- `tests/test_help.py` checks every page: its header, its links, the commands it shows, and
+  that no keyword is on two pages.
 
 ---
 

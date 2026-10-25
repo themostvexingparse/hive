@@ -129,8 +129,9 @@ hive                                 # 5. in another terminal: the chat with the
 `hive` on its own always knows what's next: until the team is set up it shows the one next
 step, then it is the chat. The same works as single commands
 (`hive start "…"`, `hive approve`), and the chat's slash commands are those commands.
-`hive help` lists the common commands; every older, more precise command still works
-(`hive help --all`).
+`hive help` lists the common commands, and `hive help TOPIC` explains any of them, or a
+subject such as `hive help hooks`, in detail (`hive help topics` lists them). Every older,
+more precise command still works (`hive help --all`).
 
 ➜ Step by step, with what each step does: [Getting started](docs/GETTING_STARTED.md).
 The design of this interface: [CLI_REDESIGN.md](docs/CLI_REDESIGN.md).

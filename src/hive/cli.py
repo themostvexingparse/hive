@@ -2028,8 +2028,10 @@ Manage:
   hive doctor                    check the whole setup and list fixes
 
 More:
+  hive help TOPIC                how something works, e.g. hive help hooks
+  hive help topics               every help topic
   hive help --all                every command, including hive admin ...
-  hive COMMAND --help            one command in detail
+  hive COMMAND --help            one command's options
 """
 
 
@@ -2044,11 +2046,59 @@ class TopParser(ui.ArgumentParser):
         return ui.colorize_help(HELP, sys.stdout)
 
 
+def _subparser(parser: argparse.ArgumentParser, words: list[str]):
+    """The parser of the command `words` (["agents", "add"]), or None if it isn't one."""
+    for w in words:
+        sub = next((x for x in parser._actions
+                    if isinstance(x, argparse._SubParsersAction)), None)
+        if sub is None or w not in sub.choices:
+            return None
+        parser = sub.choices[w]
+    return parser
+
+
 def cmd_help(a, parser: TopParser):
-    if a.topic:
-        parser.parse_args([*a.topic, "--help"])
-    parser.full = a.all
-    parser.print_help()
+    """`hive help`: the common commands; `hive help TOPIC`: that help page (hive/help/), with
+    the command's options when TOPIC is a command; `hive help topics`: every page."""
+    from . import helpdocs
+    words = [w for w in a.topic if w.lower() != "hive"]
+    if not words:
+        parser.full = a.all
+        parser.print_help()
+        return
+    try:
+        topics = helpdocs.load()
+    except helpdocs.HelpError as e:
+        die(str(e))
+    if [w.lower() for w in words] in (["topics"], ["list"]):
+        ui.out(helpdocs.index(topics, sys.stdout), end="")
+        return
+    command = _subparser(parser, [w.lower() for w in words])
+    m = helpdocs.find(words, topics)
+    if m.topic is None and command is not None:  # a command without its own page
+        command.print_help()
+        return
+    if m.topic is not None:
+        ui.out(helpdocs.render(m.topic, sys.stdout), end="")
+        if command is not None:
+            ui.out("")
+            ui.out(ui.paint(f"Options of hive {' '.join(words).lower()}", "bold",
+                            "bright_yellow", stream=sys.stdout))
+            ui.out(ui.colorize_help(command.format_help(), sys.stdout).rstrip())
+        if m.topic.see:
+            ui.out("")
+            ui.out(ui.dim("See also: ") + ", ".join(ui.cmd(f"hive help {s}")
+                                                    for s in m.topic.see))
+        return
+    q = " ".join(words)
+    if m.choices:
+        ui.out(f"Several help topics cover {ui.bold(q)}:")
+        for t in m.choices:
+            ui.out(f"  {ui.cmd(('hive help ' + t.name).ljust(26))}{t.title}")
+        return
+    hint = (" Did you mean " + " or ".join(ui.cmd(f"hive help {s}") for s in m.suggestions)
+            + "?") if m.suggestions else ""
+    die(f"no help topic for {q!r}.{hint} `hive help topics` lists them all")
 
 
 # ---------------------------------------------------------------------- agent-side entry points
@@ -2089,9 +2139,11 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_home)
     sub = p.add_subparsers(dest="cmd", parser_class=ui.ArgumentParser)  # not TopParser
 
-    s = sub.add_parser("help", help="the common commands (--all: every command)")
+    s = sub.add_parser("help", help="the common commands; with a topic, how it works in "
+                                    "detail (--all: every command)")
     s.add_argument("--all", action="store_true", help="every command")
-    s.add_argument("topic", nargs="*", help="a command to explain, e.g. agents add")
+    s.add_argument("topic", nargs="*", help="a command or subject to explain, e.g. agents add, "
+                                            "hooks, permissions (topics: all of them)")
     s.set_defaults(fn=lambda a: cmd_help(a, p))
 
     s = sub.add_parser("server", help="run a Hive server (for trials and local networks)")
@@ -2392,7 +2444,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("-f", "--field", action="append", help="query parameter KEY=VALUE")
     s.set_defaults(fn=cmd_api)
 
-    # --project may come anywhere (`hive status --project acme`); the root parser owns it.
+    # --project and --color may come anywhere (`hive status --project acme`); the root parser
+    # owns them. --color was applied above.
     rest, project = [], None
     it = iter(args)
     for arg in it:
@@ -2400,7 +2453,9 @@ def main(argv: list[str] | None = None) -> None:
             project = next(it, None)
         elif arg.startswith("--project="):
             project = arg.split("=", 1)[1]
-        else:
+        elif arg == "--color":
+            next(it, None)
+        elif not arg.startswith("--color="):
             rest.append(arg)
     global PROJECT
     plugin = find_plugin(rest, sub.choices)
