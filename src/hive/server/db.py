@@ -187,7 +187,7 @@ integrations = Table(
     Column("sha", String(64), nullable=False),
     Column("leases", JSON, nullable=False),  # {lease_id: fencing}
     Column("task_id", Integer, nullable=True),
-    Column("state", String(16), nullable=False),  # granted | confirmed
+    Column("state", String(16), nullable=False),  # granted | confirmed | cancelled
     Column("created", Float, nullable=False),
 )
 

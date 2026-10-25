@@ -96,11 +96,18 @@ def test_agents_may_not_edit_hives_own_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_HOME", str(tmp_path / "home"))
     wt = tmp_path / "wt"
     wt.mkdir()
-    slot = Slot(name="s1", vendor="claude", token="t", worktree=str(wt))
+    acct = hive_home() / "accounts" / "s1"
+    slot = Slot(name="s1", vendor="claude", token="t", worktree=str(wt), config_dir=str(acct))
     d = core.Daemon(MachineConfig(server_url="http://127.0.0.1:9", slots=[slot]),
                     Store(tmp_path / "state.db"), echo=False)
     rt = d.slots["s1"]
-    for target in (hive_home() / "machine.toml",
-                   hive_home() / "bundles" / "s1" / "claude" / "settings" / "worker.json"):
+    for target in (hive_home() / "machine.toml", hive_home() / "config.toml",
+                   hive_home() / "bundles" / "s1" / "claude" / "settings" / "worker.json",
+                   acct / "settings.json",  # its CLI's own settings: what it may do
+                   hive_home() / "accounts" / "s2" / "projects" / "x" / "memory" / "m.md"):
         assert "Hive's own folder" in d._check_write(rt, str(target)).get("deny", "")
     assert d._check_write(rt, str(tmp_path / "elsewhere.txt")) == {}
+    # Its CLI's own notes in its own account folder: Claude's memory and plans.
+    for target in (acct / "projects" / "C--wt" / "memory" / "MEMORY.md",
+                   acct / "plans" / "plan.md"):
+        assert d._check_write(rt, str(target)) == {}

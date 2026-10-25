@@ -222,8 +222,10 @@ The server keeps its own copy of `hive.toml`, because it enforces the [roles](RO
 [shell-command permissions](PERMISSIONS.md) and the [review](INTEGRATION.md#reviews) setting
 in it. You don't have to upload it: every admin command run inside your clone uploads
 `hive.toml` when it changed since this computer last sent it, and says so in one line.
-(Commands run inside an agent's worktree never do, since it may hold an older `main`.)
-`hive admin push-config` uploads it explicitly, and `hive start` always does.
+It goes only to the server (or project) `hive.toml` names in `[server] url`: a command aimed
+elsewhere, with `--project`, `$HIVE_PROJECT` or another default login, leaves that server's
+copy alone. (Commands run inside an agent's worktree never upload, since it may hold an older
+`main`.) `hive admin push-config` uploads it explicitly, and `hive start` always does.
 
 ### `hive config`: read and change settings
 
@@ -253,7 +255,7 @@ overriding the one before:
 | `preset` | the bundle `fleet.preset` in `hive.toml` names | the whole fleet (`hive.toml`'s own settings override it) |
 | `user` | `~/.hive/config.toml` (`--user`) | you, in every repository on this computer; never uploaded |
 | `hive.toml` | committed in the repository | the whole fleet; uploaded to the server |
-| `hive.local.toml` | next to `hive.toml` in your clone, git-ignored (`--local`) | this computer only: its daemon and its agents' worktrees; never uploaded |
+| `hive.local.toml` | next to `hive.toml` in your clone, git-ignored (`--local`) | this computer only: its daemon and its agents' worktrees (read from the clone each agent was set up from); never uploaded, and ignored if it is ever committed |
 
 **Presets** (`fleet.preset`): `custom` (the default: nothing extra), `solo` (no reviews),
 `team` (reviews by an agent with the `reviewer` role), `strict` (reviews, and the `strict`
@@ -266,13 +268,18 @@ agent wrote to you in `#user`). Each gets `HIVE_EVENT`, `HIVE_SUMMARY` (one line
 person) and `HIVE_EVENT_JSON` in its environment, and is stopped after 2 minutes. They are
 read only from `hive.local.toml` or `~/.hive/config.toml`, never from the committed
 `hive.toml`, so a repository can't run commands on every computer; `hive config set hooks.…`
-without `--local` or `--user` is refused, and `hive doctor` flags any in `hive.toml`.
+without `--local` or `--user` is refused, and `hive doctor` flags any in `hive.toml`. For the
+same reason, a `hive.local.toml` that git tracks (committed with `git add -f`) is ignored,
+and `hive doctor` says so; and an agent's worktree reads the `hive.local.toml` of the clone
+recorded in `machine.toml` when the agent was set up, never one its own `.git` file points
+to.
 
 `set` and `unset` edit the file in place, keeping its comments, check that the result is a
 valid configuration (otherwise nothing changes), and upload a changed `hive.toml`. Values
 are TOML (`true`, `90`, `["a", "b"]`); anything else is text. After changing `hive.toml`,
 commit and push it so every agent's copy has it; each agent's next launch builds its CLI's
-permission files from it.
+permission files from it. The committed copy `hive init` writes to `.hive/agent/` is built
+from `hive.toml` and its preset only, never from your own or this computer's settings.
 
 ### `hive doctor`: check the whole setup
 
@@ -355,7 +362,9 @@ hive agents rotate claude-2                  # new token; a slot here is updated
 - `edit --roles` replaces the roles (as `hive admin roles`); `--model` and
   `--permission-mode` change this computer's slot and apply from the agent's next turn.
 - `rm` removes the agent from the server: its token stops working, its unfinished tasks go
-  back on the board, and its leases are revoked. Its slot on this computer goes too; the
+  back on the board (work waiting for review included, which starts again), reviews it was
+  picked for go to another reviewer, its leases are revoked and its pending command approvals
+  cancelled, and the orchestrator is told. Its slot on this computer goes too; the
   worktree is kept if it has uncommitted changes, and the account folder is kept so adding it
   back needs no new login. An agent that is the orchestrator of a run in progress can't be
   removed: give another agent the orchestrator role first.

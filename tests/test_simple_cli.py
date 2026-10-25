@@ -11,7 +11,7 @@ from hive import cli, settings
 from hive.config import config_layers, load_machine_config, load_repo_config, main_clone
 from hive.daemon.client import ServerClient
 from hive.server.app import create_app
-from hive.server.db import leases, tasks
+from hive.server.db import approvals, events, integrations, leases, tasks
 from hive.server.service import Actor, ApiError, create_hive
 from test_e2e import ADMIN, serve
 
@@ -163,23 +163,48 @@ def test_server_removes_an_agent_and_frees_its_work(tmp_path):
     admin = Actor("admin", "user", [])
     hv.enroll(admin, "orch", "claude", ["orchestrator"])
     hv.enroll(admin, "dev", "claude", ["programmer"])
+    hv.enroll(admin, "dev2", "claude", ["programmer"])
     t = time.time()
+
+    def task(**kw):
+        return c.execute(tasks.insert().values(
+            title="x", deps=[], created_by="orch", path_hints=[], created=t, updated=t,
+            **kw)).inserted_primary_key[0]
     with hv.engine.begin() as c:
-        tid = c.execute(tasks.insert().values(
-            title="x", state="in_progress", deps=[], assignee="dev", created_by="orch",
-            path_hints=[], created=t, updated=t)).inserted_primary_key[0]
+        tid = task(state="in_progress", assignee="dev")
+        # Its work waiting for review, and someone else's work it was picked to review.
+        rev = task(state="review", assignee="dev", reviewer="orch", pending_sha="a" * 40)
+        other = task(state="review", assignee="dev2", reviewer="dev", pending_sha="b" * 40)
         lid = c.execute(leases.insert().values(
             holder="dev", globs=["a/**"], fencing=1, acquired=t, expires_at=t + 600,
             state="active")).inserted_primary_key[0]
+        aid = c.execute(approvals.insert().values(
+            agent="dev", command="git push", shell="bash", reason="r", state="requested",
+            created=t)).inserted_primary_key[0]
+        c.execute(integrations.insert().values(token="g", agent="dev", sha="a" * 40,
+                                               leases={}, state="granted", created=t))
     with pytest.raises(ApiError) as e:
         hv.remove_agent(Actor("agent", "orch", ["orchestrator"]), "dev")
     assert e.value.status == 403
     r = hv.remove_agent(admin, "dev")
-    assert r == {"name": "dev", "requeued": [tid], "revoked": [lid]}
-    assert [a["name"] for a in hv.roster()] == ["orch"]
+    assert r == {"name": "dev", "requeued": [tid, rev], "revoked": [lid],
+                 "reviews": {other: "orch"}, "approvals": [aid]}
+    assert [a["name"] for a in hv.roster()] == ["dev2", "orch"]
     with hv.engine.begin() as c:
-        assert c.execute(tasks.select()).first().state == "open"
+        states = {x.id: (x.state, x.assignee, x.reviewer) for x in c.execute(tasks.select())}
+        assert states == {tid: ("open", None, None), rev: ("open", None, None),
+                          other: ("review", "dev2", "orch")}
         assert c.execute(leases.select()).first().state == "revoked"
+        assert c.execute(approvals.select()).first().state == "denied"
+        assert c.execute(integrations.select()).first().state == "cancelled"
+        removed = [e for e in c.execute(events.select()) if e.type == "agent.removed"]
+    # The orchestrator is woken with what happened.
+    from hive.daemon.core import summarize_event
+    from hive.roles import IMMEDIATE_WAKE_EVENTS
+    assert "agent.removed" in IMMEDIATE_WAKE_EVENTS
+    text = summarize_event({"type": "agent.removed", "actor": "user",
+                            "payload": removed[0].payload})
+    assert "removed dev" in text and f"#{rev}" in text and "orch" in text
     with pytest.raises(ApiError) as e:
         hv.remove_agent(admin, "dev")
     assert e.value.code == "no_such_agent"
@@ -198,12 +223,13 @@ def fleet(tmp_path, monkeypatch, capsys):
     clone = make_clone(tmp_path)
     monkeypatch.chdir(clone)
     cli.main(["init"])
-    git(clone, "add", "-A")
-    git(clone, "commit", "-m", "Set up Hive")
-    git(clone, "push", "origin", "main")
     hv = create_hive(f"sqlite:///{tmp_path / 'hive.db'}")
     srv = serve(create_app(hv, admin_token=ADMIN))
     url = f"http://127.0.0.1:{srv.server_port}"
+    settings.write(clone / "hive.toml", "server.url", url)  # the server this hive.toml names
+    git(clone, "add", "-A")
+    git(clone, "commit", "-m", "Set up Hive")
+    git(clone, "push", "origin", "main")
     capsys.readouterr()
     try:
         yield clone, hv, url
@@ -374,3 +400,76 @@ def test_agents_cannot_run_the_new_user_commands():
         for cmd in ("hive approve", "hive reject", "hive answer", "hive agents add claude",
                     "hive config set integration.review off", "hive login", "hive watch"):
             assert P.matches(cmd, rules["forbidden"]), cmd
+
+
+# ---------------------------------------------------------------------- fixes from review
+
+def test_automatic_upload_only_goes_to_the_server_hive_toml_names(fleet, tmp_path):
+    clone, hv, url = fleet
+    other = create_hive(f"sqlite:///{tmp_path / 'other.db'}")
+    srv = serve(create_app(other, admin_token=ADMIN))
+    other_url = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        # A command aimed at another server from this clone leaves that server's config alone.
+        cli.main(["login", "--server", other_url, "--token", ADMIN])
+        cli.main(["status"])
+        with other._read() as c:
+            assert other._fleet(c, lock=False)["config"] == {}
+        # The server hive.toml names gets it, by any name for this computer.
+        cli.main(["login", "--server", url.replace("127.0.0.1", "localhost"),
+                  "--token", ADMIN])
+        cli.main(["status"])
+        with hv._read() as c:
+            assert hv._fleet(c, lock=False)["config"]["repo"]["main"] == "main"
+    finally:
+        srv.shutdown()
+    assert cli._same_server("http://localhost:8765/", "http://127.0.0.1:8765")
+    assert not cli._same_server("http://127.0.0.1:8765", "http://127.0.0.1:8765/p/acme")
+    assert not cli._same_server("https://team.example", "http://127.0.0.1:8765")
+
+
+def test_hive_server_keeps_your_login_to_another_server(tmp_path, monkeypatch, capsys):
+    from werkzeug import serving
+    from hive.config import load_admin_config
+    monkeypatch.setenv("HIVE_ADMIN_TOKEN", "")  # restored afterwards: cmd_server sets it
+    monkeypatch.delenv("HIVE_ADMIN_TOKEN")
+    monkeypatch.setenv("HIVE_DATABASE_URL", f"sqlite:///{(tmp_path / 'h.db').as_posix()}")
+    monkeypatch.setattr(serving, "run_simple", lambda *a, **kw: None)
+    cli.save_login("https://team.example", "team-token")
+    cli.main(["server", "--port", "8799"])
+    saved = load_admin_config(env=False)
+    assert saved.server_url == "https://team.example" and saved.token == "team-token"
+    local = saved.token_for("http://127.0.0.1:8799")
+    assert local and local != "team-token"
+    assert "still go to https://team.example" in capsys.readouterr().out
+    # Without another login, the local server becomes the default.
+    (tmp_path / "home" / "admin.toml").unlink()
+    cli.main(["server", "--port", "8799"])
+    assert load_admin_config(env=False).server_url == "http://127.0.0.1:8799"
+
+
+def test_the_chat_runs_its_commands_in_its_own_project(monkeypatch):
+    ran = []
+    monkeypatch.setattr(cli, "main", lambda argv=None: ran.append(argv))
+    cli.chat_runner("acme")(["approve", "3"])
+    cli.chat_runner(None)(["status"])
+    assert ran == [["--project", "acme", "approve", "3"], ["status"]]
+
+
+def test_moving_an_agent_keeps_its_model_and_permission_mode(fleet, capsys):
+    clone, hv, url = fleet
+    admin = Actor("admin", "user", [])
+    cli.main(["login", "--server", url, "--token", ADMIN])
+    hv.enroll(admin, "dev", "claude", ["programmer"])
+    for name in ("desk", "laptop"):
+        hv.pair_machine(hv.create_pairing_code(admin)["code"], name)
+    hv.place_agent(admin, "dev", "desk", "opus", "acceptEdits")
+
+    def placement():
+        return next(a for a in hv.roster() if a["name"] == "dev")["placement"]
+    cli.main(["agents", "edit", "dev", "--on", "desk"])
+    assert placement() == {"model": "opus", "permission_mode": "acceptEdits"}
+    cli.main(["agents", "edit", "dev", "--on", "laptop", "--model", "sonnet"])
+    assert placement() == {"model": "sonnet", "permission_mode": "acceptEdits"}
+    cli.main(["agents", "edit", "dev", "--on", "desk", "--permission-mode", "default"])
+    assert placement() == {"model": "sonnet", "permission_mode": ""}

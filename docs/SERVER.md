@@ -114,7 +114,11 @@ username.
 This checks the token against the server and saves it in `~/.hive/admin.toml` (user-only
 permissions). Every user-side command (`hive start`, `hive status`, `hive approve`, …) uses
 it, so you log in once per computer. `HIVE_SERVER_URL` and `HIVE_ADMIN_TOKEN` environment
-variables override the file.
+variables override the file (and are never written to it).
+
+`hive server` on your own computer logs you in to it the same way. If you are already
+logged in to another server, that login stays your default: the local one is saved beside
+it, and `hive login --server http://127.0.0.1:8765` switches.
 
 If the server hosts [several projects](PROJECTS.md), each project has its own address,
 `https://<server>/p/<project>`, and its own admin token. You can log in to just one of them:

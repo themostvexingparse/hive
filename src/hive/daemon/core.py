@@ -30,6 +30,10 @@ log = logging.getLogger("hive.daemon")
 # decisions and approval requests stay urgent.
 ORCH_BATCHED = {"message.normal", "task.progress", "task.completed", "report.submitted",
                 "review.verdict"}
+# Folders of an agent's own account folder its CLI writes its notes to with its file tools:
+# Claude Code's memory (projects/<project>/memory/), plan-mode plans and todo lists. Nothing
+# there sets what the agent may do; its settings and Hive's files elsewhere in it stay denied.
+AGENT_NOTES = {"claude": ("projects", "plans", "todos")}
 UNFINISHED_TASK_STATES = "open,claimed,in_progress,review,blocked"
 FINISH_FIELDS = ("result", "report_summary", "report_body")
 FINISH_MAX_ATTEMPTS = 20  # retried with the heartbeat (every 20 s): several minutes of outage
@@ -1045,10 +1049,15 @@ class Daemon:
         rel = self._relpath(rt, raw)
         if rel is None:
             p = Path(raw) if Path(raw).is_absolute() else Path(rt.cfg.worktree) / raw
-            home = hive_home().resolve()
-            if p.resolve() == home or home in p.resolve().parents:
+            home, target = hive_home().resolve(), p.resolve()
+            if target == home or home in target.parents:
                 # Tokens (machine.toml), the accounts and each session's generated permission
-                # files live here: an agent writing them could widen its own rights.
+                # files live here: an agent writing them could widen its own rights. Its CLI's
+                # own notes in its account folder (Claude's memory and plans) are fine.
+                own = Path(rt.cfg.config_dir).resolve() if rt.cfg.config_dir else None
+                if own and own in target.parents and \
+                        target.relative_to(own).parts[0] in AGENT_NOTES.get(rt.cfg.vendor, ()):
+                    return {}
                 return {"deny": f"{raw} is in Hive's own folder ({home}), which agents may not "
                                 "edit."}
             return {}
@@ -1543,6 +1552,18 @@ def summarize_event(ev: dict) -> str:
         return f"The user started the fleet with goal: {p.get('goal', '')[:1000]}"
     if t == "orchestrator.failover":
         return f"Orchestrator failover: {p['old']} → {p['new']}"
+    if t == "agent.removed":
+        parts = [f"The user removed {p['name']} from the fleet."]
+        if p.get("requeued"):
+            parts.append("Its tasks went back on the board, to start again: "
+                         + ", ".join(f"#{i}" for i in p["requeued"]) + ".")
+        if p.get("reviews"):
+            parts.append("Reviews it was doing went to: " + ", ".join(
+                f"#{i} → {r or 'nobody (no reviewer left)'}" for i, r in p["reviews"].items())
+                + ".")
+        if p.get("approvals"):
+            parts.append("Its command approvals were cancelled.")
+        return " ".join(parts)
     if t == "approval.requested":
         return f"{p['agent']} requests APPROVAL #{p['id']} to run `{p['command'][:500]}` " \
                + ("(no reviewer decided it, so it's yours) " if p.get("escalated") else "") \

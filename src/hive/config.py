@@ -73,8 +73,50 @@ def main_clone(root: Path) -> Path:
     return common_dir.parent if common_dir.name == ".git" else root
 
 
-def local_config_path(root: Path) -> Path:
+def local_config_path(root: Path) -> Path | None:
+    """This computer's hive.local.toml for the checkout `root`. For an agent's worktree it is
+    the one in the clone recorded in machine.toml when the slot was made, never one found from
+    the worktree's own `.git` file, which the agent can rewrite. None when there is none to
+    read (a slot whose clone wasn't recorded)."""
+    resolved = root.resolve()
+    for s in load_machine_config().slots:
+        if s.worktree and Path(s.worktree).resolve() == resolved:
+            return Path(s.repo) / LOCAL_TOML if s.repo else None
     return main_clone(root) / LOCAL_TOML
+
+
+_TRACKED: dict[tuple, bool] = {}
+
+
+def _tracked(path: Path) -> bool:
+    """Whether git tracks `path`: a committed hive.local.toml is the repository's, not this
+    computer's, and .gitignore doesn't stop `git add -f`. Cached until the file or git's
+    index changes, since this runs on every config load."""
+    def mtime(p: Path) -> int:
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return 0
+    key = (str(path), mtime(path), mtime(path.parent / ".git" / "index"))
+    if key not in _TRACKED:
+        _TRACKED[key] = _git_tracks(path)
+    return _TRACKED[key]
+
+
+def _git_tracks(path: Path) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--error-unmatch", "--",
+                            path.name], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def tracked_local_config(root: Path | None) -> Path | None:
+    """The hive.local.toml that is ignored because git tracks it, if any."""
+    local = local_config_path(root) if root else None
+    return local if local and local.exists() and _tracked(local) else None
 
 
 def _read_toml(path: Path) -> dict:
@@ -113,14 +155,18 @@ def config_layers(root: Path | None) -> list[tuple[str, Path | None, dict]]:
     if root:
         layers.append(("hive.toml", root / "hive.toml", toml))
         local = local_config_path(root)
-        layers.append((LOCAL_TOML, local, _read_toml(local)))
+        data = _read_toml(local) if local and local.exists() and not _tracked(local) else {}
+        layers.append((LOCAL_TOML, local, data))
     return layers
 
 
 def _merge(cfg: dict, data: dict) -> None:
+    """Merge `data` into `cfg` key by key at every depth, so a layer that sets one setting of
+    a role (roles.<role>.can_code) keeps the role's other settings from the layers below."""
     for k, v in data.items():
         if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-            cfg[k].update(v)
+            cfg[k] = dict(cfg[k])
+            _merge(cfg[k], v)
         else:
             cfg[k] = v
 
@@ -140,8 +186,22 @@ def shared_config(root: Path) -> dict:
     """What the server gets: hive.toml over the preset it names. Nothing of this computer's
     own (user or local settings) is in it."""
     toml = _read_toml(root / "hive.toml")
-    cfg: dict = {k: dict(v) for k, v in preset_layer(toml).items()}
+    cfg: dict = {}
+    _merge(cfg, preset_layer(toml))
     _merge(cfg, {k: v for k, v in toml.items() if k not in LOCAL_ONLY_SECTIONS})
+    return cfg
+
+
+def load_shared_config(root: Path | None) -> dict:
+    """The fleet's settings, the same on every computer: the defaults under shared_config.
+    What the committed files in .hive/agent/ are built from."""
+    cfg = {k: dict(v) for k, v in DEFAULT_REPO_CONFIG.items()}
+    if root:
+        try:
+            _merge(cfg, shared_config(root))
+        except ValueError:  # an unknown preset: reported where the configuration is checked
+            _merge(cfg, {k: v for k, v in _read_toml(root / "hive.toml").items()
+                         if k not in LOCAL_ONLY_SECTIONS})
     return cfg
 
 
@@ -159,6 +219,9 @@ class Slot:
     model: str = ""  # passed to the CLI's model flag; empty = the account's default
     server_url: str = ""  # this slot's Hive server (project); empty = the machine's server_url
     placed: bool = False  # set up because the server placed the agent on this paired machine
+    # The clone the worktree was made from, recorded when the slot was set up: where this
+    # slot's hive.local.toml is read (config.local_config_path).
+    repo: str = ""
     command: list[str] = field(default_factory=list)  # optional override template
     session_id: str = ""
     session_started: bool = False
@@ -284,9 +347,11 @@ class AdminConfig:
         return url, os.environ.get("HIVE_ADMIN_TOKEN", "") or self.token_for(url)
 
 
-def load_admin_config() -> AdminConfig:
-    url = os.environ.get("HIVE_SERVER_URL", "")
-    token = os.environ.get("HIVE_ADMIN_TOKEN", "")
+def load_admin_config(env: bool = True) -> AdminConfig:
+    """~/.hive/admin.toml, with $HIVE_SERVER_URL and $HIVE_ADMIN_TOKEN over it unless `env` is
+    false (when saving a login: the environment's values must not be written to the file)."""
+    url = os.environ.get("HIVE_SERVER_URL", "") if env else ""
+    token = os.environ.get("HIVE_ADMIN_TOKEN", "") if env else ""
     servers: dict[str, str] = {}
     path = hive_home() / "admin.toml"
     if path.exists():

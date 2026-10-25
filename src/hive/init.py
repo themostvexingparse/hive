@@ -28,7 +28,7 @@ import tomli_w
 
 from . import __version__, permissions
 from . import prompts
-from .config import load_repo_config
+from .config import load_shared_config
 from .hooks import APPROVAL_VENDORS, PRE_TOOL_HOOK_TIMEOUT
 from .roles import BUILTIN_ROLES, load_roles
 
@@ -349,8 +349,9 @@ def _write(path: Path, text: str) -> None:
 
 def bundle_files(root: Path, hive_cmd: str = "hive", cfg: dict | None = None) -> dict[str, str]:
     """Every file of the agent bundles, as {path relative to .hive/agent/: text}. Reads the
-    project's prompt additions, so it raises PromptError for a bad file."""
-    cfg = cfg if cfg is not None else load_repo_config(root)
+    project's prompt additions, so it raises PromptError for a bad file. Without `cfg`,
+    the fleet's shared settings: the committed copy must not carry one computer's own."""
+    cfg = cfg if cfg is not None else load_shared_config(root)
     rules = permissions.build_rules(cfg)
     skills = {"hive-orchestrator": ORCHESTRATOR_SKILL, "hive-worker": WORKER_SKILL}
     skills = {name: text + prompts.skill_addition(root, name, cfg)
@@ -562,7 +563,7 @@ def init_repo(root: Path, server: str, main: str = "main",
         written.append(".hive/prompts/README.md")
     # Commented-out starters for every file the user may fill in, existing ones untouched.
     try:
-        roles = list(load_roles(load_repo_config(root).get("roles")))
+        roles = list(load_roles(load_shared_config(root).get("roles")))
     except ValueError:
         roles = list(BUILTIN_ROLES)  # hive.toml's role errors are reported where it's used
     written += prompts.write_starters(root, roles)

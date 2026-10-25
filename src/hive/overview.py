@@ -18,7 +18,8 @@ import requests
 
 from . import __version__, permissions, prompts, ui
 from .config import (find_repo_root, hive_home, load_admin_config, load_machine_config,
-                     load_repo_config, machine_config_path)
+                     load_repo_config, load_shared_config, machine_config_path,
+                     tracked_local_config)
 from .roles import BUILTIN_ROLES, load_roles
 
 TIMEOUT = 5
@@ -116,7 +117,8 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
         except (OSError, ValueError):
             pass
     try:
-        info["drift"] = bundle_drift(root, cfg) if info["bundles"] else []
+        # The committed copy holds the fleet's settings, never this computer's own.
+        info["drift"] = bundle_drift(root, load_shared_config(root)) if info["bundles"] else []
     except (prompts.PromptError, ValueError) as e:
         info["drift"] = []
         _problem(problems, f"Hive can't build the agents' files from hive.toml and "
@@ -128,6 +130,11 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
                            "ignores there: a committed file must not run commands on every "
                            "computer.", "move them to hive.local.toml: hive config set "
                            f"hooks.{sorted(toml_hooks)[0]} \"…\" --local")
+    tracked = tracked_local_config(root)
+    if tracked:
+        _problem(problems, f"{tracked.name} is committed to git, so Hive ignores it: it holds "
+                           "one computer's own settings (and hooks), which a repository must "
+                           "not set for everyone.", f"git rm --cached {tracked.name}")
     if info["drift"]:
         info["drift_why"] = (f"made by Hive {info['bundle_version']}, this is {__version__}"
                              if info["bundle_version"] != __version__

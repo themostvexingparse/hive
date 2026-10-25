@@ -83,6 +83,12 @@ on_message = ""              # an agent wrote to you in #user
 Each hook runs in a shell with `HIVE_EVENT`, `HIVE_SUMMARY` and `HIVE_EVENT_JSON` set, from
 the worktree of one of this computer's agents, and is stopped after 2 minutes.
 
+An agent's worktree reads the `hive.local.toml` of the clone recorded for it in
+`machine.toml` (`repo`, set when the agent was added or claimed), not one found through the
+worktree's own `.git` file, which the agent could rewrite. A `hive.local.toml` that git
+tracks is ignored (`hive doctor` says so): `.gitignore` doesn't stop `git add -f`, and a
+committed file must not set one computer's hooks or permissions for everyone.
+
 | Key | Explained in |
 |---|---|
 | `[server] url` | [Checking a project's setup](REPOSITORY.md#which-server-it-asks) (it is informational only) |

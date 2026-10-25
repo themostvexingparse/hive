@@ -16,10 +16,11 @@ import tomllib
 from pathlib import Path
 
 from . import __version__, ui
-from .config import (LOCAL_TOML, VENDORS, AdminConfig, Slot, find_repo_root, hive_home,
-                     load_admin_config, load_machine_config, load_repo_config,
-                     local_config_path, machine_config_path, project_url, save_admin_config,
-                     save_machine_config, split_project_url)
+from .config import (DEFAULT_REPO_CONFIG, LOCAL_TOML, VENDORS, Slot,
+                     find_repo_root, hive_home, load_admin_config, load_machine_config,
+                     load_repo_config, local_config_path, machine_config_path, project_url,
+                     repo_server_url, save_admin_config, save_machine_config,
+                     split_project_url)
 from .daemon.client import HiveError, ServerClient
 
 
@@ -69,10 +70,16 @@ def sync_config(c: ServerClient, strict: bool = False, quiet: bool = False) -> N
     """Upload this repository's hive.toml when it changed since this computer last uploaded
     it to that server, so nobody has to remember `hive admin push-config`. Only from a main
     clone: an agent's worktree may hold an older main. With strict, an upload error stops the
-    command; otherwise it is a warning."""
+    command; otherwise it is a warning. Without strict, only to the server (project) this
+    hive.toml names: a command aimed elsewhere (--project, $HIVE_PROJECT, another default
+    server) must not overwrite that project's settings with this repository's."""
     from .config import shared_config
     root = find_repo_root()
     if not root or not (root / ".git").is_dir():
+        return
+    where = c.base.removesuffix("/api/v1")
+    if not strict and not _same_server(where, repo_server_url(root) or
+                                       DEFAULT_REPO_CONFIG["server"]["url"]):
         return
     try:
         data = shared_config(root)
@@ -86,7 +93,6 @@ def sync_config(c: ServerClient, strict: bool = False, quiet: bool = False) -> N
         record = json.loads(_sync_record().read_text("utf-8"))
     except (OSError, ValueError):
         record = {}
-    where = c.base.removesuffix("/api/v1")
     if record.get(where) == digest and not strict:
         return
     try:
@@ -103,6 +109,17 @@ def sync_config(c: ServerClient, strict: bool = False, quiet: bool = False) -> N
     record[where] = digest
     _sync_record().parent.mkdir(parents=True, exist_ok=True)
     _sync_record().write_text(json.dumps(record, indent=1), "utf-8")
+
+
+def _same_server(a: str, b: str) -> bool:
+    """Whether two URLs name the same server and project; every local host name counts as
+    this computer."""
+    def key(url: str) -> tuple[str, str]:
+        base, project = split_project_url(url)
+        if _is_local_url(base):
+            base = "local:" + (base.rsplit(":", 1)[-1] if base.count(":") > 1 else "80")
+        return base.lower(), project or "default"
+    return key(a) == key(b)
 
 
 def owner_client() -> ServerClient:
@@ -195,18 +212,29 @@ def cmd_server(a):
     if a.host in LOCAL_HOSTS:
         # This computer's own admin commands then just work, with no `hive login`.
         url = f"http://127.0.0.1:{a.port}"
-        if load_admin_config().token_for(url) != token:
-            save_login(url, token)
-            ui.ok(f"This computer is logged in to it as admin; in another terminal, run "
-                  f"{ui.cmd('hive')} to see what's next.")
+        saved = load_admin_config(env=False)
+        if saved.token_for(url) != token:
+            # A login to another server stays the default: trying Hive locally mustn't
+            # redirect (or lose) it.
+            keep = bool(saved.server_url) and saved.server_url.rstrip("/") != url
+            save_login(url, token, default=not keep)
+            if keep:
+                ui.ok(f"This computer is logged in to it as admin. Your admin commands still "
+                      f"go to {ui.path(saved.server_url)}; switch with "
+                      f"{ui.cmd(f'hive login --server {url}')}.")
+            else:
+                ui.ok(f"This computer is logged in to it as admin; in another terminal, run "
+                      f"{ui.cmd('hive')} to see what's next.")
     ui.out(ui.dim("  Ctrl+C to stop.") + "\n")
     run_simple(a.host, a.port, server, threaded=True)
 
 
-def save_login(url: str, token: str) -> None:
-    cfg = load_admin_config() if (hive_home() / "admin.toml").exists() else AdminConfig()
-    if not split_project_url(url)[1] or not cfg.server_url:
-        # A server's own URL (or a first login) becomes the default target.
+def save_login(url: str, token: str, default: bool = True) -> None:
+    """Save `token` for `url` in admin.toml. A server's own URL (or a first login) becomes the
+    default target, unless `default` is false. Only the file's own values are kept: a token
+    from the environment is never written to it."""
+    cfg = load_admin_config(env=False)
+    if not cfg.server_url or (default and not split_project_url(url)[1]):
         if cfg.server_url and cfg.server_url.rstrip("/") != url and cfg.token:
             cfg.servers[cfg.server_url.rstrip("/")] = cfg.token  # keep the previous login
         cfg.server_url, cfg.token = url, token
@@ -813,7 +841,13 @@ def open_team_chat(c: ServerClient | None = None) -> None:
     no_agent_session("The chat")
     c = c or admin_client()
     ui.banner(f"Hive {__version__}", "talk to the team · /help · /quit")
-    Chat(c, run_command=lambda argv: main(argv)).run()
+    Chat(c, run_command=chat_runner(PROJECT)).run()
+
+
+def chat_runner(project: str | None):
+    """How the chat runs a slash command or a decision's answer: as `hive …`, in the project
+    the chat shows (main() resets --project for each command it parses)."""
+    return lambda argv: main((["--project", project] if project else []) + list(argv))
 
 
 def cmd_chat(a):
@@ -1271,8 +1305,19 @@ def cmd_agents_edit(a):
     reset = _unless_default
     if a.on is not None:
         target = None if a.on.lower() == "none" else a.on
-        place_on(c, a.name, target, reset(a.model or ""), reset(a.permission_mode or ""))
         here = _local_slots(c.base.removesuffix("/api/v1")).get(a.name)
+        current: dict = {}
+        if target and (a.model is None or a.permission_mode is None):
+            # What isn't given is kept: the placement's settings, or this computer's slot's.
+            ag = next((x for x in call(c.get, "/agents") if x["name"] == a.name), None) or \
+                die(f"no agent named {a.name!r}")
+            current = ag.get("placement") or ({"model": here.model,
+                                                "permission_mode": here.permission_mode}
+                                               if here else {})
+        model = reset(a.model) if a.model is not None else current.get("model", "")
+        mode = reset(a.permission_mode) if a.permission_mode is not None \
+            else current.get("permission_mode", "")
+        place_on(c, a.name, target, model or "", mode or "")
         if target and here and not here.placed:
             # The other computer's claim gives it a new token: this slot would stop working.
             from .agents import unplace
@@ -1633,7 +1678,11 @@ def _config_target(a, key: str = "") -> tuple[Path | None, Path, str]:
         return find_repo_root(), user_config_path(), "user"
     root = _config_root()
     if a.local:
-        return root, local_config_path(root), LOCAL_TOML
+        local = local_config_path(root)
+        if local is None:
+            die("this is an agent's worktree whose clone isn't recorded on this computer: run "
+                "this in your own clone")
+        return root, local, LOCAL_TOML
     if key.split(".")[0] in LOCAL_ONLY_SECTIONS:
         die(f"{key} is set per computer, never in the committed hive.toml: add --local (this "
             "repository on this computer) or --user (every repository on this computer)")

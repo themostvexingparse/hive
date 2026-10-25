@@ -63,7 +63,11 @@ from the installed Hive and the agent's own working folder (`hive.toml`, `hive.l
 `.hive/prompts/`). So upgrading Hive, or changing `[permissions]` or a prompt file, reaches
 the next session without re-running `hive init`. The committed `.hive/agent/` copy is what
 older Hive versions read, and what a launch falls back to if the bundle can't be generated
-(for example a prompt file that is too large). Agents can't edit Hive's own folder.
+(for example a prompt file that is too large). `hive init` builds that committed copy from
+`hive.toml` and its preset only, so a computer's own settings (`hive.local.toml`,
+`~/.hive/config.toml`) never end up in it; `hive doctor` compares it the same way. Agents
+can't edit Hive's own folder, except the notes their CLI keeps in its own account folder
+(Claude Code's memory, plans and to-do lists).
 
 None of the CLIs loads a bundle on its own:
 - **Claude Code** gets the plugin only when `hive` passes `--plugin-dir` with its folder.

@@ -255,8 +255,10 @@ class Hive:
         return {"name": name, "token": token}
 
     def remove_agent(self, actor: Actor, name: str) -> dict:
-        """Delete an agent: its token stops working, its unfinished tasks go back on the board
-        and its leases are revoked. History (messages, reports, status) keeps its name."""
+        """Delete an agent: its token stops working, its unfinished tasks (review included) go
+        back on the board, reviews it was picked for go to another reviewer, its leases are
+        revoked and its pending approvals and merges cancelled, and the orchestrator is told.
+        History (messages, reports, status) keeps its name."""
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         with self._write() as c:
@@ -267,24 +269,50 @@ class Hive:
                                f"{name} is the fleet's orchestrator; give another agent the "
                                "orchestrator role first, or end the run (dashboard → Archives)")
             requeued = [r.id for r in c.execute(select(tasks.c.id).where(and_(
-                tasks.c.assignee == name, tasks.c.state.in_(ACTIVE_TASK_STATES))))]
+                tasks.c.assignee == name,
+                tasks.c.state.in_(ACTIVE_TASK_STATES + ("review",)))))]
             if requeued:
+                # Work waiting for review is lost with its leases: it starts again.
                 c.execute(update(tasks).where(tasks.c.id.in_(requeued))
-                          .values(assignee=None, state="open", updated=now()))
+                          .values(assignee=None, state="open", reviewer=None, pending_sha=None,
+                                  approved=False, updated=now()))
             revoked = [r.id for r in c.execute(select(leases.c.id).where(and_(
                 leases.c.holder == name, leases.c.state == "active")))]
             if revoked:
                 c.execute(update(leases).where(leases.c.id.in_(revoked)).values(state="revoked"))
                 self._set_fleet(c, fencing_counter=f["fencing_counter"] + 1)
+            cancelled = [r.id for r in c.execute(select(approvals.c.id).where(and_(
+                approvals.c.agent == name, approvals.c.state.in_(("requested", "approved")))))]
+            if cancelled:
+                c.execute(update(approvals).where(approvals.c.id.in_(cancelled)).values(
+                    state="denied", decided_by=actor.name, decided_at=now(),
+                    note=f"{name} was removed"))
+            c.execute(update(integrations).where(and_(
+                integrations.c.agent == name, integrations.c.state == "granted"))
+                .values(state="cancelled"))
             c.execute(agents.delete().where(agents.c.name == name))
             c.execute(receipts.delete().where(receipts.c.agent == name))
             c.execute(placements.delete().where(placements.c.agent == name))
             if f["orchestrator"] == name:
                 self._set_fleet(c, orchestrator=None)
+                f = self._fleet(c)
+            # Reviews it was picked for: someone else reviews (the agent is gone from the pool).
+            reassigned = {}
+            for t in c.execute(select(tasks).where(and_(
+                    tasks.c.reviewer == name, tasks.c.state == "review"))).fetchall():
+                t = row(t)
+                reviewer = self._pick_reviewer(c, f, t)
+                c.execute(update(tasks).where(tasks.c.id == t["id"]).values(
+                    reviewer=reviewer, updated=now()))
+                reassigned[t["id"]] = reviewer
+                self._emit(c, "review.requested", actor.name, "*", id=t["id"],
+                           title=t["title"], reviewer=reviewer, sha=t["pending_sha"],
+                           branch=t["branch"], assignee=t["assignee"])
             self._emit(c, "agent.removed", actor.name, name=name, requeued=requeued,
-                       revoked=revoked)
+                       revoked=revoked, reviews=reassigned, approvals=cancelled)
             self._schedule(c, self._fleet(c))
-        return {"name": name, "requeued": requeued, "revoked": revoked}
+        return {"name": name, "requeued": requeued, "revoked": revoked,
+                "reviews": reassigned, "approvals": cancelled}
 
     def roster(self) -> list[dict]:
         with self._read() as c:
@@ -365,6 +393,7 @@ class Hive:
             base += "-1"
         token = "hm_" + secrets.token_urlsafe(32)
         with self._write() as c:
+            self._fleet(c)  # serializes with every other write (a row lock off SQLite)
             h = hash_token(_norm_code(code))
             hit = c.execute(select(pairing_codes).where(pairing_codes.c.code_hash == h)).first()
             if hit is None or hit.expires < now():
@@ -374,8 +403,11 @@ class Hive:
             if hit.reusable:
                 c.execute(update(pairing_codes).where(pairing_codes.c.code_hash == h)
                           .values(uses=pairing_codes.c.uses + 1))
-            else:
-                c.execute(pairing_codes.delete().where(pairing_codes.c.code_hash == h))
+            elif c.execute(pairing_codes.delete().where(
+                    pairing_codes.c.code_hash == h)).rowcount != 1:
+                # Another request redeemed this single-use code first.
+                raise ApiError(403, "bad_code", "that code was just used; ask for a new one "
+                               "with `hive machines invite`")
             taken = {r.name for r in c.execute(select(machines.c.name))}
             final, n = base, 2
             while final in taken:
@@ -419,6 +451,7 @@ class Hive:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         with self._write() as c:
+            self._fleet(c)  # serializes with every other write
             if not c.execute(select(machines.c.name).where(machines.c.name == name)).first():
                 raise ApiError(404, "no_such_machine", f"no machine named {name!r}")
             agents_there = [p.agent for p in c.execute(
@@ -439,6 +472,7 @@ class Hive:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         with self._write() as c:
+            self._fleet(c)  # serializes with every other write
             self._agent(c, agent)
             old = c.execute(select(placements).where(placements.c.agent == agent)).first()
             if machine and old is not None and old.machine == machine:
@@ -482,6 +516,7 @@ class Hive:
             raise ApiError(403, "forbidden", "machine token required")
         token = "hv_" + secrets.token_urlsafe(32)
         with self._write() as c:
+            self._fleet(c)  # serializes with every other write
             p = c.execute(select(placements).where(placements.c.agent == agent)).first()
             if p is None or p.machine != actor.name:
                 raise ApiError(403, "not_placed_here", f"{agent} isn't placed on {actor.name}")

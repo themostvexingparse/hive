@@ -108,9 +108,12 @@ def place(name: str, vendor: str, token: str, server: str, repo: Path | None,
     if old:  # re-placing keeps what was chosen for the slot on this computer
         permission_mode = permission_mode or old.permission_mode
         model = model or old.model
+    # The clone, recorded now (by you, not the agent): where its hive.local.toml is read.
+    clone = repo or (main_clone(Path(worktree)) if Path(worktree).is_dir() else None)
     slot = Slot(name=name, vendor=vendor, token=token, worktree=str(worktree),
                 config_dir=config_dir, permission_mode=permission_mode or "",
-                model=model or "", server_url=server, placed=placed)
+                model=model or "", server_url=server, placed=placed,
+                repo=str(Path(clone).resolve()) if clone else (old.repo if old else ""))
     cfg.slots = [s for s in cfg.slots if s.name != name] + [slot]
     save_machine_config(cfg)
     return slot, notes
@@ -134,8 +137,8 @@ def unplace(name: str) -> tuple[Slot | None, bool]:
     if not wt.is_dir():
         return slot, True
     # Without --force, git refuses a worktree with uncommitted changes: that work stays.
-    subprocess.run(["git", "-C", str(main_clone(wt)), "worktree", "remove", str(wt)],
-                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", slot.repo or str(main_clone(wt)), "worktree", "remove",
+                    str(wt)], capture_output=True, text=True)
     return slot, not wt.exists()
 
 
