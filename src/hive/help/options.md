@@ -15,7 +15,9 @@ hive agents add --help                 # one command's options
 - `--version`: print Hive's version.
 - `--color auto|always|never`: colour the output. `auto` (the default) colours only on a
   terminal. The environment can decide it too: `HIVE_COLOR` (`auto`, `always`, `never`),
-  `NO_COLOR` (any value turns colour off), `FORCE_COLOR` (turns it on).
+  `NO_COLOR` (any value turns colour off), `FORCE_COLOR` (turns it on). Hive uses vivid
+  24-bit colour where the terminal shows it, else 256 or 16 colours; `HIVE_COLOR_DEPTH`
+  (`truecolor`, `256`, `16`) chooses.
 - `--project NAME`: which project admin commands act on, when a server hosts several
   (`hive help projects`). Also the `HIVE_PROJECT` environment variable.
 - `-h`, `--help`: the options of any command or subcommand.

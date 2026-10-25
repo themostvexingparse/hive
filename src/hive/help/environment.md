@@ -13,7 +13,8 @@ For admin commands:
   `~/.hive/admin.toml` (for scripts).
 - `HIVE_PROJECT`: the project admin commands act on, like `--project`.
 - `HIVE_HOME`: where Hive keeps its files on this computer (default `~/.hive`).
-- `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR`: colour on or off.
+- `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR`: colour on or off; `HIVE_COLOR_DEPTH`
+  (`truecolor`, `256`, `16`): how many colours.
 
 For the server (`hive server`, or a server deployed as a web app):
 

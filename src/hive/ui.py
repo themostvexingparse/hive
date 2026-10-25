@@ -23,17 +23,35 @@ import zlib
 _MODE = "auto"
 _decided: dict[int, tuple[object, bool]] = {}
 
-_CODES = {
-    "reset": 0, "bold": 1, "dim": 2, "italic": 3, "underline": 4,
-    "red": 31, "green": 32, "yellow": 33, "blue": 34, "magenta": 35, "cyan": 36,
-    "gray": 90, "bright_red": 91, "bright_green": 92, "bright_yellow": 93, "bright_blue": 94,
-    "bright_magenta": 95, "bright_cyan": 96,
+_ATTRS = {"reset": 0, "bold": 1, "dim": 2, "italic": 3, "underline": 4}
+
+# Hive's palette: vivid 24-bit colours where the terminal shows them, else the nearest of the
+# 256 standard colours, else the 16 basic ones (the last number). The names say what each is
+# used for across the CLI: bright_yellow headings, bright_cyan things to type, yellow
+# placeholders and warnings, green success, red errors, blue paths, magenta notes.
+_PALETTE: dict[str, tuple[tuple[int, int, int], int]] = {
+    "red": ((255, 85, 105), 31),             # coral: errors, failed states
+    "bright_red": ((255, 45, 85), 91),
+    "green": ((40, 220, 110), 32),           # emerald: success, healthy states
+    "bright_green": ((120, 255, 120), 92),   # lime: choices in help
+    "yellow": ((255, 160, 0), 33),           # amber: placeholders, warnings, waiting states
+    "bright_yellow": ((255, 200, 30), 93),   # honey: headings, the Hive name
+    "blue": ((90, 160, 255), 34),            # azure: paths and URLs
+    "bright_blue": ((120, 140, 255), 94),    # periwinkle: next steps
+    "magenta": ((190, 120, 255), 35),        # violet: notes
+    "bright_magenta": ((255, 90, 210), 95),  # pink
+    "cyan": ((0, 225, 210), 36),             # turquoise: information, work in progress
+    "bright_cyan": ((40, 200, 255), 96),     # sky: commands and options to type
+    "gray": ((130, 138, 165), 90),           # slate: rules, timestamps, secondary text
+    "orange": ((255, 125, 50), 33),
+    "mint": ((110, 255, 200), 92),
+    "rose": ((255, 130, 160), 91),
 }
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 # Agent names get a stable colour each, so one agent's lines are easy to follow.
 _AGENT_COLORS = ("bright_cyan", "bright_magenta", "bright_yellow", "bright_green",
-                 "bright_blue", "cyan", "magenta", "yellow", "green", "blue")
+                 "magenta", "orange", "cyan", "rose", "blue", "mint")
 
 # What a state means decides its colour, wherever it is shown.
 _STATE_COLORS = {
@@ -52,9 +70,63 @@ _STATE_COLORS = {
 
 def set_mode(mode: str) -> None:
     """`auto` (default), `always` or `never`; set from `hive --color`."""
-    global _MODE
+    global _MODE, _DEPTH
     _MODE = mode
+    _DEPTH = None
     _decided.clear()
+
+
+_DEPTH: str | None = None
+_TRUECOLOR_TERMINALS = ("vscode", "iTerm.app", "WezTerm", "Hyper", "ghostty", "Tabby")
+
+
+def depth() -> str:
+    """How many colours the terminal shows: `truecolor`, `256` or `16`. HIVE_COLOR_DEPTH
+    overrides it; otherwise COLORTERM, the terminal program and TERM say. Windows consoles
+    (Windows Terminal, and the classic console since Windows 10) show 24-bit colour."""
+    global _DEPTH
+    if _DEPTH is None:
+        v = os.environ.get("HIVE_COLOR_DEPTH", "").strip().lower()
+        term = os.environ.get("TERM", "")
+        if v in ("truecolor", "24bit", "256", "16"):
+            _DEPTH = "truecolor" if v == "24bit" else v
+        elif os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") \
+                or os.environ.get("WT_SESSION") \
+                or os.environ.get("TERM_PROGRAM") in _TRUECOLOR_TERMINALS \
+                or "direct" in term or os.name == "nt":
+            _DEPTH = "truecolor"
+        elif "256" in term:
+            _DEPTH = "256"
+        else:
+            _DEPTH = "16"
+    return _DEPTH
+
+
+def _xterm256(rgb: tuple[int, int, int]) -> int:
+    """The nearest of the 256 standard colours: the 6x6x6 cube or the grey ramp."""
+    steps = (0, 95, 135, 175, 215, 255)
+
+    def level(c: int) -> int:
+        return min(range(6), key=lambda i: abs(steps[i] - c))
+    r, g, b = (level(c) for c in rgb)
+    cube = (steps[r], steps[g], steps[b])
+    grey = max(0, min(23, round((sum(rgb) / 3 - 8) / 10)))
+
+    def dist(a) -> int:
+        return sum((x - y) ** 2 for x, y in zip(a, rgb))
+    return 232 + grey if dist((8 + grey * 10,) * 3) < dist(cube) else 16 + 36 * r + 6 * g + b
+
+
+def _sgr(style: str) -> str:
+    if style in _ATTRS:
+        return str(_ATTRS[style])
+    rgb, basic = _PALETTE[style]
+    d = depth()
+    if d == "truecolor":
+        return "38;2;%d;%d;%d" % rgb
+    if d == "256":
+        return f"38;5;{_xterm256(rgb)}"
+    return str(basic)
 
 
 def _env_mode() -> str:
@@ -124,11 +196,12 @@ def sym(fancy: str, plain: str, stream=None) -> str:
 # ---------------------------------------------------------------------- painting
 
 def paint(text, *styles: str, stream=None) -> str:
-    """`text` wrapped in the given styles (names from _CODES) when the stream shows colour."""
+    """`text` wrapped in the given styles (_ATTRS and _PALETTE names) when the stream shows
+    colour."""
     text = str(text)
     if not styles or not text or not enabled(stream):
         return text
-    return f"\x1b[{';'.join(str(_CODES[s]) for s in styles)}m{text}\x1b[0m"
+    return f"\x1b[{';'.join(_sgr(s) for s in styles)}m{text}\x1b[0m"
 
 
 def strip(text: str) -> str:
@@ -360,7 +433,9 @@ class HelpFormatter(argparse.RawDescriptionHelpFormatter):
 
 
 def colorize_help(text: str, stream) -> str:
-    if not enabled(stream):
+    """argparse's help text, coloured. Text that already has colour is left as it is:
+    colouring it again would split its escape sequences."""
+    if not enabled(stream) or _ANSI.search(text):
         return text
     out_lines = []
     in_usage = False
@@ -383,16 +458,18 @@ def colorize_help(text: str, stream) -> str:
     return "\n".join(out_lines)
 
 
+# In help text: commands sky (as everywhere a command is shown), options pink, placeholders
+# amber, choices lime.
 def _color_invocation(inv: str, stream) -> str:
     def repl(m):
         tok = m.group(0)
         if tok.startswith("-"):
-            return paint(tok, "bright_cyan", stream=stream)
+            return paint(tok, "bright_magenta", stream=stream)
         if tok.startswith("{"):
             return paint(tok, "bright_green", stream=stream)
         if tok.isupper():
             return paint(tok, "yellow", stream=stream)
-        return paint(tok, "bright_green", stream=stream)
+        return paint(tok, "bright_cyan", stream=stream)
     return re.sub(r"\{[^}]*\}|[^\s,\[\]]+", repl, inv)
 
 
@@ -400,7 +477,7 @@ def _color_usage(text: str, stream) -> str:
     def repl(m):
         tok = m.group(0)
         if tok.startswith("-"):
-            return paint(tok, "bright_cyan", stream=stream)
+            return paint(tok, "bright_magenta", stream=stream)
         if tok.isupper() and len(tok) > 1:
             return paint(tok, "yellow", stream=stream)
         return tok

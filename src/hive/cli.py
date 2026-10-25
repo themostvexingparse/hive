@@ -2084,7 +2084,7 @@ def cmd_help(a, parser: TopParser):
             ui.out("")
             ui.out(ui.paint(f"Options of hive {' '.join(words).lower()}", "bold",
                             "bright_yellow", stream=sys.stdout))
-            ui.out(ui.colorize_help(command.format_help(), sys.stdout).rstrip())
+            ui.out(command.format_help().rstrip())  # coloured by ui.HelpFormatter
         if m.topic.see:
             ui.out("")
             ui.out(ui.dim("See also: ") + ", ".join(ui.cmd(f"hive help {s}")

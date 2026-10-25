@@ -183,6 +183,7 @@ The default commands are listed in
 | `HIVE_PROJECT` | admin CLI | The project admin commands act on, like `--project` ([Several projects](PROJECTS.md#which-project-an-admin-command-acts-on)). |
 | `HIVE_HOME` | all local commands | Location of Hive's local files (default `~/.hive`). |
 | `HIVE_COLOR`, `NO_COLOR`, `FORCE_COLOR` | all commands | Colour on/off ([Coloured output](CLI.md#17-coloured-output)). |
+| `HIVE_COLOR_DEPTH` | all commands | `truecolor`, `256` or `16`: how many colours to use, instead of what Hive detects from `COLORTERM` and `TERM`. |
 | `HIVE_SLOT`, `HIVE_DAEMON_URL`, `HIVE_LOCAL_SECRET` | set by Hive for agent CLIs | Identify the slot and reach the daemon. |
 | `CLAUDE_CONFIG_DIR` / `GEMINI_CLI_HOME` / `CODEX_HOME` | set by Hive per slot | Keep each account's CLI config separate. |
 | `USERPROFILE`, `HOME`, `GIT_CONFIG_GLOBAL` | set by Hive for agy slots | agy has no config-folder setting, so the slot's folder becomes its home directory; git keeps your `~/.gitconfig` ([agy home folder](RUNNING.md#agy-home-folder)). |

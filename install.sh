@@ -18,8 +18,19 @@ set -u
 G=""; Y=""; RD=""; CY=""; B=""; DIM=""; R=""
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
     ESC=$(printf '\033')
-    G="${ESC}[92m"; Y="${ESC}[93m"; RD="${ESC}[91m"; CY="${ESC}[96m"
-    B="${ESC}[1m"; DIM="${ESC}[90m"; R="${ESC}[0m"
+    case "${HIVE_COLOR_DEPTH:-}:${COLORTERM:-}:${TERM_PROGRAM:-}" in
+        16:* | 256:*) truecolor="" ;;
+        truecolor:* | 24bit:* | *:truecolor:* | *:24bit:* | *:*:vscode | *:*:iTerm.app | *:*:WezTerm)
+            truecolor=1 ;;
+        *) truecolor="" ;;
+    esac
+    if [ -n "$truecolor" ]; then  # Hive's palette (src/hive/ui.py): emerald, honey, coral, sky
+        G="${ESC}[38;2;40;220;110m"; Y="${ESC}[38;2;255;200;30m"; RD="${ESC}[38;2;255;85;105m"
+        CY="${ESC}[38;2;40;200;255m"; DIM="${ESC}[38;2;130;138;165m"
+    else
+        G="${ESC}[92m"; Y="${ESC}[93m"; RD="${ESC}[91m"; CY="${ESC}[96m"; DIM="${ESC}[90m"
+    fi
+    B="${ESC}[1m"; R="${ESC}[0m"
 fi
 
 ok()   { printf '%s[ok]%s %s\n' "$G" "$R" "$*"; }

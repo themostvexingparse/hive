@@ -154,6 +154,9 @@ def render(topic: Topic, stream=None) -> str:
         elif line.startswith(("# ", "## ")):
             title = line.lstrip("#").strip().replace("`", "")
             out.append(ui.paint(title, "bold", "bright_yellow", stream=stream))
+        elif m := re.match(r"^(\s*)- ", line):  # a list item: a coloured bullet
+            bullet = ui.paint(ui.sym("•", "-", stream), "bright_yellow", stream=stream)
+            out.append(m.group(1) + bullet + " " + _inline(line[m.end():], stream))
         else:
             out.append(_inline(line, stream))
     return "\n".join(out).rstrip() + "\n"

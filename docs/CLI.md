@@ -955,7 +955,12 @@ and Linux:
 
 Hive's colours (standard terminal colour codes, called ANSI codes) work in Windows Terminal,
 PowerShell and cmd.exe on Windows 10 and later, where Hive switches on the console's support
-for them itself, and in any macOS or Linux terminal. If a console font can't show a symbol, or
+for them itself, and in any macOS or Linux terminal. Its palette is vivid 24-bit colour
+(honey headings, sky-blue commands, amber placeholders, emerald success, coral errors) on
+terminals that show it: Windows consoles, and terminals that set `COLORTERM=truecolor` or
+are known to (VS Code, iTerm2, WezTerm, …). Elsewhere it uses the nearest of the 256
+standard colours (`TERM=…-256color`), else the basic 16. Set `HIVE_COLOR_DEPTH` to
+`truecolor`, `256` or `16` to choose. If a console font can't show a symbol, or
 the output's character encoding can't represent it, Hive uses plain ASCII characters
 instead.
 

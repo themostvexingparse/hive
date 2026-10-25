@@ -17,8 +17,10 @@ set "ESC="
 if not defined NO_COLOR for /f "delims=#" %%E in ('"prompt #$E# & for %%E in (1) do rem"') do set "ESC=%%E"
 set "G=" & set "Y=" & set "RD=" & set "CY=" & set "B=" & set "DIM=" & set "R="
 if defined ESC (
-    set "G=%ESC%[92m" & set "Y=%ESC%[93m" & set "RD=%ESC%[91m" & set "CY=%ESC%[96m"
-    set "B=%ESC%[1m" & set "DIM=%ESC%[90m" & set "R=%ESC%[0m"
+    rem Hive's palette (see src/hive/ui.py) in 24-bit colour: emerald, honey, coral, sky, slate.
+    set "G=%ESC%[38;2;40;220;110m" & set "Y=%ESC%[38;2;255;200;30m"
+    set "RD=%ESC%[38;2;255;85;105m" & set "CY=%ESC%[38;2;40;200;255m"
+    set "B=%ESC%[1m" & set "DIM=%ESC%[38;2;130;138;165m" & set "R=%ESC%[0m"
 )
 
 set "RUN_TESTS=0"

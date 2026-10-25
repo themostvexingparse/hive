@@ -18,8 +18,10 @@ class Tty(io.StringIO):
 
 @pytest.fixture(autouse=True)
 def clean_mode(monkeypatch):
-    for var in ("HIVE_COLOR", "NO_COLOR", "FORCE_COLOR", "TERM"):
+    for var in ("HIVE_COLOR", "NO_COLOR", "FORCE_COLOR", "TERM", "COLORTERM", "WT_SESSION",
+                "TERM_PROGRAM"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HIVE_COLOR_DEPTH", "16")  # the basic codes; see test_colour_depths
     ui.set_mode("auto")
     yield
     ui.set_mode("auto")
@@ -132,3 +134,50 @@ def test_die_goes_to_stderr_plain_when_piped(capsys):
         cli.die("boom")
     err = capsys.readouterr().err
     assert "hive: boom" in err and "\x1b[" not in err
+
+
+def test_colour_depths(monkeypatch):
+    """Vivid 24-bit colours where the terminal shows them, the nearest of 256 or the basic 16
+    elsewhere; HIVE_COLOR_DEPTH overrides the detection."""
+    s = Tty()
+    monkeypatch.setenv("HIVE_COLOR_DEPTH", "truecolor")
+    ui.set_mode("always")
+    assert ui.paint("x", "bright_cyan", "bold", stream=s) == "\x1b[38;2;40;200;255;1mx\x1b[0m"
+    monkeypatch.setenv("HIVE_COLOR_DEPTH", "256")
+    ui.set_mode("always")
+    code = ui.paint("x", "bright_cyan", stream=s)
+    assert code.startswith("\x1b[38;5;") and 16 <= int(code[7:].split("m")[0]) <= 255
+    assert ui._xterm256((255, 0, 0)) == 196 and ui._xterm256((128, 128, 128)) == 244
+    monkeypatch.delenv("HIVE_COLOR_DEPTH")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    ui.set_mode("always")
+    assert ui.depth() == "truecolor"
+    monkeypatch.delenv("COLORTERM")
+    monkeypatch.setattr(ui.os, "name", "posix")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    ui.set_mode("always")
+    assert ui.depth() == "256"
+    monkeypatch.setenv("TERM", "xterm")
+    ui.set_mode("always")
+    assert ui.depth() == "16"
+    # Every colour name the CLI uses has a value at every depth.
+    for name in ui._PALETTE:
+        for d in ("truecolor", "256", "16"):
+            monkeypatch.setenv("HIVE_COLOR_DEPTH", d)
+            ui.set_mode("always")
+            assert ui.paint("x", name, stream=s).startswith("\x1b[")
+
+
+def test_help_colouring_twice_leaves_it_intact(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path))
+    monkeypatch.setenv("HIVE_COLOR_DEPTH", "truecolor")
+    ui.set_mode("always")
+    once = ui.colorize_help("options:\n  -h, --help  show this\n", Tty())
+    assert ui.colorize_help(once, Tty()) == once
+    # `hive help COMMAND` shows the command's options, coloured once.
+    cli.main(["--color", "always", "help", "server"])
+    out = capsys.readouterr().out
+    assert "\x1b[" in out
+    plain = ui.strip(out)
+    assert "\x1b" not in plain and "[96m" not in plain and "38;2;" not in plain
+    assert "--sqlite-journal" in plain
