@@ -55,8 +55,8 @@ these files are added after them. Commit them like any other file.
 
 | File | Added to | Takes effect |
 |---|---|---|
-| `orchestrator.md` | the orchestrator's skill, under "Project rules" | after `hive init` (commit the refreshed `.hive/agent/`) |
-| `worker.md` | every other agent's skill, under "Project rules" | after `hive init` (commit the refreshed `.hive/agent/`) |
+| `orchestrator.md` | the orchestrator's skill, under "Project rules" | once the change is on main; new sessions pick it up |
+| `worker.md` | every other agent's skill, under "Project rules" | once the change is on main; new sessions pick it up |
 | `roles/<role>.md` | the start of every session of an agent with that role | once the change is on main; new sessions pick it up |
 
 `hive init` creates each file with only a commented-out example (`<!-- ... -->`). Comments
@@ -236,9 +236,9 @@ def check(root: Path, repo_cfg: dict, roles) -> list[str]:
 
 _STARTER_SKILL = """\
 <!--
-Project rules for {who}. `hive init` adds what you write here to the end of the
-{skill} skill, under "Project rules"; run it again after editing, then commit
-.hive/agent/ and this file.
+Project rules for {who}. Hive adds what you write here to the end of the
+{skill} skill, under "Project rules". Commit this file: sessions started once
+it is on main use it.
 
 Everything inside a comment like this one is ignored. While this file holds only
 comments, Hive adds nothing. Write your rules below the comment (or delete it).

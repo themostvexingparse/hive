@@ -522,6 +522,23 @@
   .dec-hist li { padding: 9px 12px; background: var(--surface-2); border-radius: 8px; display: grid; gap: 3px;
                  overflow-wrap: anywhere; }
   .lease .rv { margin-left: 4px; }
+
+  /* ------------------------------------------------------------------ agents & computers */
+  .fl-h { margin: 18px 0 6px; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+  .fl-h .spacer { flex: 1; }
+  .fl-add { display: grid; grid-template-columns: 110px minmax(0, 1fr) 150px 64px auto; gap: 8px; }
+  .fl-add .field, .fl-row .field { min-width: 0; }
+  @media (max-width: 640px) { .fl-add { grid-template-columns: 1fr 1fr; } .fl-add .btn { grid-column: 1 / -1; } }
+  .fl-list .fl-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(0, 1.4fr) 130px 120px auto;
+                     gap: 8px; align-items: center; }
+  @media (max-width: 640px) { .fl-list .fl-row { grid-template-columns: 1fr 1fr; } }
+  .fl-row .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fl-row .who small { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .fl-row .a { display: flex; gap: 6px; justify-content: flex-end; }
+  .fl-line { margin-top: 8px; padding: 10px 12px; background: var(--surface-2); border-radius: 8px;
+             font-size: 12.5px; overflow-wrap: anywhere; }
+  .fl-line:empty { display: none; }
+  .fl-line code { user-select: all; }
 </style>
 </head>
 <body>
@@ -591,6 +608,7 @@
           <button role="menuitemradio" data-theme-set="system"><svg class="i"><use href="#i-monitor"/></svg>System</button>
           <div id="projMenu" hidden><div class="sep"></div><div class="label">Projects</div><div id="projList"></div></div>
           <div class="sep"></div>
+          <button role="menuitem" id="fleetMenuBtn" class="live-only"><svg class="i"><use href="#i-hex"/></svg>Agents &amp; computers…</button>
           <button role="menuitem" id="archivesBtn"><svg class="i"><use href="#i-archive"/></svg>Archives…</button>
           <button role="menuitem" id="resetBtn" class="danger live-only" style="color:var(--bad)"><svg class="i"><use href="#i-reset"/></svg>Reset fleet…</button>
           <button role="menuitem" id="signOutBtn"><svg class="i"><use href="#i-out"/></svg>Sign out</button>
@@ -606,7 +624,8 @@
       <!-- left: who is doing what -->
       <div class="col left">
         <section class="panel">
-          <div class="panel-h"><h2>Agents</h2><span class="count" id="agentsCount"></span></div>
+          <div class="panel-h"><h2>Agents</h2><span class="count" id="agentsCount"></span><span class="spacer"></span>
+            <button class="btn sm ghost live-only" id="fleetBtn" title="Add, change or remove agents; pair computers">Manage</button></div>
           <ul class="agents" id="agents"></ul>
         </section>
         <section class="panel">
@@ -709,6 +728,33 @@
       <button class="btn ghost" id="archOpenFile" style="margin-right:auto">Open a file…</button>
       <button class="btn" id="archDone">Close</button>
     </div>
+  </dialog>
+  <dialog id="fleetDlg" class="wide">
+    <div class="d-body">
+      <h3>Agents &amp; computers</h3>
+      <p class="lead">Agents on a <b>paired computer</b> are set up there by Hive within a minute (while
+        <code>hive up</code> runs there); log each one's account in on that computer, once, with
+        <code>hive agents login NAME</code>. Agents for your own computer are added there, with
+        <code>hive agents add</code>.</p>
+      <div class="fl-h">Add agents</div>
+      <div class="fl-add">
+        <select class="field" id="flVendor" aria-label="CLI">
+          <option>claude</option><option>codex</option><option>gemini</option><option>agy</option></select>
+        <input class="field" id="flRoles" placeholder="roles, e.g. programmer, tester" aria-label="Roles">
+        <select class="field" id="flOn" aria-label="Where it runs"></select>
+        <input class="field" id="flCount" type="number" min="1" max="20" value="1" aria-label="How many">
+        <button class="btn primary" id="flAdd">Add</button>
+      </div>
+      <div class="arch-err" id="flErr" role="alert"></div>
+      <div class="fl-line" id="flLine"></div>
+      <div class="fl-h">Agents<span class="spacer"></span></div>
+      <ul class="arch-list fl-list" id="flAgents"></ul>
+      <div class="fl-h">Paired computers<span class="spacer"></span>
+        <button class="btn sm" id="flPair">Pair a computer…</button></div>
+      <div class="fl-line" id="flPairLine"></div>
+      <ul class="arch-list" id="flMachines"></ul>
+    </div>
+    <div class="d-actions"><button class="btn" id="flDone">Close</button></div>
   </dialog>
 </div>
 <input type="file" id="archFile" accept=".json,.gz,application/json,application/gzip" hidden>
@@ -1138,8 +1184,108 @@ function renderAgents() {
         <span>· seen ${timeEl(a.last_seen)}</span></div>
       ${t ? `<div class="task" title="${esc(t.title)}">#${t.id} ${esc(t.title)}</div>` : ""}
     </li>`;
-  }).join("") || '<div class="empty">No agents enrolled yet.<br>Use <code>hive admin enroll</code>.</div>';
+  }).join("") || '<div class="empty">No agents yet.<br>Add them with <code>hive agents add claude</code>, or <b>Manage</b>.</div>';
 }
+
+/* =================================================================== agents & computers */
+let FL = { agents: [], machines: [] };
+async function flAct(btn, fn) {
+  $("#flErr").textContent = "";
+  setBusy(btn, true);
+  try { return await fn(); }
+  catch (e) { if (e.status !== 401) $("#flErr").textContent = e.message; return null; }
+  finally { setBusy(btn, false); }
+}
+const ELSEWHERE = "";  /* the select value for "another computer (not paired)" */
+function whereOptions(current) {
+  const opts = FL.machines.map((m) => `<option value="${esc(m.name)}" ${m.name === current ? "selected" : ""}>${esc(m.name)}${m.online ? "" : " (offline)"}</option>`);
+  return opts.join("") + `<option value="${ELSEWHERE}" ${current ? "" : "selected"}>not on a paired computer</option>`;
+}
+async function loadFleet() {
+  const [agents, machines] = await Promise.all([flAct(null, () => api("/agents")), flAct(null, () => api("/machines"))]);
+  if (!agents || !machines) return;
+  FL = { agents, machines };
+  $("#flOn").innerHTML = FL.machines.map((m) => `<option value="${esc(m.name)}">on ${esc(m.name)}</option>`).join("") +
+    `<option value="${ELSEWHERE}">on another computer…</option>`;
+  $("#flAgents").innerHTML = FL.agents.map((a) => `<li class="fl-row" data-agent="${esc(a.name)}">
+      <div class="who">${agentChip(a.name)}<small>${esc(a.vendor)}${a.machine && !a.claimed ? " · not set up yet" : ""}</small></div>
+      <input class="field" data-f="roles" value="${esc(a.roles.join(", "))}" aria-label="Roles of ${esc(a.name)}">
+      <select class="field" data-f="on" aria-label="Where ${esc(a.name)} runs">${whereOptions(a.machine || "")}</select>
+      <input class="field" data-f="model" value="${esc((a.placement || {}).model || "")}" placeholder="model" aria-label="Model of ${esc(a.name)}" ${a.machine ? "" : "disabled title=\"Set on its computer: hive agents edit --model\""}>
+      <div class="a"><button class="btn sm" data-save>Save</button>
+        <button class="btn sm icon danger" data-rm title="Remove ${esc(a.name)}" aria-label="Remove"><svg class="i"><use href="#i-trash"/></svg></button></div>
+    </li>`).join("") || '<div class="empty">No agents yet.</div>';
+  $("#flMachines").innerHTML = FL.machines.map((m) => `<li>
+      <div class="t">${esc(m.name)}</div>
+      <div class="s"><span class="badge ${m.online ? "ok" : "dim"}">${m.online ? "Online" : "Offline"}</span>
+        <span>${esc(m.os || "")} · CLIs: ${esc(m.clis.join(", ") || "none")} · agents: ${esc(m.agents.join(", ") || "none")}</span></div>
+      <div class="a"><button class="btn sm danger" data-unpair="${esc(m.name)}">Unpair…</button></div></li>`).join("") ||
+    '<div class="empty">No paired computers. <b>Pair a computer…</b> gives you a line to run on it.</div>';
+}
+function freeNames(vendor, n) {
+  const taken = new Set(FL.agents.map((a) => a.name)), out = [];
+  for (let i = 1; out.length < n; i++) if (!taken.has(`${vendor}-${i}`)) out.push(`${vendor}-${i}`);
+  return out;
+}
+const serverUrl = () => location.origin + PROJECT_BASE;
+$("#flAdd").onclick = async (e) => {
+  const btn = e.currentTarget, vendor = $("#flVendor").value, on = $("#flOn").value;
+  const count = Math.max(1, Math.min(20, parseInt($("#flCount").value, 10) || 1));
+  let roles = $("#flRoles").value.split(/[,\s]+/).filter(Boolean);
+  if (!roles.length) roles = FL.agents.some((a) => a.roles.includes("orchestrator")) ? ["programmer"] : ["orchestrator"];
+  const lines = [];
+  $("#flLine").innerHTML = "";
+  for (const name of freeNames(vendor, count)) {
+    const r = await flAct(btn, () => api("/agents", "POST", { name, vendor, roles }));
+    if (!r) break;
+    if (on) await flAct(btn, () => api(`/agents/${encodeURIComponent(name)}/placement`, "PUT", { machine: on }));
+    else lines.push(`hive join ${name} --token ${r.token} --server ${serverUrl()}`);
+    FL.agents.push({ name, vendor, roles });
+  }
+  if (lines.length) $("#flLine").innerHTML = "On that computer, inside its clone of the repository, run (the token is shown only once):<br>" +
+    lines.map((l) => `<code>${esc(l)}</code>`).join("<br>");
+  else if (on) toast(`Placed on ${on}: it's set up there within a minute while hive up runs.`, "ok", 5000);
+  $("#flRoles").value = ""; $("#flCount").value = 1;
+  loadFleet(); refreshSoon();
+};
+$("#flAgents").addEventListener("click", async (e) => {
+  const b = e.target.closest("button"), li = e.target.closest("[data-agent]");
+  if (!b || !li) return;
+  const name = li.dataset.agent, a = FL.agents.find((x) => x.name === name);
+  if (b.hasAttribute("data-rm")) {
+    if (!(await confirmDialog(`Remove ${name}?`, "Its token stops working, its unfinished tasks go back on the board and its file locks are released. On its computer, `hive agents rm " + name + "` also cleans up its folder.", "Remove", true))) return;
+    if (await flAct(b, () => api(`/agents/${encodeURIComponent(name)}`, "DELETE"))) { toast(`Removed ${name}.`, "ok", 3000); loadFleet(); refreshSoon(); }
+    return;
+  }
+  const roles = $('[data-f="roles"]', li).value.split(/[,\s]+/).filter(Boolean);
+  const on = $('[data-f="on"]', li).value, model = $('[data-f="model"]', li).value.trim();
+  if (roles.join(",") !== a.roles.join(",")) {
+    const r = await flAct(b, () => api(`/agents/${encodeURIComponent(name)}`, "PATCH", { roles }));
+    if (!r) return;
+    if (r.status === "proposed") toast(`The fleet is active, so this became decision #${r.decision_id} to approve.`, "info", 6000);
+  }
+  if (on !== (a.machine || "") || (on && model !== ((a.placement || {}).model || ""))) {
+    if (!(await flAct(b, () => api(`/agents/${encodeURIComponent(name)}/placement`, "PUT",
+        { machine: on || null, model, permission_mode: (a.placement || {}).permission_mode || "" })))) return;
+  }
+  toast(`Saved ${name}.`, "ok", 2500); loadFleet(); refreshSoon();
+});
+$("#flPair").onclick = async (e) => {
+  const r = await flAct(e.currentTarget, () => api("/machines/invite", "POST"));
+  if (!r) return;
+  $("#flPairLine").innerHTML = `On the other computer, inside its clone of the repository, run (works once, for ${Math.round(r.expires_in / 60)} minutes):<br>` +
+    `<code>${esc(`hive join ${r.code} --server ${serverUrl()}`)}</code><br>then <code>hive up</code> there.`;
+};
+$("#flMachines").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-unpair]"); if (!b) return;
+  const name = b.dataset.unpair;
+  if (!(await confirmDialog(`Unpair ${name}?`, "Its token stops working, and so do those of the agents placed on it. The agents stay here, unplaced: place them on another computer to give them new tokens.", "Unpair", true))) return;
+  if (await flAct(b, () => api(`/machines/${encodeURIComponent(name)}`, "DELETE"))) { toast(`Unpaired ${name}.`, "ok", 3000); loadFleet(); }
+});
+function openFleet() { closeMenu(); $("#flErr").textContent = ""; $("#flLine").innerHTML = ""; $("#flPairLine").innerHTML = ""; $("#fleetDlg").showModal(); loadFleet(); }
+$("#fleetBtn").onclick = (e) => { e.stopPropagation(); openFleet(); };
+$("#fleetMenuBtn").onclick = openFleet;
+$("#flDone").onclick = () => $("#fleetDlg").close();
 $("#agents").addEventListener("click", (e) => {
   const li = e.target.closest("[data-solo]");
   if (!li) return;

@@ -187,8 +187,42 @@ integrations = Table(
     Column("sha", String(64), nullable=False),
     Column("leases", JSON, nullable=False),  # {lease_id: fencing}
     Column("task_id", Integer, nullable=True),
-    Column("state", String(16), nullable=False),  # granted | confirmed
+    Column("state", String(16), nullable=False),  # granted | confirmed | cancelled
     Column("created", Float, nullable=False),
+)
+
+# Computers paired with a short code (`hive machines invite`, then `hive join CODE` there), and
+# which agent each one runs. A machine's token only reaches the /machines/me endpoints.
+machines = Table(
+    "machines", metadata,
+    Column("name", String(32), primary_key=True),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("os", String(32), nullable=False, default=""),
+    Column("clis", JSON, nullable=False),  # agent CLIs installed there
+    Column("created", Float, nullable=False),
+    Column("last_seen", Float, nullable=False, default=0.0),
+)
+
+pairing_codes = Table(
+    "pairing_codes", metadata,
+    Column("code_hash", String(64), primary_key=True),
+    Column("expires", Float, nullable=False),
+    # A reusable join key (hk_…) pairs any number of computers until it expires or is revoked;
+    # a short code works once.
+    Column("reusable", Boolean, nullable=False, default=False),
+    Column("label", String(64), nullable=False, default=""),
+    Column("created", Float, nullable=False, default=0.0),
+    Column("uses", Integer, nullable=False, default=0),
+)
+
+placements = Table(
+    "placements", metadata,
+    Column("agent", String(32), primary_key=True),
+    Column("machine", String(32), nullable=False, index=True),
+    Column("claimed", Float, nullable=False, default=0.0),  # when the machine took its token
+    # The slot's settings there ("" = the CLI's defaults), applied by that machine's daemon.
+    Column("model", String(64), nullable=False, default=""),
+    Column("permission_mode", String(32), nullable=False, default=""),
 )
 
 # Tables an archive flush empties. Their ids must keep counting up afterwards: daemons hold event
@@ -258,4 +292,24 @@ def make_engine(url: str, sqlite_journal: str | None = None, small_pool: bool = 
     else:
         engine = create_engine(url, pool_pre_ping=True, pool_recycle=280, **pool)
     metadata.create_all(engine)
+    _add_missing_columns(engine, (machines, pairing_codes, placements))
     return engine
+
+
+def _add_missing_columns(engine, tables) -> None:
+    """create_all makes missing tables but never changes existing ones. These tables gained
+    columns while they were new; add any a database made earlier lacks (each has a default)."""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    for table in tables:
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            ddl = col.type.compile(dialect=engine.dialect)
+            default = col.default.arg if col.default is not None else ""
+            literal = (("1" if default else "0") if isinstance(default, bool)
+                       else repr(default) if isinstance(default, str) else str(default))
+            with engine.begin() as c:
+                c.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl} "
+                               f"NOT NULL DEFAULT {literal}"))

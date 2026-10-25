@@ -11,8 +11,8 @@ There are three places you may install Hive:
 | Where | Why it needs Hive |
 |---|---|
 | **The server** | The one program that holds the fleet's shared state. It runs as `hive server`, or as a Python web app ([WSGI](GLOSSARY.md#wsgi)) on a web host. For public hosting, follow [DEPLOYMENT.md](DEPLOYMENT.md) instead of this page. |
-| **Your computer** | Runs admin commands, the ones you use to control the fleet (`hive admin …`, `hive start`, `hive decide`, …). Usually also runs the orchestrator, the agent you chat with. |
-| **Every agent machine** | Any computer that runs agents. It runs `hive join` (adds an agent to the computer) and `hive up` (runs them). The agents' CLIs also call `hive mcp` and `hive hook` themselves, to get Hive's tools and automatic checks. |
+| **Your computer** | Runs admin commands, the ones you use to control the fleet (`hive`, `hive agents …`, `hive start`, `hive approve`, …). Usually also runs the orchestrator, the agent you chat with. |
+| **Every agent machine** | Any computer that runs agents. It runs `hive agents add` or `hive join` (adds agents to the computer) and `hive up` (runs them). The agents' CLIs also call `hive mcp` and `hive hook` themselves, to get Hive's tools and automatic checks. |
 
 For a first trial, all three can be the same computer.
 
@@ -27,7 +27,7 @@ For a first trial, all three can be the same computer.
 | Claude Code CLI (`claude`) | machines running Claude agents | Each Claude agent logs into its own Claude account once. |
 | Gemini CLI (`gemini`) | machines running Gemini agents | Each Gemini agent logs into its own Google account once. Since June 2026 only with a paid Gemini API key or a Gemini Code Assist Standard/Enterprise licence; personal accounts use agy instead ([details](LIMITATIONS.md#gemini-cli-and-antigravity-cli)). |
 | Codex CLI (`codex`) | machines running Codex agents | Each Codex agent logs into its own ChatGPT account once (`codex login`). |
-| Antigravity CLI (`agy`) | machines running agy agents | Google's successor to Gemini CLI. Log in once per computer by running `agy`; all agy agents on that computer share that Google account ([why](MACHINES.md#log-each-slots-account-in-once)). |
+| Antigravity CLI (`agy`) | machines running agy agents | Google's successor to Gemini CLI. Log in once per computer by running `agy`; all agy agents on that computer share that Google account ([why](MACHINES.md#log-each-agents-account-in-once)). |
 | A git remote (`origin`) | the repository | The shared copy of the repository that every machine pushes to: GitHub or any remote all machines can reach. |
 | A reachable server URL | | The address of the Hive server: `http://127.0.0.1:8765` (your own computer) for single-machine trials; a public HTTPS address otherwise. |
 

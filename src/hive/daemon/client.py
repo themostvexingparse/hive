@@ -52,3 +52,6 @@ class ServerClient:
 
     def put(self, path, json=None):
         return self.request("PUT", path, json=json or {})
+
+    def delete(self, path):
+        return self.request("DELETE", path)

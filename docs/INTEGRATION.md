@@ -55,7 +55,7 @@ the optional GitHub mode, and reviews.
 
 - Every agent works in its own worktree on a branch named after it, `hive/<agent name>`
   (e.g. `hive/claude-2`), created by `hive join`
-  ([Enrolling agents and setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
+  ([Enrolling agents and setting up machines](MACHINES.md#on-another-computer-without-pairing)).
 - Agents never commit to or push `main`. Only the release steps below move it.
 - `.hive/orchestrator/`, where the orchestrator keeps its private notes, is never committed
   (it's listed in `.gitignore`).
@@ -185,8 +185,8 @@ This mode is implemented but not yet tested against GitHub
 ## Reviews
 
 A review means another agent must approve a programmer's work before it reaches `main`. Set
-`review` in the `[integration]` section of `hive.toml`, then upload the settings with
-`hive admin push-config`:
+`review` in the `[integration]` section of `hive.toml`, for example with
+`hive config set integration.review reviewer` (which also uploads it):
 
 | Value | Behaviour |
 |---|---|

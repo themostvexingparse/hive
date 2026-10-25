@@ -207,7 +207,7 @@ files are generated on the fly.
 What this means in practice:
 - **One account per computer.** agy's login is in the computer's keyring, not in that folder,
   so every agy slot on a computer uses the same account
-  ([Accounts](MACHINES.md#log-each-slots-account-in-once)).
+  ([Accounts](MACHINES.md#log-each-agents-account-in-once)).
 - **Commands the agent runs see that home folder too.** Git keeps your identity through
   `GIT_CONFIG_GLOBAL`; other tools that keep settings or logins in your home folder (SSH keys,
   some package managers on macOS and Linux) don't find them. Hive's own git operations run

@@ -11,7 +11,7 @@ three tiers:
 |---|---|---|
 | **1. Allowed** | reading, tests, git history work, builds | Runs directly. |
 | **2. Needs approval** | `git push`, `git reset --hard`, `rm -rf`, `sudo`, sending data with `curl`, and any command on no list | The command waits while **a reviewer**, or the orchestrator when no reviewer takes it, approves or denies it; once approved it runs, as if a person had clicked "allow". |
-| **3. Never** | `hive decide`, `hive admin` (commands that would act as you), pushing to `main` | Refused, with no way to approve. |
+| **3. Never** | `hive approve`, `hive decide`, `hive admin`, `hive agents`, … (commands that would act as you), pushing to `main` | Refused, with no way to approve. |
 
 The aim is to need as little human intervention as possible while staying safe: routine work
 never waits for anyone, dangerous and unknown commands wait for a reviewer or the
@@ -154,10 +154,13 @@ else to approve them.
 
 ## 3. Never: no approval possible
 
-- **Hive's own commands for you:** `hive decide`, `hive admin`, `hive start`, `hive say`,
-  `hive pause`, `hive resume`, `hive reset`, `hive init`, `hive join`, `hive up`. An agent
-  must never answer your questions ([decisions](GLOSSARY.md#decision)) or speak as you, even
-  on a computer where you're logged in as admin.
+- **Hive's own commands for you:** `hive decide`, `hive approve`, `hive reject`,
+  `hive answer`, `hive admin`, `hive login`, `hive agents`, `hive config`, `hive server`,
+  `hive start`, `hive say`, `hive pause`, `hive resume`, `hive reset`, `hive init`,
+  `hive join`, `hive up`, `hive chat`, `hive machines`, `hive plan`, `hive apply`, and
+  `hive watch` (agents never read each other's live
+  output). An agent must never answer your questions ([decisions](GLOSSARY.md#decision)),
+  speak as you or reconfigure Hive, even on a computer where you're logged in as admin.
 - **Pushing to `main`,** including `git push --all` and `--mirror`, which push every branch.
   Work reaches `main` only through `lease_release`.
 - Anything you add to `deny` ([below](#customising)).
@@ -202,7 +205,7 @@ in bash, PowerShell and cmd.exe alike:
   no network access. Commands in the *allowed* tier run outside the sandbox, as with the other
   CLIs. If an agent's work needs more, set its mode with
   `hive join … --permission-mode danger-full-access` (or `yolo`)
-  ([Setting up machines](MACHINES.md#join-each-slot-on-the-machine-that-will-run-it)).
+  ([Setting up machines](MACHINES.md#on-another-computer-without-pairing)).
 - Codex hooks can't ask a person for confirmation, so when the orchestrator runs on Codex, a
   dangerous command in the *approval* tier is refused with a note to ask you to run it
   yourself. The confirmation prompts in the `.rules` file only apply when the Hive daemon
@@ -233,8 +236,10 @@ in bash, PowerShell and cmd.exe alike:
 
 ## Customising
 
-Edit the `[permissions]` section of `hive.toml`, then re-run `hive init` (which regenerates
-the CLIs' permission files), commit, and push:
+Edit the `[permissions]` section of `hive.toml` (or use `hive config set permissions.allow
+…`), then commit and push. Each agent's next launch builds its CLI's permission files from
+it; you don't need to re-run `hive init`. (`hive.local.toml` changes them for the agents on
+one computer only.)
 
 ```toml
 [permissions]
@@ -258,7 +263,7 @@ deny = ["kubectl delete"]                       # extra commands agents may neve
   never-allowed, and the built-in dangerous commands always need approval, whatever the
   preset.
 
-`hive overview` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview))
+`hive doctor` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-doctor))
 shows the preset and how many entries each tier has, for the orchestrator and for workers.
 
 ---

@@ -109,30 +109,31 @@ vendor's terms for your own situation, for example how many accounts one person 
 
 A trial on one computer, with one orchestrator and one programmer. You need Hive
 ([installation](docs/INSTALLATION.md)), git, a repository you can push to, and Claude Code
-with two accounts. `<token>` is a password you make up for the server (the *admin token*);
-`~/code/myapp` stands for your repository's folder; `orch` and `dev` are names you choose for
-the two agents. Each `hive admin enroll` prints the agent's own token for the `hive join`
-line below it.
+with two accounts. `~/code/myapp` stands for your repository's folder.
 
 ```sh
-hive server --admin-token <token>                                 # 1. a local server
-hive admin login --server http://127.0.0.1:8765 --token <token>   # 2. in another terminal
+hive server                          # 1. a local server (keep this terminal open; it logs you in)
 
-cd ~/code/myapp && hive init                                      # 3. prepare the repository
-git add -A && git commit -m "Wire for Hive" && git push && hive admin push-config
+cd ~/code/myapp                      # 2. in another terminal, in your repository
+hive init
+git add hive.toml .hive .gitignore && git commit -m "Set up Hive" && git push
 
-hive admin enroll orch --vendor claude --roles orchestrator       # 4. two agents
-hive admin enroll dev  --vendor claude --roles programmer
-hive join orch --vendor claude --token <orch token> --repo ~/code/myapp
-hive join dev  --vendor claude --token <dev token>  --repo ~/code/myapp
-#   log each agent's account in once (hive join prints the command)
+hive agents add claude               # 3. the orchestrator (the first agent plans)
+hive agents add claude programmer    #    and a programmer; each offers to log its account in
 
-hive up                                                           # 5. the orchestrator opens here
-hive start "Add CSV export to the reports page"                   # 6. in another terminal
-hive decide 1 approve                                             #    approve the plan
+hive up                              # 4. runs the agents (the orchestrator opens here)
+hive                                 # 5. in another terminal: the chat with the team.
+                                     #    Type the goal; approve the plan with y.
 ```
 
+`hive` on its own always knows what's next: until the team is set up it shows the one next
+step, then it is the chat. The same works as single commands
+(`hive start "…"`, `hive approve`), and the chat's slash commands are those commands.
+`hive help` lists the common commands; every older, more precise command still works
+(`hive help --all`).
+
 ➜ Step by step, with what each step does: [Getting started](docs/GETTING_STARTED.md).
+The design of this interface: [CLI_REDESIGN.md](docs/CLI_REDESIGN.md).
 
 ---
 
@@ -154,7 +155,7 @@ hive decide 1 approve                                             #    approve t
 | [Running the server](docs/SERVER.md) | The admin token and database, running locally, and logging in as admin. |
 | [Deploying the server](docs/DEPLOYMENT.md) | Hosting on PythonAnywhere or a VPS: capacity planning with measured numbers, upgrades, backups, monitoring and hardening. |
 | [Several projects on one server](docs/PROJECTS.md) | Hosting several repositories and fleets on one server, each with its own database and admin token. |
-| [Preparing the repository](docs/REPOSITORY.md) | What `hive init` creates and why it doesn't affect your own CLI sessions; checking everything with `hive overview`. |
+| [Preparing the repository](docs/REPOSITORY.md) | What `hive init` creates and why it doesn't affect your own CLI sessions; checking everything with `hive doctor`. |
 | [Enrolling agents and setting up machines](docs/MACHINES.md) | Creating agents, adding them to computers as *slots* (an agent's own working folder and account), and logging their accounts in. |
 
 ### Running a fleet
@@ -209,6 +210,6 @@ real CLI. Some integration points haven't yet been exercised with live, logged-i
 
 Contributions are welcome. If something doesn't work as described, or you have an idea,
 please [open an issue](https://github.com/themostvexingparse/hive/issues): include what you
-ran, what you expected, and what happened instead (`hive overview` output helps). Pull
+ran, what you expected, and what happened instead (`hive doctor` output helps). Pull
 requests are welcome too; [Development](docs/DEVELOPMENT.md) explains how to run the tests
 and where things live in the source.

@@ -25,7 +25,7 @@ IMMEDIATE_WAKE_EVENTS = (
     "user.message", "decision.answered", "task.completed", "task.failed", "task.blocked",
     "agent.stuck", "review.verdict", "agent.quota_exhausted", "agent.offline", "lease.expired",
     "merge.conflict", "fleet.started", "orchestrator.failover", "report.submitted",
-    "approval.requested",
+    "approval.requested", "agent.removed",
 )
 
 

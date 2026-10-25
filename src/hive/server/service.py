@@ -26,8 +26,20 @@ from ..config import VENDORS
 from ..roles import RoleSet, load_roles, resolve_kind, role_set, validate_assignment, validate_fleet
 from . import db
 from .archives import FORMAT as ARCHIVE_FORMAT, VERSION as ARCHIVE_VERSION, ArchiveStore, default_dir
-from .db import (agents, approvals, decisions, events, fleet, integrations, leases, messages,
-                 receipts, reports, status_feed, streams, tasks)
+from .db import (agents, approvals, decisions, events, fleet, integrations, leases, machines,
+                 messages, pairing_codes, placements, receipts, reports, status_feed, streams,
+                 tasks)
+
+# Pairing codes: 8 characters people can read out and type (no 0/O, 1/I/L), single use.
+CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+PAIRING_SECONDS = 15 * 60
+
+
+def _norm_code(code: str) -> str:
+    """Short codes are typed by people: case and dashes don't matter. Join keys (hk_…) are
+    copied whole and compared exactly."""
+    code = (code or "").strip()
+    return code if code.startswith("hk_") else re.sub(r"[^A-Z0-9]", "", code.upper())
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 RESERVED = {"user", "system", "admin"}
@@ -242,11 +254,72 @@ class Hive:
                       .values(token_hash=hash_token(token)))
         return {"name": name, "token": token}
 
+    def remove_agent(self, actor: Actor, name: str) -> dict:
+        """Delete an agent: its token stops working, its unfinished tasks (review included) go
+        back on the board, reviews it was picked for go to another reviewer, its leases are
+        revoked and its pending approvals and merges cancelled, and the orchestrator is told.
+        History (messages, reports, status) keeps its name."""
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._write() as c:
+            f = self._fleet(c)
+            self._agent(c, name)
+            if f["orchestrator"] == name and f["state"] != "setup":
+                raise ApiError(409, "is_orchestrator",
+                               f"{name} is the fleet's orchestrator; give another agent the "
+                               "orchestrator role first, or end the run (dashboard → Archives)")
+            requeued = [r.id for r in c.execute(select(tasks.c.id).where(and_(
+                tasks.c.assignee == name,
+                tasks.c.state.in_(ACTIVE_TASK_STATES + ("review",)))))]
+            if requeued:
+                # Work waiting for review is lost with its leases: it starts again.
+                c.execute(update(tasks).where(tasks.c.id.in_(requeued))
+                          .values(assignee=None, state="open", reviewer=None, pending_sha=None,
+                                  approved=False, updated=now()))
+            revoked = [r.id for r in c.execute(select(leases.c.id).where(and_(
+                leases.c.holder == name, leases.c.state == "active")))]
+            if revoked:
+                c.execute(update(leases).where(leases.c.id.in_(revoked)).values(state="revoked"))
+                self._set_fleet(c, fencing_counter=f["fencing_counter"] + 1)
+            cancelled = [r.id for r in c.execute(select(approvals.c.id).where(and_(
+                approvals.c.agent == name, approvals.c.state.in_(("requested", "approved")))))]
+            if cancelled:
+                c.execute(update(approvals).where(approvals.c.id.in_(cancelled)).values(
+                    state="denied", decided_by=actor.name, decided_at=now(),
+                    note=f"{name} was removed"))
+            c.execute(update(integrations).where(and_(
+                integrations.c.agent == name, integrations.c.state == "granted"))
+                .values(state="cancelled"))
+            c.execute(agents.delete().where(agents.c.name == name))
+            c.execute(receipts.delete().where(receipts.c.agent == name))
+            c.execute(placements.delete().where(placements.c.agent == name))
+            if f["orchestrator"] == name:
+                self._set_fleet(c, orchestrator=None)
+                f = self._fleet(c)
+            # Reviews it was picked for: someone else reviews (the agent is gone from the pool).
+            reassigned = {}
+            for t in c.execute(select(tasks).where(and_(
+                    tasks.c.reviewer == name, tasks.c.state == "review"))).fetchall():
+                t = row(t)
+                reviewer = self._pick_reviewer(c, f, t)
+                c.execute(update(tasks).where(tasks.c.id == t["id"]).values(
+                    reviewer=reviewer, updated=now()))
+                reassigned[t["id"]] = reviewer
+                self._emit(c, "review.requested", actor.name, "*", id=t["id"],
+                           title=t["title"], reviewer=reviewer, sha=t["pending_sha"],
+                           branch=t["branch"], assignee=t["assignee"])
+            self._emit(c, "agent.removed", actor.name, name=name, requeued=requeued,
+                       revoked=revoked, reviews=reassigned, approvals=cancelled)
+            self._schedule(c, self._fleet(c))
+        return {"name": name, "requeued": requeued, "revoked": revoked,
+                "reviews": reassigned, "approvals": cancelled}
+
     def roster(self) -> list[dict]:
         with self._read() as c:
             rows = c.execute(select(agents).order_by(agents.c.name)).fetchall()
             busy = {r.assignee for r in c.execute(
                 select(tasks.c.assignee).where(tasks.c.state.in_(ACTIVE_TASK_STATES)))}
+            placed = {p.agent: row(p) for p in c.execute(select(placements))}
         t = now()
         out = []
         for r in rows:
@@ -255,8 +328,205 @@ class Hive:
             d["online"] = t - d["last_seen"] < self.offline_after
             d["exhausted"] = d["quota_until"] > t
             d["has_task"] = d["name"] in busy
+            p = placed.get(d["name"])
+            d["machine"] = p["machine"] if p else None
+            d["claimed"] = bool(p and p["claimed"])
+            d["placement"] = {"model": p["model"], "permission_mode": p["permission_mode"]} \
+                if p else None
             out.append(d)
         return out
+
+    # ------------------------------------------------------------------ machines
+
+    def create_pairing_code(self, actor: Actor, reusable: bool = False, days: float = 0,
+                            label: str = "") -> dict:
+        """A short single-use code another computer redeems with `hive join CODE`; or, with
+        `reusable`, a join key (hk_…) for scripts that pair many computers, valid `days`."""
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        if reusable:
+            if not 0 < days <= 365:
+                raise ApiError(400, "bad_arg", "a join key lasts 1 to 365 days")
+            code, ttl = "hk_" + secrets.token_urlsafe(24), days * 86400
+        else:
+            code = "-".join("".join(secrets.choice(CODE_ALPHABET) for _ in range(4))
+                            for _ in range(2))
+            ttl = PAIRING_SECONDS
+        with self._write() as c:
+            c.execute(pairing_codes.delete().where(pairing_codes.c.expires < now()))
+            c.execute(insert(pairing_codes).values(
+                code_hash=hash_token(_norm_code(code)), expires=now() + ttl,
+                reusable=reusable, label=(label or "")[:64], created=now(), uses=0))
+        return {"code": code, "expires_in": int(ttl), "reusable": reusable}
+
+    def list_join_keys(self, actor: Actor) -> list[dict]:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._read() as c:
+            rows = c.execute(select(pairing_codes).where(and_(
+                pairing_codes.c.reusable.is_(True), pairing_codes.c.expires >= now()))
+                .order_by(pairing_codes.c.created)).fetchall()
+        return [{"id": r.code_hash[:10], "label": r.label, "created": r.created,
+                 "expires": r.expires, "uses": r.uses} for r in rows]
+
+    def revoke_join_key(self, actor: Actor, key_id: str) -> dict:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        if not re.fullmatch(r"[0-9a-f]{6,64}", key_id or ""):
+            raise ApiError(400, "bad_arg", "a key id is the hex id `hive machines keys` shows")
+        with self._write() as c:
+            n = c.execute(pairing_codes.delete().where(and_(
+                pairing_codes.c.reusable.is_(True),
+                pairing_codes.c.code_hash.like(key_id + "%")))).rowcount
+        if not n:
+            raise ApiError(404, "no_such_key", f"no join key {key_id}")
+        return {"revoked": key_id}
+
+    def pair_machine(self, code: str, name: str, os_name: str = "",
+                     clis: list[str] | None = None) -> dict:
+        """Redeem a pairing code: the computer becomes a machine of this project, named `name`
+        (or, if taken, `name-2`, …), and gets the token its daemon uses from then on."""
+        base = re.sub(r"[^a-z0-9-]+", "-", (name or "").lower()).strip("-")[:28] or "machine"
+        if not base[0].isalpha():
+            base = "m-" + base[:26]
+        if len(base) < 2:
+            base += "-1"
+        token = "hm_" + secrets.token_urlsafe(32)
+        with self._write() as c:
+            self._fleet(c)  # serializes with every other write (a row lock off SQLite)
+            h = hash_token(_norm_code(code))
+            hit = c.execute(select(pairing_codes).where(pairing_codes.c.code_hash == h)).first()
+            if hit is None or hit.expires < now():
+                raise ApiError(403, "bad_code", "that code isn't valid (each works once, for "
+                               f"{PAIRING_SECONDS // 60} minutes; join keys until they expire "
+                               "or are revoked); ask for a new one with `hive machines invite`")
+            if hit.reusable:
+                c.execute(update(pairing_codes).where(pairing_codes.c.code_hash == h)
+                          .values(uses=pairing_codes.c.uses + 1))
+            elif c.execute(pairing_codes.delete().where(
+                    pairing_codes.c.code_hash == h)).rowcount != 1:
+                # Another request redeemed this single-use code first.
+                raise ApiError(403, "bad_code", "that code was just used; ask for a new one "
+                               "with `hive machines invite`")
+            taken = {r.name for r in c.execute(select(machines.c.name))}
+            final, n = base, 2
+            while final in taken:
+                final, n = f"{base[:28]}-{n}", n + 1
+            c.execute(insert(machines).values(name=final, token_hash=hash_token(token),
+                                              os=(os_name or "")[:32],
+                                              clis=[v for v in clis or [] if v in VENDORS],
+                                              created=now(), last_seen=now()))
+            self._emit(c, "machine.paired", "user", name=final)
+        return {"name": final, "token": token}
+
+    def authenticate_machine(self, token: str) -> Actor:
+        with self._read() as c:
+            m = c.execute(select(machines.c.name).where(
+                machines.c.token_hash == hash_token(token))).first()
+        if m is None:
+            raise ApiError(401, "bad_token", "unknown machine token (was it removed with "
+                                             "`hive machines rm`?)")
+        return Actor("machine", m.name, [])
+
+    def list_machines(self, actor: Actor) -> list[dict]:
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._read() as c:
+            ms = c.execute(select(machines).order_by(machines.c.name)).fetchall()
+            ps = c.execute(select(placements).order_by(placements.c.agent)).fetchall()
+        t = now()
+        out = []
+        for m in ms:
+            d = row(m)
+            d.pop("token_hash")
+            d["online"] = t - d["last_seen"] < self.offline_after
+            d["agents"] = [p.agent for p in ps if p.machine == m.name]
+            out.append(d)
+        return out
+
+    def remove_machine(self, actor: Actor, name: str) -> dict:
+        """Unpair: its token stops working, and so do the tokens of the agents it ran (each
+        gets one nobody knows), so the computer is cut off entirely. The agents stay,
+        unplaced: placing them elsewhere gives them working tokens again."""
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._write() as c:
+            self._fleet(c)  # serializes with every other write
+            if not c.execute(select(machines.c.name).where(machines.c.name == name)).first():
+                raise ApiError(404, "no_such_machine", f"no machine named {name!r}")
+            agents_there = [p.agent for p in c.execute(
+                select(placements.c.agent).where(placements.c.machine == name))]
+            for agent in agents_there:
+                c.execute(update(agents).where(agents.c.name == agent).values(
+                    token_hash=hash_token("hv_" + secrets.token_urlsafe(32))))
+            c.execute(placements.delete().where(placements.c.machine == name))
+            c.execute(machines.delete().where(machines.c.name == name))
+            self._emit(c, "machine.removed", actor.name, name=name, agents=agents_there)
+        return {"name": name, "unplaced": agents_there}
+
+    def place_agent(self, actor: Actor, agent: str, machine: str | None, model: str = "",
+                    permission_mode: str = "") -> dict:
+        """Run `agent` on `machine` (None: on no paired machine), with those slot settings.
+        Its daemon picks it up and takes a fresh token, so the token of a previous home stops
+        working. Re-placing it on the same machine only changes the settings."""
+        if not actor.is_admin:
+            raise ApiError(403, "forbidden", "admin only")
+        with self._write() as c:
+            self._fleet(c)  # serializes with every other write
+            self._agent(c, agent)
+            old = c.execute(select(placements).where(placements.c.agent == agent)).first()
+            if machine and old is not None and old.machine == machine:
+                c.execute(update(placements).where(placements.c.agent == agent).values(
+                    model=model or "", permission_mode=permission_mode or ""))
+                return {"agent": agent, "machine": machine}
+            c.execute(placements.delete().where(placements.c.agent == agent))
+            if machine:
+                if not c.execute(select(machines.c.name).where(machines.c.name == machine)
+                                 ).first():
+                    raise ApiError(404, "no_such_machine",
+                                   f"no machine named {machine!r}; `hive machines` lists them")
+                c.execute(insert(placements).values(agent=agent, machine=machine, claimed=0.0,
+                                                    model=model or "",
+                                                    permission_mode=permission_mode or ""))
+            self._emit(c, "agent.placed", actor.name, name=agent, machine=machine)
+        return {"agent": agent, "machine": machine}
+
+    def machine_placements(self, actor: Actor, os_name: str | None = None,
+                           clis: list[str] | None = None) -> list[dict]:
+        """For a machine's daemon: the agents placed on it. Doubles as its heartbeat."""
+        if actor.kind != "machine":
+            raise ApiError(403, "forbidden", "machine token required")
+        with self._write() as c:
+            values = {"last_seen": now()}
+            if os_name is not None:
+                values["os"] = os_name[:32]
+            if clis is not None:
+                values["clis"] = [v for v in clis if v in VENDORS]
+            c.execute(update(machines).where(machines.c.name == actor.name).values(**values))
+            rows = c.execute(select(placements, agents.c.vendor, agents.c.roles).join(
+                agents, agents.c.name == placements.c.agent).where(
+                placements.c.machine == actor.name).order_by(placements.c.agent)).fetchall()
+        return [{"agent": r.agent, "vendor": r.vendor, "roles": list(r.roles),
+                 "claimed": bool(r.claimed), "model": r.model,
+                 "permission_mode": r.permission_mode} for r in rows]
+
+    def claim_agent(self, actor: Actor, agent: str) -> dict:
+        """A machine takes an agent placed on it: a new token, which only it ever sees."""
+        if actor.kind != "machine":
+            raise ApiError(403, "forbidden", "machine token required")
+        token = "hv_" + secrets.token_urlsafe(32)
+        with self._write() as c:
+            self._fleet(c)  # serializes with every other write
+            p = c.execute(select(placements).where(placements.c.agent == agent)).first()
+            if p is None or p.machine != actor.name:
+                raise ApiError(403, "not_placed_here", f"{agent} isn't placed on {actor.name}")
+            a = self._agent(c, agent)
+            c.execute(update(agents).where(agents.c.name == agent)
+                      .values(token_hash=hash_token(token)))
+            c.execute(update(placements).where(placements.c.agent == agent)
+                      .values(claimed=now()))
+        return {"name": agent, "vendor": a["vendor"], "roles": list(a["roles"]),
+                "token": token}
 
     def whoami(self, actor: Actor) -> dict:
         with self._read() as c:

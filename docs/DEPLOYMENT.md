@@ -326,7 +326,7 @@ curl https://USER.pythonanywhere.com/api/v1/health          # → {"ok": true}
 
 - Open `https://USER.pythonanywhere.com/` and enter the admin token: the dashboard should load
   with fleet state `setup` (no goal given yet).
-- On your computer: `hive admin login --server https://USER.pythonanywhere.com --token <token>`.
+- On your computer: `hive login --server https://USER.pythonanywhere.com --token <token>`.
 
 **If anything fails:** read the **error log**, linked on the Web tab
 (`/var/log/USER.pythonanywhere.com.error.log`). §14 lists common causes.
@@ -597,7 +597,7 @@ agent takes over from the orchestrator) is not server configuration. It comes fr
 ## 8. After deploying: first-time checklist
 
 1. `curl https://<server>/api/v1/health` returns `{"ok": true}`.
-2. `hive admin login --server https://<server> --token <token>` on your computer.
+2. `hive login --server https://<server> --token <token>` on your computer.
 3. `hive status` shows fleet `setup` and no agents.
 4. In your repository: `hive init`, commit and push, then `hive admin push-config`
    ([Preparing the repository](REPOSITORY.md)).
@@ -616,9 +616,10 @@ agent takes over from the orchestrator) is not server configuration. It comes fr
    - **VPS:** `pip install --upgrade` as the `hive` user into `/srv/hive/venv`, then
      `sudo systemctl restart hive`.
 2. **Update the agents' computers too.** They and the server should run the same Hive
-   version: `uv tool install --force /path/to/hive` on each, then re-run `hive init` in the
-   repository and commit the regenerated files in `.hive/agent/` (the *bundles*:
-   [Preparing the repository](REPOSITORY.md)).
+   version: `uv tool install --force /path/to/hive` on each. Agents' bundles are generated
+   at each launch, so there is nothing to regenerate; re-run `hive init` and commit
+   `.hive/agent/` only if some computers stay on an older Hive
+   ([Preparing the repository](REPOSITORY.md)).
    - **This release requires it.** When an agent's work is merged into `main`, the daemon now
      needs a one-time permission from the server
      ([What `lease_release` does](INTEGRATION.md#what-lease_releasecommit_message-task_id-does)).
@@ -763,11 +764,10 @@ orchestrator might still be referring to.
     admin commands;
   - never on computers that only run agents, unless you also work there.
 - **Rotating tokens:**
-  - **Admin:** change `HIVE_ADMIN_TOKEN` and reload; then `hive admin login` again.
-  - **Agent:** have the server issue a new token by sending `POST /api/v1/agents/<name>/token`
-    with the admin token ([CLI.md §13](CLI.md#13-common-recipes) has the `curl` command), then
-    re-run `hive join` with it, or update that agent's `token` in `~/.hive/machine.toml` on
-    the computer that runs it.
+  - **Admin:** change `HIVE_ADMIN_TOKEN` and reload; then `hive login` again.
+  - **Agent:** `hive agents rotate NAME` ([CLI.md §14](CLI.md#14-common-recipes)). An agent
+    set up on your computer is updated at once; a paired computer takes the new token by
+    itself within a minute; for any other, run the `hive join` line it prints there.
 - **Live output contains whatever agents print**, including file contents they read. It's
   readable only with the admin token, but it sits in your database: keep real credentials out
   of the repository and prune streams if needed (`DELETE FROM streams WHERE agent = '…';`).
@@ -790,7 +790,7 @@ orchestrator might still be referring to.
 | SQLite stays locked permanently on PythonAnywhere | A stale lock on the network filesystem. Reload the web app. If that doesn't help, contact PythonAnywhere support, or restore the latest `hive admin backup` to a new file path and point `HIVE_DATABASE_URL` at it. |
 | `disk I/O error` / `database disk image is malformed` (SQLite) | Usually WAL on a network filesystem: set `HIVE_SQLITE_JOURNAL=delete`. Restore from a backup if the file is damaged. |
 | Agents get `401 bad_token` | Wrong agent token in `~/.hive/machine.toml`, or one that was since replaced, or the server's database was replaced. |
-| `hive admin login` fails with 403 | The token isn't the admin token configured on the server. |
+| `hive login` fails with 403 | The token isn't the admin token configured on the server. |
 | Dashboard loads but stays empty / asks for the token again | The admin token was mistyped; clear it via the browser's site data and re-enter it. |
 | Requests slow down over months | The maintenance tick reads all tasks (§3.4); prune finished tasks (§11). |
 | Disk quota warnings on PythonAnywhere | Database growth (§3), old `mysqldump` files, or rotated access logs. Prune (§11) and delete old archives. |

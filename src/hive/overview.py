@@ -18,7 +18,8 @@ import requests
 
 from . import __version__, permissions, prompts, ui
 from .config import (find_repo_root, hive_home, load_admin_config, load_machine_config,
-                     load_repo_config, machine_config_path)
+                     load_repo_config, load_shared_config, machine_config_path,
+                     tracked_local_config)
 from .roles import BUILTIN_ROLES, load_roles
 
 TIMEOUT = 5
@@ -31,6 +32,15 @@ def _git(cwd: Path, *args: str) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def _toml_section(root: Path, section: str) -> dict | None:
+    """One section of hive.toml itself (not merged with the other layers)."""
+    import tomllib
+    try:
+        return tomllib.loads((root / "hive.toml").read_text("utf-8")).get(section)
+    except (OSError, ValueError):
+        return None
 
 
 def _common_dir(path: Path) -> Path | None:
@@ -96,6 +106,9 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
     if not ignored:
         _problem(problems, ".hive/orchestrator/ isn't in .gitignore, so the orchestrator's "
                            "private memory could be committed.", "hive init")
+    # Each launch generates its agent's bundle (wake.refresh_bundle), so the committed copy in
+    # .hive/agent/ is only read by older Hive versions, or if generating fails: its drift is
+    # shown, not a problem. A bundle that can't be generated is.
     if info["bundles"]:
         try:
             plugin = json.loads((root / ".hive/agent/claude/.claude-plugin/plugin.json")
@@ -103,21 +116,29 @@ def _repo(root: Path, cfg: dict, problems: list) -> dict:
             info["bundle_version"] = plugin.get("version")
         except (OSError, ValueError):
             pass
-        try:
-            info["drift"] = bundle_drift(root, cfg)
-        except (prompts.PromptError, ValueError) as e:
-            info["drift"] = []
-            _problem(problems, f"The agent bundles can't be generated: {e}")
-        if info["drift"]:
-            why = (f"made by Hive {info['bundle_version']}, this is {__version__}"
-                   if info["bundle_version"] != __version__
-                   else "hive.toml [permissions] or .hive/prompts/ changed since")
-            _problem(problems, f"The agent bundles in .hive/agent/ are out of date ({why}; "
-                               f"{len(info['drift'])} file(s) differ).",
-                     "hive init, then commit and push .hive/agent/")
-    else:
-        _problem(problems, "No agent bundles (.hive/agent/): agents launched here would get no "
-                           "Hive tools or skills.", "hive init")
+    try:
+        # The committed copy holds the fleet's settings, never this computer's own.
+        info["drift"] = bundle_drift(root, load_shared_config(root)) if info["bundles"] else []
+    except (prompts.PromptError, ValueError) as e:
+        info["drift"] = []
+        _problem(problems, f"Hive can't build the agents' files from hive.toml and "
+                           f".hive/prompts/: {e}. Launches fall back to the committed "
+                           ".hive/agent/ copy.", "fix the file named above")
+    toml_hooks = {k: v for k, v in (_toml_section(root, "hooks") or {}).items() if v}
+    if toml_hooks:
+        _problem(problems, f"hive.toml sets [hooks] ({', '.join(sorted(toml_hooks))}), which Hive "
+                           "ignores there: a committed file must not run commands on every "
+                           "computer.", "move them to hive.local.toml: hive config set "
+                           f"hooks.{sorted(toml_hooks)[0]} \"…\" --local")
+    tracked = tracked_local_config(root)
+    if tracked:
+        _problem(problems, f"{tracked.name} is committed to git, so Hive ignores it: it holds "
+                           "one computer's own settings (and hooks), which a repository must "
+                           "not set for everyone.", f"git rm --cached {tracked.name}")
+    if info["drift"]:
+        info["drift_why"] = (f"made by Hive {info['bundle_version']}, this is {__version__}"
+                             if info["bundle_version"] != __version__
+                             else "hive.toml [permissions] or .hive/prompts/ changed since")
     return info
 
 
@@ -222,7 +243,7 @@ def _machine(root: Path, offline: bool, problems: list) -> dict:
                                f"hive/{s.name}.")
         if not row["account_used"]:
             _problem(problems, f"Slot {s.name}'s account folder is empty: its CLI has probably "
-                               "never been logged in.", f"hive chat {s.name}")
+                               "never been logged in.", f"hive agents login {s.name}")
     urls = list(dict.fromkeys(r["server_url"].rstrip("/") for r in info["slots"]))
     if urls:
         info["server_url"] = urls[0]
@@ -265,7 +286,7 @@ def _server(root: Path, cfg: dict, machine: dict, roles: dict, offline: bool,
     if agents_url and admin_url and not _same(agents_url, admin_url):
         _problem(problems, f"This project's agents here use {agents_url}, but your admin "
                            f"commands use {admin_url}: they manage different fleets.",
-                 f"hive admin login --server {agents_url} --token <admin token>")
+                 f"hive login --server {agents_url}")
     if toml_url and url and not _same(toml_url, url):
         _problem(problems, f"hive.toml's [server] url ({toml_url}) is out of date; this project "
                            f"uses {url}. It tells people setting up new machines where the "
@@ -306,7 +327,7 @@ def _server(root: Path, cfg: dict, machine: dict, roles: dict, offline: bool,
     if info["fleet"].get("review") not in (None, local_review):
         _problem(problems, f"The server's review policy ({info['fleet']['review']}) differs "
                            f"from hive.toml ({local_review}): the uploaded config is stale.",
-                 "hive admin push-config")
+                 "hive status  (any admin command uploads a changed hive.toml)")
     enrolled = {a["name"] for a in info["agents"]}
     for s in machine["slots"]:
         if s["name"] not in enrolled:
@@ -354,12 +375,11 @@ def render(d: dict) -> None:
                             "other": ui.state("pending", label="another hook is installed"),
                             "missing": ui.dim("not installed (hive join installs it)")}
             [repo["hook"]]),
-           ("agent bundles", (ui.state("ok", label="up to date") if repo["bundles"]
-                              and not repo["drift"] else
-                              ui.state("pending", label=f"{len(repo['drift'])} file(s) out of "
-                                       "date") if repo["bundles"] else
-                              ui.state("failed", label="missing"))
-            + (ui.dim(f"  (Hive {repo['bundle_version']}, calls `{repo['bundle_hive_cmd']}`)")
+           ("agent bundles", ui.state("ok", label="generated at each launch")
+            + (ui.dim(f"  (committed .hive/agent/: {len(repo['drift'])} file(s) older, "
+                      f"{repo['drift_why']}; only older Hive versions read it)")
+               if repo["drift"] else
+               ui.dim(f"  (committed .hive/agent/ from Hive {repo['bundle_version']} matches)")
                if repo["bundles"] else ""))])
 
     ui.section("Configuration", ui.dim("hive.toml"))

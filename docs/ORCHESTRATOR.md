@@ -14,6 +14,18 @@ can't do.
 
 ---
 
+## Chatting in the Hive chat (`hive`)
+
+Run `hive` in a terminal (or `hive chat`): once the team exists and runs, it opens a chat with
+the orchestrator, wherever the orchestrator runs ([CLI.md §9](CLI.md#hive-the-chat-with-the-team)).
+What you type goes to it in `#user`; its replies, its status updates and the fleet's state
+appear as they happen; a decision appears as a prompt (`y` approves, `n` sends it back), which
+Hive answers on your keypress. Slash commands are the `hive` commands (`/agents add codex`,
+`/status`, `/watch claude-2`). This works the same with a headless orchestrator
+(`hive up --headless`), which never needs its own terminal.
+
+---
+
 ## Chatting in its terminal
 
 On the computer that hosts the orchestrator, `hive up` opens its CLI in your terminal. That
@@ -46,14 +58,12 @@ It then returns a summary (*digest*) of what happened. See
 
 - **Dashboard:** the *Orchestrator* panel ([The web dashboard](MONITORING.md#the-web-dashboard)).
 - **CLI:** `hive say "Prioritise the API before the UI"` from any computer where you've run
-  `hive admin login` ([Log in as admin](SERVER.md#log-in-as-admin)).
+  `hive login` ([Log in as admin](SERVER.md#log-in-as-admin)).
 
 Both post to the `#user` channel, the message channel between you and the orchestrator
 ([Messages](COORDINATION.md#messages-and-priorities)). That **ends the orchestrator's wait
-within seconds**, and your message is in the digest it receives.
-
-**Caveat:** its replies may appear only in its terminal. The skill doesn't yet tell it to
-answer `#user` messages in `#user` ([Known limitations](LIMITATIONS.md)).
+within seconds**, and your message is in the digest it receives. Its skill tells it to answer
+`#user` messages in `#user`, where the chat and the dashboard show them.
 
 ---
 
@@ -74,8 +84,9 @@ Ways to answer (in these examples, `3` is the decision's number, shown by `hive 
 
 | Where | How |
 |---|---|
-| Orchestrator's terminal | `! hive decide 3 approve` (the `!` prefix runs a shell command in Claude Code and Gemini CLI) |
-| Any terminal where you're logged in as admin | `hive decisions` to read; `hive decide 3 approve --note "keep it small"` to answer |
+| The chat (`hive`) | the decision appears as a prompt: `y` approves, `n` sends it back with a note, `/answer …` answers other questions |
+| Orchestrator's terminal | `! hive approve` (the `!` prefix runs a shell command in Claude Code and Gemini CLI) |
+| Any terminal where you're logged in as admin | `hive decisions` to read; `hive approve`, `hive reject "keep it small"` or `hive answer "…"` (with the number when several are open) |
 | Dashboard | the *Decisions* panel: option buttons plus a note field |
 
 The answer can be one of the offered options or any text. The note is passed to the

@@ -37,16 +37,15 @@ They live in the `.hive/prompts/` folder of the repository, which `hive init` cr
 
 | File | Added to | When it takes effect |
 |---|---|---|
-| `orchestrator.md` | The end of the orchestrator's skill (`hive-orchestrator`), under a heading **Project rules** | After you re-run `hive init` and commit the regenerated `.hive/agent/` folder |
-| `worker.md` | The end of every other agent's skill (`hive-worker`), under **Project rules** | After you re-run `hive init` and commit the regenerated `.hive/agent/` |
+| `orchestrator.md` | The end of the orchestrator's skill (`hive-orchestrator`), under a heading **Project rules** | Once the file is on `main`; the agent's next launch builds it into its skill |
+| `worker.md` | The end of every other agent's skill (`hive-worker`), under **Project rules** | Once the file is on `main`; the agent's next launch builds it into its skill |
 | `roles/<role>.md`, e.g. `roles/reviewer.md` | The start of every session (conversation) of an agent holding that role, after the role's `prompt` from `hive.toml`. Works for built-in roles (`orchestrator`, `programmer`, `reviewer`, …) and your own. | Once the file is on `main`; each agent reads it from its own working folder of the repository when a session starts |
 
-The difference in timing comes from where the text goes. `orchestrator.md` and `worker.md`
-are built into the skills inside `.hive/agent/` (the
-[bundles](GLOSSARY.md#bundle-plugin-extension-profile) `hive init` generates for each CLI), so
-they need `hive init` to rebuild the bundles. Role files are read at the start of each
-session, so they only need to reach the repository's `main` branch, where agents pick them
-up.
+`orchestrator.md` and `worker.md` are built into the skills of the
+[bundle](GLOSSARY.md#bundle-plugin-extension-profile) Hive attaches to each session, which it
+generates at every launch from the agent's own working folder. Role files are read at the
+start of each session. Either way, a change only needs to reach the repository's `main`
+branch, where agents pick it up; you don't need to re-run `hive init`.
 
 ### Starter files
 
@@ -118,8 +117,7 @@ silently.
 `hive prompts`, run in the repository, shows what an agent with the given roles receives:
 its skill's project rules, the role prompts from `hive.toml` and your role files, with
 comments removed and placeholders filled. Files with only comments are reported as adding
-nothing. It also warns when the committed bundles are older than your files (meaning you
-need to re-run `hive init`).
+nothing.
 
 ```sh
 hive prompts --role orchestrator                   # --full also prints the built-in skill

@@ -42,7 +42,7 @@ goal into the [dashboard](MONITORING.md#the-web-dashboard) while the fleet is in
 
 **Startup checks.** The fleet won't start unless:
 - exactly 1 orchestrator and at least 1 programmer (an agent that writes code) have been
-  created with `hive admin enroll` ([Enrolling agents](MACHINES.md));
+  created with `hive agents add` ([Adding agents](MACHINES.md));
 - every role has an allowed number of agents (a role can set a minimum and maximum);
 - every kind of task (`code`, `test`, `review`, …) has some agent whose role takes it
   ([Roles](ROLES.md)).
@@ -70,7 +70,7 @@ In `planning`:
 
 Read the plan with `hive decisions` or in the dashboard's *Decisions* panel. Your answer
 (`<id>` is the decision's number, shown by `hive decisions`):
-- **`hive decide <id> approve`:** all drafts become open (ready to be worked on), the fleet
+- **`hive approve`** (in the chat: `y`): all drafts become open (ready to be worked on), the fleet
   enters **running**, and the server immediately hands the tasks to suitable agents.
 - **Anything else (e.g. `reject --note "…"`):** the fleet goes back to **planning**. The
   orchestrator gets your note and revises.
@@ -93,8 +93,8 @@ Read the plan with `hive decisions` or in the dashboard's *Decisions* panel. You
      claims, and attempts to merge work into `main`.
    - **Lease clocks:** leases normally expire after a while; while frozen, their clocks pause.
      When the fleet thaws, every active lease is extended by the time it was frozen.
-4. You answer with `hive decide <id> "<your answer>" --note "…"` (any text, plus an optional
-   note), or in the dashboard. Then:
+4. You answer in the chat (`hive`), with `hive answer "<your answer>"` (or
+   `hive approve` / `hive reject "<note>"` for a yes/no question), or in the dashboard. Then:
    1. the fleet returns to **running**;
    2. the stuck task goes back to `in_progress`;
    3. agents that had open tasks are woken with your answer.

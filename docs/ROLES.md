@@ -8,8 +8,8 @@ role says what an agent is allowed to do and what it is expected to do:
   `test`, `docs`, `review` or `plan`;
 - in which [fleet states](LIFECYCLE.md) (phases such as `planning` or `running`) it may work.
 
-You give each agent its roles when you create it with `hive admin enroll`
-([Enrolling agents](MACHINES.md#enroll-each-agent-on-your-computer)). The Hive server uses
+You give each agent its roles when you create it with `hive agents add`
+([Enrolling agents](MACHINES.md#on-this-computer)). The Hive server uses
 roles to assign tasks and to refuse anything an agent's roles don't allow.
 
 Hive comes with five built-in roles. You can change them, or add your own, in `hive.toml`,
@@ -58,8 +58,7 @@ start is one orchestrator and one programmer.
 ## Custom roles and overrides
 
 Define roles in `hive.toml`, in a section called `[roles.<name>]` (for a role called
-`docs-writer`, `[roles.docs-writer]`), then upload the settings to the server with
-`hive admin push-config`. A role you define yourself starts with only the tools every agent
+`docs-writer`, `[roles.docs-writer]`), then commit it (admin commands run in the repository upload it to the server). A role you define yourself starts with only the tools every agent
 has: it can't edit files and takes no tasks. Give it what it needs with these fields:
 
 | Field | Type | Meaning |
@@ -95,8 +94,8 @@ Built-in roles can be overridden the same way, e.g. `[roles.reviewer] prompt = "
 write longer instructions than fit in `hive.toml`, use `.hive/prompts/roles/<role>.md`
 ([Customising what agents are told](PROMPTS.md)).
 
-`hive overview` lists every role, where its definition and prompt come from, and any errors
-in `[roles]` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-overview)).
+`hive doctor` lists every role, where its definition and prompt come from, and any errors
+in `[roles]` ([Checking a project's setup](REPOSITORY.md#checking-a-projects-setup-hive-doctor)).
 
 ---
 

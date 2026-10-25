@@ -28,7 +28,7 @@ import tomli_w
 
 from . import __version__, permissions
 from . import prompts
-from .config import load_repo_config
+from .config import load_shared_config
 from .hooks import APPROVAL_VENDORS, PRE_TOOL_HOOK_TIMEOUT
 from .roles import BUILTIN_ROLES, load_roles
 
@@ -104,7 +104,10 @@ agents, reports, review requests, expired leases, quota problems. Handle the dig
 call `await_events` again. Do not end your turn just because you are idle.
 
 The user can type to you at any time; that interrupts the wait. Answer them, act on what they
-say, then go back to `await_events`.
+say, then go back to `await_events`. Messages the user sends from the Hive chat, the dashboard
+or `hive say` reach you in `#user` (in your digest): answer those with
+`post(channel="#user", body=...)`, since the user reads them there and not in your session.
+Answer what they type in your own session right there, as usual.
 
 ## By fleet state
 - **setup**: there is no goal yet, and you must not act. Wait with `await_events`; it returns
@@ -116,7 +119,8 @@ say, then go back to `await_events`.
   `decision_request(kind="start_approval", question=..., context=<readable plan>)`.
   **No programmer may start before the user approves.**
 - **awaiting_approval**: Tell the user how to answer, for example by typing
-  `! hive decide <id> approve` in this session, or using the dashboard. You cannot answer
+  `! hive approve` (or `! hive reject "<what to change>"`) in this session, or using the
+  dashboard. You cannot answer
   decisions yourself. On reject, revise using the user's note and ask again.
 - **running**: Keep work flowing. Assign or reassign (`task_assign`), split or cancel tasks,
   answer agents' questions, and resolve lease conflicts (`lease_force_release` only for
@@ -345,8 +349,9 @@ def _write(path: Path, text: str) -> None:
 
 def bundle_files(root: Path, hive_cmd: str = "hive", cfg: dict | None = None) -> dict[str, str]:
     """Every file of the agent bundles, as {path relative to .hive/agent/: text}. Reads the
-    project's prompt additions, so it raises PromptError for a bad file."""
-    cfg = cfg if cfg is not None else load_repo_config(root)
+    project's prompt additions, so it raises PromptError for a bad file. Without `cfg`,
+    the fleet's shared settings: the committed copy must not carry one computer's own."""
+    cfg = cfg if cfg is not None else load_shared_config(root)
     rules = permissions.build_rules(cfg)
     skills = {"hive-orchestrator": ORCHESTRATOR_SKILL, "hive-worker": WORKER_SKILL}
     skills = {name: text + prompts.skill_addition(root, name, cfg)
@@ -558,14 +563,16 @@ def init_repo(root: Path, server: str, main: str = "main",
         written.append(".hive/prompts/README.md")
     # Commented-out starters for every file the user may fill in, existing ones untouched.
     try:
-        roles = list(load_roles(load_repo_config(root).get("roles")))
+        roles = list(load_roles(load_shared_config(root).get("roles")))
     except ValueError:
         roles = list(BUILTIN_ROLES)  # hive.toml's role errors are reported where it's used
     written += prompts.write_starters(root, roles)
     gi = root / ".gitignore"
     lines = gi.read_text("utf-8").splitlines() if gi.exists() else []
-    if ".hive/orchestrator/" not in lines:
-        gi.write_text("\n".join(lines + [".hive/orchestrator/"]) + "\n", "utf-8")
+    # The orchestrator's private memory, and this computer's own settings (hive.local.toml).
+    missing = [p for p in (".hive/orchestrator/", "hive.local.toml") if p not in lines]
+    if missing:
+        gi.write_text("\n".join(lines + missing) + "\n", "utf-8")
         written.append(".gitignore")
     written += write_bundles(root, hive_cmd)
     return written, remove_legacy(root)
@@ -580,16 +587,20 @@ exec {hive_cmd} hook git-pre-commit
 """
 
 
-def install_git_hook(repo: Path, hive_cmd: str | None = None,
-                     quiet: bool = False) -> Path | None:
-    """Install (or refresh) the lease-checking pre-commit hook; never overwrites a foreign
-    hook. With no hive_cmd, the command of an existing Hive hook is kept."""
+def git_hook_path(repo: Path) -> Path:
     import subprocess
     common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=repo,
                             capture_output=True, text=True, check=True).stdout.strip()
-    hooks = (repo / common).resolve() / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
-    hook = hooks / "pre-commit"
+    return (repo / common).resolve() / "hooks" / "pre-commit"
+
+
+def install_git_hook(repo: Path, hive_cmd: str | None = None,
+                     quiet: bool = False) -> Path | None:
+    """Install (or refresh) the lease-checking pre-commit hook; never overwrites a foreign
+    hook. With no hive_cmd, the command of an existing Hive hook is kept, else the one the
+    repository's bundles call (`hive init --hive-cmd`)."""
+    hook = git_hook_path(repo)
+    hook.parent.mkdir(parents=True, exist_ok=True)
     existing = hook.read_text("utf-8", "replace") if hook.exists() else ""
     if existing and "hook git-pre-commit" not in existing:
         if not quiet:
@@ -599,7 +610,7 @@ def install_git_hook(repo: Path, hive_cmd: str | None = None,
         return None
     if hive_cmd is None:
         m = re.search(r"exec (.+) hook git-pre-commit", existing)
-        hive_cmd = m.group(1) if m else "hive"
+        hive_cmd = m.group(1) if m else bundle_hive_cmd(repo) or "hive"
     hook.write_text(GIT_HOOK.format(hive_cmd=hive_cmd), "utf-8")
     try:
         hook.chmod(0o755)
