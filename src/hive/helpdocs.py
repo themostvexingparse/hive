@@ -134,39 +134,231 @@ def _inline(text: str, stream) -> str:
                        else ui.bold(m.group(2), stream), text)
 
 
+def _split_list_item(text: str) -> tuple[str, str] | None:
+    """Split a `- key: description` or `- **term** description` item into (key, desc)."""
+def _split_list_item(text: str) -> tuple[str, str] | None:
+    """Extract `(item_label, description)` from a Markdown bullet or numbered list item."""
+    m = re.match(
+        r"^((?:`[^`]+`|\*\*[^*]+\*\*)(?:\s*,\s*(?:`[^`]+`|\*\*[^*]+\*\*))*(?:\s*\([^)]*\))?)"
+        r":\s+(.+)$",
+        text,
+        re.S,
+    )
+    if not m:
+        m = re.match(
+            r"^((?:`[^`]+`|\*\*[^*]+\*\*)(?:\s*,\s*(?:`[^`]+`|\*\*[^*]+\*\*))*)"
+            r"(?:[:.,;]?\s+)(.+)$",
+            text,
+            re.S,
+        )
+    if m:
+        key, rest = m.groups()
+        clean_key = re.sub(r"[:.,;]\*\*$", "**", key).rstrip(":.,;")
+        return clean_key, rest.strip()
+    m2 = re.match(r"^([A-Za-z0-9_. /<>-]{1,28}):\s+(.+)$", text, re.S)
+    if m2:
+        return f"**{m2.group(1)}**", m2.group(2).strip()
+    return None
+
+
 def render(topic: Topic, stream=None) -> str:
-    """The page as the terminal shows it."""
+    """The page as the terminal shows it, with structured headings, code blocks and tables."""
+    stream = stream or ui.sys.stdout
     out: list[str] = []
     code = False
+    code_lines: list[tuple[str, str, str, str]] = []
+    bullet_group: list[tuple[str, str, str | None, str | None]] = []
+    num_group: list[tuple[str, str, str | None, str | None]] = []
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        if not code_lines:
+            return
+        has_inline_comments = (
+            any(h for _, _, h, _ in code_lines)
+            and any(raw.lstrip().startswith("hive") for raw, _, _, _ in code_lines)
+            and not any(raw.lstrip().startswith(("#", "[")) for raw, _, _, _ in code_lines)
+        )
+        if has_inline_comments and len(code_lines) >= 2:
+            rows = []
+            for raw, body, hash_, comment in code_lines:
+                rows.append([
+                    ui.cmd(body.strip(), stream),
+                    _inline(comment, stream) if hash_ else ui.dim("—", stream),
+                ])
+            out.append(ui.format_table(["Command", "Description"], rows, stream=stream,
+                                       boxed=True, wrap=True))
+        else:
+            tl, tr = ui.sym("╭", "+", stream), ui.sym("╮", "+", stream)
+            bl, br = ui.sym("╰", "+", stream), ui.sym("╯", "+", stream)
+            hbar, vbar = ui.sym("─", "-", stream), ui.sym("│", "|", stream)
+            b_v = ui.paint(vbar, "gray", stream=stream)
+            w = max(max(len(raw) for raw, _, _, _ in code_lines), 24)
+            top = "  " + ui.paint(f"{tl}{hbar * (w + 5)}{tr}", "gray", stream=stream)
+            bot = "  " + ui.paint(f"{bl}{hbar * (w + 5)}{br}", "gray", stream=stream)
+            box = [top]
+            for raw, body, hash_, comment in code_lines:
+                pad = " " * max(0, w - len(raw))
+                if raw.lstrip().startswith("#"):
+                    styled = ui.dim(raw, stream)
+                elif hash_:
+                    gap = raw[len(body):len(raw) - len(comment) - 1].rstrip("#")
+                    styled = ui.cmd(body, stream) + gap + ui.dim("# " + comment, stream)
+                else:
+                    styled = ui.cmd(raw, stream)
+                box.append(f"  {b_v}    {styled}{pad} {b_v}")
+            box.append(bot)
+            out.append("\n".join(box))
+        code_lines = []
+
+    def flush_bullets() -> None:
+        nonlocal bullet_group
+        if not bullet_group:
+            return
+        structured = [b for b in bullet_group if b[2] is not None]
+        if structured and len(structured) >= len(bullet_group) // 2 + 1:
+            rows = []
+            for _, raw_rest, k, desc in bullet_group:
+                if k is not None and desc is not None:
+                    rows.append([_inline(k, stream), _inline(desc, stream)])
+                else:
+                    rows.append([ui.paint(ui.sym("•", "-", stream), "bright_yellow",
+                                          stream=stream), _inline(raw_rest, stream)])
+            out.append(ui.format_table(["Item", "Details"], rows, stream=stream,
+                                       boxed=True, wrap=True))
+        else:
+            bullet = ui.paint(ui.sym("•", "-", stream), "bright_yellow", stream=stream)
+            rows = [[bullet, _inline(raw_rest.replace("\n", " "), stream)]
+                    for _, raw_rest, _, _ in bullet_group]
+            out.append(ui.format_table(["•", "Details"], rows, stream=stream,
+                                       boxed=True, wrap=True))
+        bullet_group = []
+
+    def flush_numbers() -> None:
+        nonlocal num_group
+        if not num_group:
+            return
+        structured = [n for n in num_group if n[2] is not None]
+        if len(structured) == len(num_group):
+            rows = [
+                [ui.paint(num_s, "bright_yellow", "bold", stream=stream),
+                 _inline(k, stream),
+                 _inline(desc, stream)]
+                for num_s, _, k, desc in num_group
+            ]
+            out.append(ui.format_table(["#", "Item", "Details"], rows, stream=stream,
+                                       boxed=True, wrap=True))
+        else:
+            rows = [
+                [ui.paint(num_s, "bright_yellow", "bold", stream=stream),
+                 _inline(raw_rest, stream)]
+                for num_s, raw_rest, _, _ in num_group
+            ]
+            out.append(ui.format_table(["Step", "Action"], rows, stream=stream,
+                                       boxed=True, wrap=True))
+        num_group = []
+
     for line in topic.body.split("\n"):
         if line.strip().startswith("```"):
+            flush_bullets()
+            flush_numbers()
+            if code:
+                flush_code()
             code = not code
             continue
         if code:
-            text = "    " + line
-            if line.lstrip().startswith("#"):
-                text = ui.dim(text, stream)
+            m_c = re.match(r"^(\s*\S.*?)\s+#\s+(.+)$", line)
+            if m_c and not line.lstrip().startswith("#"):
+                body, hash_, comment = m_c.group(1), "#", m_c.group(2)
             else:
-                body, hash_, comment = line.partition("  # ")
-                text = "    " + ui.cmd(body, stream) + (ui.dim(hash_ + comment, stream)
-                                                       if hash_ else "")
-            out.append(text)
-        elif line.startswith(("# ", "## ")):
-            title = line.lstrip("#").strip().replace("`", "")
-            out.append(ui.paint(title, "bold", "bright_yellow", stream=stream))
-        elif m := re.match(r"^(\s*)- ", line):  # a list item: a coloured bullet
-            bullet = ui.paint(ui.sym("•", "-", stream), "bright_yellow", stream=stream)
-            out.append(m.group(1) + bullet + " " + _inline(line[m.end():], stream))
+                body, hash_, comment = line, "", ""
+            code_lines.append((line, body, hash_, comment))
+            continue
+        if line.startswith("# "):
+            flush_bullets()
+            flush_numbers()
+            title = line[2:].strip().replace("`", "")
+            bar = ui.sym("═", "=", stream)
+            rule = ui.paint(bar * ui.rule_width(stream), "gray", stream=stream)
+            out.append(ui.paint(title, "bold", "bright_yellow", stream=stream)
+                       + ui.dim(f"  ·  hive help {topic.name}", stream))
+            out.append(rule)
+        elif line.startswith("## "):
+            flush_bullets()
+            flush_numbers()
+            title = line[3:].strip().replace("`", "")
+            bar = ui.sym("─", "-", stream)
+            head = f"{bar * 2} {title} "
+            tail = bar * max(3, ui.rule_width(stream) - ui.width(head))
+            out.append(ui.paint(f"{bar * 2} ", "gray", stream=stream)
+                       + ui.paint(title, "bold", "bright_yellow", stream=stream)
+                       + " " + ui.paint(tail, "gray", stream=stream))
+        elif m := re.match(r"^(\s*)- ", line):
+            flush_numbers()
+            indent = m.group(1)
+            rest = line[m.end():]
+            split = _split_list_item(rest)
+            if split:
+                bullet_group.append((indent, rest, split[0], split[1]))
+            else:
+                bullet_group.append((indent, rest, None, None))
+        elif bullet_group and line.startswith("  ") and line.strip():
+            indent, raw_rest, k, d = bullet_group[-1]
+            new_raw = raw_rest + " " + line.strip()
+            split = _split_list_item(new_raw)
+            if split:
+                bullet_group[-1] = (indent, new_raw, split[0], split[1])
+            elif d is not None:
+                bullet_group[-1] = (indent, new_raw, k, d + " " + line.strip())
+            else:
+                bullet_group[-1] = (indent, new_raw, None, None)
+        elif m_num := re.match(r"^(\s*)(\d+\.)\s+(.*)$", line):
+            flush_bullets()
+            _, num_str, rest = m_num.groups()
+            split = _split_list_item(rest)
+            if split:
+                num_group.append((num_str, rest, split[0], split[1]))
+            else:
+                num_group.append((num_str, rest, None, None))
+        elif num_group and line.startswith("   ") and line.strip():
+            num_s, raw_rest, k, d = num_group[-1]
+            new_raw = raw_rest + " " + line.strip()
+            split = _split_list_item(new_raw)
+            if split:
+                num_group[-1] = (num_s, new_raw, split[0], split[1])
+            elif d is not None:
+                num_group[-1] = (num_s, new_raw, k, d + " " + line.strip())
+            else:
+                num_group[-1] = (num_s, new_raw, None, None)
         else:
-            out.append(_inline(line, stream))
+            flush_bullets()
+            flush_numbers()
+            out.append(("  " + _inline(line, stream)) if line.strip() else "")
+    flush_bullets()
+    flush_numbers()
+    flush_code()
     return "\n".join(out).rstrip() + "\n"
 
 
 def index(topics: dict[str, Topic] | None = None, stream=None) -> str:
-    """`hive help topics`: every page, one line each."""
+    """`hive help topics`: every page, in a structured table."""
+    stream = stream or ui.sys.stdout
     topics = topics if topics is not None else load()
-    w = max(len(n) for n in topics) + 2
-    lines = [ui.paint("Help topics", "bold", "bright_yellow", stream=stream)
-             + ui.dim("  (hive help TOPIC)", stream)]
-    lines += [f"  {ui.cmd(n.ljust(w), stream)}{t.title}" for n, t in topics.items()]
+    bar = ui.sym("═", "=", stream)
+    lines = [
+        ui.paint("Help topics", "bold", "bright_yellow", stream=stream)
+        + ui.dim("  ·  hive help TOPIC", stream),
+        ui.paint(bar * ui.rule_width(stream), "gray", stream=stream),
+        "",
+        ui.format_table(
+            ["Topic", "Description", "See Also"],
+            [[ui.cmd(n, stream), t.title,
+              ui.dim(", ".join(t.see[:3]), stream) if t.see else ui.dim("—", stream)]
+             for n, t in topics.items()],
+            stream=stream,
+            boxed=True,
+            wrap=True,
+            max_width=max(105, ui.rule_width(stream)),
+        ),
+    ]
     return "\n".join(lines) + "\n"

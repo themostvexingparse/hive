@@ -169,7 +169,29 @@ class Chat:
             if name in ("quit", "exit", "q"):
                 return False
             if name in ("help", "?"):
-                self.write([HELP.rstrip()])
+                tbl = ui.format_table(
+                    ["command", "action"],
+                    [
+                        [ui.cmd("/approve [N] [note]"), "approve a waiting decision (or press y)"],
+                        [ui.cmd("/reject [N] [note]"), "send a decision back with a note (or press n)"],
+                        [ui.cmd("/answer [N] TEXT"), "answer a multi-choice or free-text decision"],
+                        [ui.cmd("/decisions"), "list open decisions waiting for you"],
+                        [ui.cmd("/status"), "show fleet, agents, tasks and status feed"],
+                        [ui.cmd("/agents [add …]"), "list or manage agents"],
+                        [ui.cmd("/machines"), "list paired computers"],
+                        [ui.cmd("/config …"), "read or update configuration"],
+                        [ui.cmd("/pause · /resume"), "pause or resume all agents"],
+                        [ui.cmd("/next"), "show where things stand and the next step"],
+                        [ui.cmd("/watch [AGENT|off]"), "follow an agent's live output here"],
+                        [ui.cmd("/help · /quit"), "show this table or leave the chat"],
+                    ],
+                    stream=self.out,
+                    boxed=True,
+                )
+                self.write([
+                    ui.dim("  Type a message for the orchestrator. Any /command runs `hive command`.", self.out),
+                    *tbl,
+                ])
             elif name == "watch":
                 self.watching = None if (rest and rest[0] == "off") else (
                     rest[0] if rest else self.c.get("/fleet").get("orchestrator"))

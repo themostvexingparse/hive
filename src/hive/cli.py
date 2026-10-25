@@ -295,7 +295,8 @@ def cmd_project_list(a):
     ui.table(["project", "name", "path", "database", "github token", "state"],
              [[ui.agent(p["slug"]), p.get("name", ""), p.get("path") or "/",
                p.get("database", "(server's)"), p.get("github_token_env") or "",
-               "archived" if p.get("archived") else "active"] for p in rows])
+               "archived" if p.get("archived") else "active"] for p in rows],
+             boxed=True)
 
 
 def cmd_project_set(a):
@@ -401,10 +402,12 @@ def cmd_init(a):
     except PromptError as e:
         die(f"{e}. Nothing in .hive/agent/ was changed.")
     ui.section("Wired for Hive", ui.dim(str(root)))
-    for f in written:
-        ui.out(f"  {ui.paint('+', 'green', 'bold')} {f}")
-    for f in cleaned:
-        ui.out(f"  {ui.paint('-', 'yellow', 'bold')} {f} {ui.dim('(old hive wiring removed)')}")
+    file_rows = ([[f"{ui.paint('+', 'green', 'bold')} {f}", ui.state("ok", label="written")]
+                  for f in written]
+                 + [[f"{ui.paint('-', 'yellow', 'bold')} {f}",
+                     ui.dim("old hive wiring removed")] for f in cleaned])
+    if file_rows:
+        ui.table(["file", "status"], file_rows, boxed=True)
     ui.out()
     ui.info("The agent bundles in .hive/agent/ load only in sessions launched by `hive`.")
     _prompt_problems(root)
@@ -791,7 +794,8 @@ def cmd_up(a):
     ui.table(["slot", "vendor", "roles"] + (["server"] if len(servers) > 1 else []),
              [[ui.agent(s.name), s.cfg.vendor, ", ".join(s.roles) or "?"]
               + ([cfg.url_for(s.cfg)] if len(servers) > 1 else [])
-              for s in d.slots.values()])
+              for s in d.slots.values()],
+             boxed=True)
     if not orch:
         ui.out()
         if not d.slots:
@@ -931,17 +935,19 @@ def cmd_decisions(a):
         if d["blocking"]:
             tags.append(ui.paint("freezes the fleet", "red", "bold"))
         ui.section(f"Decision #{d['id']}", " · ".join(tags))
-        ui.out(ui.dim(f"  from {d['raised_by']}, {ago(d['created'])} ago"))
-        ui.out()
-        ui.out("  " + ui.bold(d["question"].replace("\n", "\n  ")))
+        kv_rows = [
+            ("from", f"{ui.agent(d['raised_by'])}  " + ui.dim(f"({ago(d['created'])} ago)")),
+            ("options", ", ".join(d["options"]) if d.get("options") else ""),
+            ("question", ui.bold(d["question"])),
+        ]
         if d["context"]:
-            ui.out()
-            ui.out("  " + ui.paint("Context", "gray", "underline"))
-            ui.out("  " + d["context"].replace("\n", "\n  "))
+            kv_rows.append(("context", d["context"]))
         if d["answer"]:
-            ui.out()
-            ui.kv([("answer", ui.paint(d["answer"], "green", "bold")), ("note", d["note"])])
-        elif d["state"] == "open":
+            kv_rows.append(("answer", ui.paint(d["answer"], "green", "bold")))
+            if d["note"]:
+                kv_rows.append(("note", d["note"]))
+        ui.kv(kv_rows)
+        if not d["answer"] and d["state"] == "open":
             # The ID is only needed when several decisions are open.
             ref = f" {d['id']}" if sum(r["state"] == "open" for r in rows) > 1 else ""
             ui.out()
@@ -1074,7 +1080,8 @@ def cmd_status(a):
     ui.section("Agents", ui.dim(f"{sum(1 for ag in agents if ag['online'])}/{len(agents)} online"))
     ui.table(["name", "vendor", "roles", "state"],
              [[ui.agent(ag["name"]), ag["vendor"], ", ".join(ag["roles"]), _agent_state(ag)]
-              for ag in agents])
+              for ag in agents],
+             boxed=True)
 
     tasks = call(c.get, "/tasks")
     shown = [t for t in tasks if a.all or t["state"] not in ("done", "cancelled")]
@@ -1085,14 +1092,16 @@ def cmd_status(a):
         if shown:
             ui.table(["id", "state", "assignee", "title"],
                      [[ui.dim(f"#{t['id']}"), ui.state(t["state"]), ui.agent(t["assignee"]),
-                       t["title"]] for t in shown])
+                       t["title"]] for t in shown],
+                     boxed=True)
 
     leases = call(c.get, "/leases")
     if leases:
         ui.section("Leases", ui.dim(str(len(leases))))
         ui.table(["id", "holder", "expires", "paths"],
                  [[ui.dim(f"#{l['id']}"), ui.agent(l["holder"]),
-                   _expires(l["expires_at"]), ", ".join(l["globs"])] for l in leases])
+                   _expires(l["expires_at"]), ", ".join(l["globs"])] for l in leases],
+                 boxed=True)
 
     feed = call(c.get, "/status", limit=a.n)
     if feed:
@@ -1100,7 +1109,8 @@ def cmd_status(a):
         if not a.verbose:
             ui.table(["ago", "level", "by", "summary"],
                      [[ui.dim(ago(s["ts"])), ui.state(s["level"]), ui.agent(s["author"]),
-                       s["summary"]] for s in feed])
+                       s["summary"]] for s in feed],
+                     boxed=True)
         for s in feed if a.verbose else []:
             ui.out(f"  {ui.dim(ago(s['ts']) + ' ago')}  {ui.state(s['level'])}  "
                    f"{ui.agent(s['author'])}")
@@ -1259,9 +1269,11 @@ def cmd_agents_list(a):
             return ag["machine"] + ("" if ag.get("claimed") else ui.dim(" (not set up yet)"))
         return "this computer" if ag["name"] in here else ui.dim("elsewhere")
 
+    ui.section("Agents", ui.dim(f"{len(roster)} enrolled"))
     ui.table(["name", "cli", "roles", "state", "where", "logged in"],
              [[ui.agent(ag["name"]), ag["vendor"], ", ".join(ag["roles"]), _agent_state(ag),
-               where(ag), login(here.get(ag["name"]))] for ag in roster])
+               where(ag), login(here.get(ag["name"]))] for ag in roster],
+             boxed=True)
     gone = sorted(set(here) - {ag["name"] for ag in roster})
     for name in gone:
         ui.warn(f"{name} is set up on this computer but no longer on the server; clean it up "
@@ -1471,7 +1483,8 @@ def cmd_machines_keys(a):
     ui.table(["id", "label", "made", "expires", "used"],
              [[r["id"], r["label"] or ui.dim("-"), time.strftime("%Y-%m-%d", time.localtime(
                  r["created"])), time.strftime("%Y-%m-%d", time.localtime(r["expires"])),
-               str(r["uses"])] for r in rows])
+               str(r["uses"])] for r in rows],
+             boxed=ui.enabled())
 
 
 def cmd_machines_revoke(a):
@@ -1486,10 +1499,12 @@ def cmd_machines_list(a):
                 + "; agents on this computer don't need it (" + ui.cmd("hive agents add")
                 + ").")
         return
+    ui.section("Paired machines", ui.dim(f"{len(rows)}"))
     ui.table(["machine", "state", "os", "CLIs", "last seen", "agents"],
              [[ui.agent(m["name"]), ui.state("online" if m["online"] else "offline"),
                m["os"], ", ".join(m["clis"]) or ui.dim("none"), ago(m["last_seen"]) + " ago",
-               ", ".join(m["agents"]) or ui.dim("none")] for m in rows])
+               ", ".join(m["agents"]) or ui.dim("none")] for m in rows],
+             boxed=True)
 
 
 def cmd_machines_rm(a):
@@ -1550,10 +1565,16 @@ SYMBOL = {"create": ("+", "green"), "roles": ("~", "yellow"), "move": ("→", "c
 
 
 def _show_plan(p) -> None:
-    for ch in p.changes:
-        sym, colour = SYMBOL[ch.kind]
-        ui.out(f"  {ui.paint(sym, colour, 'bold')} {ui.agent(ch.name)}  "
-               f"{ui.paint(ch.kind, colour)}  {ch.detail}")
+    if p.changes:
+        rows = []
+        for ch in p.changes:
+            sym, colour = SYMBOL[ch.kind]
+            rows.append([
+                f"{ui.paint(sym, colour, 'bold')} {ui.agent(ch.name)}",
+                ui.paint(ch.kind, colour),
+                ch.detail,
+            ])
+        ui.table(["agent", "action", "details"], rows, boxed=True)
     if p.ok:
         ui.out(ui.dim(f"  unchanged: {', '.join(p.ok)}"))
     if p.unlisted:
@@ -1699,9 +1720,11 @@ def cmd_config_list(a):
             ui.info("Everything is at its default. " + ui.cmd("hive config list --all")
                     + " shows every setting.")
             return
+    ui.section("Configuration", ui.dim("all settings" if a.all else "modified settings"))
     ui.table(["setting", "value", "from"],
              [[k, settings.show(v), ui.dim(src) if src == "default" else src]
-              for k, v, src in rows])
+              for k, v, src in rows],
+             boxed=True)
 
 
 def cmd_config_get(a):
@@ -1723,9 +1746,17 @@ def cmd_config_explain(a):
     except settings.SettingError as err:
         die(str(err))
     ui.section(a.key, ui.dim(f"from {e['source']}") if e["source"] else ui.dim("not set"))
-    ui.kv([("value", ui.bold(settings.show(e["value"])) if e["source"] else ui.dim("(none)"))]
-          + [(layer, settings.show(v) if v is not None else ui.dim("—"))
-             for layer, _, v in e["layers"]])
+    ui.kv([("effective", ui.bold(settings.show(e["value"])) if e["source"] else ui.dim("(none)")),
+           ("source", e["source"] or ui.dim("not set"))])
+    ui.out()
+    ui.table(
+        ["layer", "value", "status"],
+        [[layer,
+          settings.show(v) if v is not None else ui.dim("—"),
+          ui.state("ok", label="active") if layer == e["source"] else ui.dim("overridden" if v is not None else "-")]
+         for layer, _, v in e["layers"]],
+        boxed=True,
+    )
     ui.out()
     if a.key.startswith("hooks."):
         ui.note("Hooks run on this computer, from hive.local.toml or ~/.hive/config.toml only "
@@ -2043,7 +2074,7 @@ class TopParser(ui.ArgumentParser):
     def format_help(self) -> str:
         if self.full:
             return super().format_help()
-        return ui.colorize_help(HELP, sys.stdout)
+        return ui.colorize_help(ui.structure_help(HELP, sys.stdout), sys.stdout)
 
 
 def _subparser(parser: argparse.ArgumentParser, words: list[str]):
@@ -2081,9 +2112,7 @@ def cmd_help(a, parser: TopParser):
     if m.topic is not None:
         ui.out(helpdocs.render(m.topic, sys.stdout), end="")
         if command is not None:
-            ui.out("")
-            ui.out(ui.paint(f"Options of hive {' '.join(words).lower()}", "bold",
-                            "bright_yellow", stream=sys.stdout))
+            ui.section(f"Options of hive {' '.join(words).lower()}")
             ui.out(command.format_help().rstrip())  # coloured by ui.HelpFormatter
         if m.topic.see:
             ui.out("")
@@ -2093,8 +2122,12 @@ def cmd_help(a, parser: TopParser):
     q = " ".join(words)
     if m.choices:
         ui.out(f"Several help topics cover {ui.bold(q)}:")
-        for t in m.choices:
-            ui.out(f"  {ui.cmd(('hive help ' + t.name).ljust(26))}{t.title}")
+        ui.out()
+        ui.table(
+            ["command", "topic"],
+            [[ui.cmd(f"hive help {t.name}"), t.title] for t in m.choices],
+            boxed=True,
+        )
         return
     hint = (" Did you mean " + " or ".join(ui.cmd(f"hive help {s}") for s in m.suggestions)
             + "?") if m.suggestions else ""
@@ -2114,10 +2147,16 @@ def cmd_hook(a):
 
 
 def main(argv: list[str] | None = None) -> None:
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")  # legacy Windows consoles (cp1252)
-        except AttributeError:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # legacy Windows consoles (cp1252)
+        except (AttributeError, ValueError):
             pass
     # Decide on colour before argparse prints anything (help, usage errors).
     args = sys.argv[1:] if argv is None else argv

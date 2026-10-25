@@ -397,7 +397,8 @@ def render(d: dict) -> None:
     if perms["classes"]:
         ui.table(["class", "allowed", "need approval", "never"],
                  [[cls, n["allow"], n["approval"], n["forbidden"]]
-                  for cls, n in perms["classes"].items()])
+                  for cls, n in perms["classes"].items()],
+                 boxed=True)
     extra = [("extra allow", ", ".join(perms["allow"])),
              ("extra approval", ", ".join(perms["approval"])),
              ("extra deny", ", ".join(perms["deny"]))]
@@ -417,7 +418,8 @@ def render(d: dict) -> None:
                      "code" if r["can_code"] else ui.dim(", ".join(r["write_globs"]) or "no writes"),
                      ", ".join(r["task_kinds"]) or ui.dim("-"),
                      " + ".join(r["prompt_from"]) or ui.dim("none")])
-    ui.table(["role", "origin", "need", "holders", "writes", "task kinds", "prompt"], rows)
+    ui.table(["role", "origin", "need", "holders", "writes", "task kinds", "prompt"], rows,
+             boxed=True)
 
     ui.section("Project prompts", ui.dim(prompts.PROMPTS_DIR.as_posix()))
     labels = {"active": lambda r: ui.state("ok", label=f"active, {r['lines']} line(s)"),
@@ -428,7 +430,8 @@ def render(d: dict) -> None:
              [[r["file"], labels[r["status"]](r),
                ("the " + ("orchestrator" if r["file"] == "orchestrator.md" else "worker")
                 + " skill") if r["kind"] == "skill" else "session start"]
-              for r in d["prompts"]])
+              for r in d["prompts"]],
+             boxed=True)
 
     m = d["machine"]
     ui.section("This machine", ui.dim(m["home"]))
@@ -454,7 +457,7 @@ def render(d: dict) -> None:
                          s["branch"] or ui.state("failed", label="missing"),
                          _yes(s["account_used"], "logged in", "not logged in"),
                          ui.path(s["worktree"])])
-        ui.table(["slot", "vendor", "now", "branch", "account", "worktree"], rows)
+        ui.table(["slot", "vendor", "now", "branch", "account", "worktree"], rows, boxed=True)
 
     srv = d["server"]
     ui.section("Fleet", ui.dim(srv["url"]))
@@ -494,13 +497,14 @@ def render(d: dict) -> None:
                      [[ui.agent(a["name"]), a["vendor"], ", ".join(a["roles"]),
                        ui.state("online" if a["online"] else "offline"),
                        "this machine" if a["name"] in here else ui.dim("elsewhere")]
-                      for a in srv["agents"]])
+                      for a in srv["agents"]],
+                     boxed=True)
 
     ui.section("Problems", ui.dim(str(len(d["problems"])) if d["problems"] else "none"))
     if not d["problems"]:
         ui.ok("Nothing to fix.")
-    for p in d["problems"]:
-        ui.warn(p["msg"], sys.stdout)
+    for i, p in enumerate(d["problems"], 1):
+        ui.warn(f"[{i}/{len(d['problems'])}] {p['msg']}", sys.stdout)
         if p["fix"]:
-            ui.out("     " + ui.cmd(p["fix"]))
+            ui.out("     " + ui.paint(ui.sym("→", "->"), "gray") + " " + ui.cmd(p["fix"]))
     ui.out()

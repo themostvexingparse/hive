@@ -183,7 +183,7 @@ def enabled(stream=None) -> bool:
 def _fancy(stream) -> bool:
     """Whether the stream can show the box-drawing characters and symbols used below."""
     try:
-        "√×═─│→←·•»…".encode(getattr(stream, "encoding", None) or "ascii")
+        "√×═─│┌┐└┘├┤┬┴┼╭╮╰╯→←·•»…".encode(getattr(stream, "encoding", None) or "ascii")
         return True
     except (UnicodeEncodeError, LookupError):
         return False
@@ -295,27 +295,67 @@ def section(title: str, extra: str = "", stream=None) -> None:
 
 
 def banner(title: str, subtitle: str = "", stream=None) -> None:
-    """The heavy rule shown when a long-running command starts."""
+    """The heavy framed box shown when a command starts."""
     stream = stream or sys.stdout
-    bar = sym("═", "=", stream)
     w = rule_width(stream)
-    out(paint(bar * w, "gray", stream=stream), stream=stream)
-    out(" " + paint(title, "bold", "bright_yellow", stream=stream)
-        + (paint("  " + subtitle, "dim", stream=stream) if subtitle else ""), stream=stream)
-    out(paint(bar * w, "gray", stream=stream), stream=stream)
+    if _fancy(stream):
+        top = "╭" + "─" * (w - 2) + "╮"
+        bot = "╰" + "─" * (w - 2) + "╯"
+        inner_w = w - 4
+        text = paint(title, "bold", "bright_yellow", stream=stream) + (
+            paint("  " + subtitle, "dim", stream=stream) if subtitle else "")
+        if width(text) > inner_w and subtitle:
+            sub_max = max(0, inner_w - width(title) - 2)
+            sub_txt = _truncate(subtitle, sub_max, stream) if sub_max > 1 else ""
+            text = paint(title, "bold", "bright_yellow", stream=stream) + (
+                paint("  " + sub_txt, "dim", stream=stream) if sub_txt else "")
+        pad = " " * max(0, inner_w - width(text))
+        side = paint("│", "gray", stream=stream)
+        out(paint(top, "gray", stream=stream), stream=stream)
+        out(f"{side} {text}{pad} {side}", stream=stream)
+        out(paint(bot, "gray", stream=stream), stream=stream)
+    else:
+        bar = "=" * w
+        out(paint(bar, "gray", stream=stream), stream=stream)
+        out(" " + paint(title, "bold", "bright_yellow", stream=stream)
+            + (paint("  " + subtitle, "dim", stream=stream) if subtitle else ""), stream=stream)
+        out(paint(bar, "gray", stream=stream), stream=stream)
 
 
 def kv(pairs: list[tuple[str, str]], stream=None, indent: str = "  ") -> None:
-    """Aligned `key  value` lines."""
+    """Aligned `key │ value` lines inside a structured box frame."""
+    stream = stream or sys.stdout
     pairs = [(k, v) for k, v in pairs if v not in (None, "")]
     if not pairs:
         return
-    w = max(width(k) for k, _ in pairs)
+    w_k = max(width(k) for k, _ in pairs)
+    term_cols = shutil.get_terminal_size((100, 24)).columns
+    max_v = max(36, term_cols - len(indent) - w_k - 7)
+    val_rows: list[tuple[str, list[str]]] = []
+    w_v = 24
     for k, v in pairs:
-        first, *rest = str(v).split("\n")
-        out(f"{indent}{paint(k.ljust(w), 'gray', stream=stream)}  {first}", stream=stream)
-        for r in rest:
-            out(f"{indent}{' ' * w}  {r}", stream=stream)
+        lines = _wrap_cell(str(v), max_v)
+        for ln in lines:
+            w_v = max(w_v, width(ln))
+        val_rows.append((k, lines))
+    tl, tm, tr = sym("╭", "+", stream), sym("┬", "+", stream), sym("╮", "+", stream)
+    bl, bm, br = sym("╰", "+", stream), sym("┴", "+", stream), sym("╯", "+", stream)
+    hbar, vbar = sym("─", "-", stream), sym("│", "|", stream)
+    b_v = paint(vbar, "gray", stream=stream)
+    top = indent + paint(f"{tl}{hbar * (w_k + 2)}{tm}{hbar * (w_v + 2)}{tr}", "gray",
+                         stream=stream)
+    bot = indent + paint(f"{bl}{hbar * (w_k + 2)}{bm}{hbar * (w_v + 2)}{br}", "gray",
+                         stream=stream)
+    out(top, stream=stream)
+    for k, lines in val_rows:
+        for idx, ln in enumerate(lines):
+            k_txt = k if idx == 0 else ""
+            k_pad = " " * max(0, w_k - width(k_txt))
+            v_pad = " " * max(0, w_v - width(ln))
+            k_cell = (paint(k_txt, "bright_yellow", "bold", stream=stream)
+                      if k_txt else "") + k_pad
+            out(f"{indent}{b_v} {k_cell} {b_v} {ln}{v_pad} {b_v}", stream=stream)
+    out(bot, stream=stream)
 
 
 def _truncate(text: str, limit: int, stream=None) -> str:
@@ -329,26 +369,146 @@ def _truncate(text: str, limit: int, stream=None) -> str:
     return f"{m.group(1)}{cut}\x1b[0m" if m else cut
 
 
-def table(headers: list[str], rows: list[list], stream=None, indent: str = "  ") -> None:
-    """Columns aligned on visible width; the last column is cut to fit the terminal."""
+def _wrap_cell(text: str, limit: int) -> list[str]:
+    """Wrap a possibly ANSI-styled string into lines of at most `limit` visible characters."""
+    limit = max(10, limit)
+    out_lines: list[str] = []
+    for para in str(text).split("\n"):
+        if width(para) <= limit:
+            out_lines.append(para)
+            continue
+        words = para.split(" ")
+        cur = ""
+        cur_w = 0
+        active_sgr = ""
+        for w in words:
+            w_vis = width(w)
+            if not cur:
+                cur = active_sgr + w
+                cur_w = w_vis
+            elif cur_w + 1 + w_vis <= limit:
+                cur += " " + w
+                cur_w += 1 + w_vis
+            else:
+                if active_sgr and not cur.endswith("\x1b[0m"):
+                    cur += "\x1b[0m"
+                out_lines.append(cur)
+                cur = active_sgr + w
+                cur_w = w_vis
+            for code in _ANSI.findall(w):
+                active_sgr = "" if code == "\x1b[0m" else code
+        if cur:
+            if active_sgr and not cur.endswith("\x1b[0m"):
+                cur += "\x1b[0m"
+            out_lines.append(cur)
+    return out_lines or [""]
+
+
+def format_table(headers: list[str], rows: list[list], stream=None, indent: str = "  ",
+                 max_width: int | None = None, boxed: bool = False,
+                 wrap: bool = True, row_sep: bool = False) -> str:
+    """Render a structured table with aligned columns; returns a string."""
     stream = stream or sys.stdout
     cells = [[str(c) if c is not None else "" for c in r] for r in rows]
-    widths = [max([width(h)] + [width(r[i]) for r in cells]) for i, h in enumerate(headers)]
-    room = shutil.get_terminal_size((100, 24)).columns - len(indent) \
-        - sum(w + 2 for w in widths[:-1])
-    widths[-1] = max(10, min(widths[-1], room))
+    term_cols = max_width or shutil.get_terminal_size((100, 24)).columns
+    hbar = sym("─", "-", stream)
 
-    def fmt(r):
-        parts = [_truncate(c, widths[i], stream) for i, c in enumerate(r)]
-        return indent + "  ".join(p + " " * (widths[i] - width(p)) if i < len(r) - 1 else p
-                                  for i, p in enumerate(parts))
+    if not boxed:
+        widths = [max([width(h)] + [width(r[i]) for r in cells]) for i, h in enumerate(headers)]
+        room = term_cols - len(indent) - sum(w + 2 for w in widths[:-1])
+        widths[-1] = max(10, min(widths[-1], room))
 
-    out(paint(fmt(headers).rstrip(), "gray", "underline", stream=stream) if enabled(stream)
-        else fmt(headers).rstrip(), stream=stream)
-    if not enabled(stream):
-        out(indent + "  ".join(sym("─", "-", stream) * w for w in widths), stream=stream)
+        def fmt_plain(r, is_header: bool = False) -> str:
+            parts = []
+            for i, c in enumerate(r):
+                t = _truncate(c, widths[i], stream)
+                pad = " " * max(0, widths[i] - width(t))
+                if is_header and enabled(stream):
+                    t = paint(t, "bright_yellow", "bold", "underline", stream=stream)
+                parts.append(t + pad if i < len(r) - 1 else t)
+            return indent + "  ".join(parts)
+
+        lines = [fmt_plain(headers, is_header=True).rstrip()]
+        if not enabled(stream):
+            lines.append(indent + "  ".join(hbar * w for w in widths))
+        for r in cells:
+            lines.append(fmt_plain(r).rstrip())
+        return "\n".join(lines)
+
+    # Full rounded box-drawing grid table
+    nat_widths = [
+        max([width(h)] + [max((width(ln) for ln in r[i].split("\n")), default=0) for r in cells])
+        for i, h in enumerate(headers)
+    ]
+    overhead = len(indent) + 3 * len(headers) + 1
+    avail = max(24, term_cols - overhead)
+    widths = list(nat_widths)
+    if sum(widths) > avail and len(widths) > 1:
+        if len(widths) == 2:
+            widths[0] = min(widths[0], max(28, int(avail * 0.62)))
+            widths[1] = max(16, avail - widths[0])
+        else:
+            for i in range(len(widths) - 1):
+                widths[i] = min(widths[i], max(16, avail // len(widths) + 8))
+            widths[-1] = max(16, avail - sum(widths[:-1]))
+    elif sum(widths) > avail and len(widths) == 1:
+        widths[0] = avail
+
+    wrapped_rows: list[list[list[str]]] = []
     for r in cells:
-        out(fmt(r).rstrip(), stream=stream)
+        w_row: list[list[str]] = []
+        for i, c in enumerate(r):
+            if wrap:
+                w_row.append(_wrap_cell(c, widths[i]))
+            else:
+                w_row.append([_truncate(ln, widths[i], stream) for ln in c.split("\n")])
+        wrapped_rows.append(w_row)
+
+    for i, h in enumerate(headers):
+        widths[i] = max([width(h)] + [width(ln) for r in wrapped_rows for ln in r[i]])
+
+    tl, tm, tr = sym("╭", "+", stream), sym("┬", "+", stream), sym("╮", "+", stream)
+    ml, mm, mr = sym("├", "+", stream), sym("┼", "+", stream), sym("┤", "+", stream)
+    bl, bm, br = sym("╰", "+", stream), sym("┴", "+", stream), sym("╯", "+", stream)
+    vbar = sym("│", "|", stream)
+    b_v = paint(vbar, "gray", stream=stream)
+
+    def border(left: str, mid: str, right: str) -> str:
+        line = left + mid.join(hbar * (w + 2) for w in widths) + right
+        return indent + (paint(line, "gray", stream=stream) if enabled(stream) else line)
+
+    lines = [border(tl, tm, tr)]
+    hdr_parts = []
+    for i, h in enumerate(headers):
+        pad = " " * max(0, widths[i] - width(h))
+        txt = paint(h, "bright_yellow", "bold", stream=stream) if enabled(stream) else h
+        hdr_parts.append(f" {txt}{pad} ")
+    lines.append(indent + b_v + b_v.join(hdr_parts) + b_v)
+    lines.append(border(ml, mm, mr))
+
+    multi_line_any = row_sep or any(max(len(col) for col in r) > 1 for r in wrapped_rows)
+    for r_idx, r in enumerate(wrapped_rows):
+        height = max((len(col) for col in r), default=1)
+        for ln_idx in range(height):
+            row_parts = []
+            for i, col in enumerate(r):
+                cell_ln = col[ln_idx] if ln_idx < len(col) else ""
+                pad = " " * max(0, widths[i] - width(cell_ln))
+                row_parts.append(f" {cell_ln}{pad} ")
+            lines.append(indent + b_v + b_v.join(row_parts) + b_v)
+        if multi_line_any and r_idx < len(wrapped_rows) - 1:
+            lines.append(border(ml, mm, mr))
+
+    lines.append(border(bl, bm, br))
+    return "\n".join(lines)
+
+
+def table(headers: list[str], rows: list[list], stream=None, indent: str = "  ",
+          boxed: bool = False, wrap: bool = True, row_sep: bool = False) -> None:
+    """Columns aligned on visible width; when `boxed=True`, renders a full bordered table."""
+    stream = stream or sys.stdout
+    out(format_table(headers, rows, stream=stream, indent=indent, boxed=boxed,
+                     wrap=wrap, row_sep=row_sep), stream=stream)
 
 
 def ask(question: str, default: str = "") -> str:
@@ -425,11 +585,122 @@ class LogFormatter(logging.Formatter):
 # ---------------------------------------------------------------------- argparse
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Help text with coloured headings, option names and placeholders (after layout, so
-    the column alignment argparse computes is unaffected)."""
+    """Help text with structured boxed tables and coloured headings, option names and
+    placeholders."""
 
     def format_help(self) -> str:
-        return colorize_help(super().format_help(), sys.stdout)
+        return colorize_help(structure_help(super().format_help(), sys.stdout), sys.stdout)
+
+
+def structure_help(text: str, stream=None) -> str:
+    """Convert raw help sections (usage, examples, positional arguments, options, command
+    groups) into aligned rounded-box tables before colouring."""
+    stream = stream or sys.stdout
+    if _ANSI.search(text):
+        return text
+    lines = text.split("\n")
+    out_blocks: list[str] = []
+    sections: list[tuple[str, list[tuple[str, str]]]] = []
+    indent = "  "
+    tl, tm, tr = sym("╭", "+", stream), sym("┬", "+", stream), sym("╮", "+", stream)
+    ml, mm, mr = sym("├", "+", stream), sym("┼", "+", stream), sym("┤", "+", stream)
+    bl, bm, br = sym("╰", "+", stream), sym("┴", "+", stream), sym("╯", "+", stream)
+    hbar, vbar = sym("─", "-", stream), sym("│", "|", stream)
+
+    def flush_sections() -> None:
+        nonlocal sections
+        valid = [(t, it) for t, it in sections if it]
+        sections = []
+        if not valid:
+            return
+        term_cols = shutil.get_terminal_size((100, 24)).columns
+        w1 = max([width(t) for t, _ in valid]
+                 + [width(inv) for _, it in valid for inv, _ in it])
+        avail_w2 = max(24, term_cols - len(indent) - w1 - 7)
+        wrapped_sec: list[tuple[str, list[tuple[str, list[str]]]]] = []
+        w2 = width("Description")
+        for title, items in valid:
+            w_items: list[tuple[str, list[str]]] = []
+            for inv, desc in items:
+                d_lines = _wrap_cell(desc or "-", avail_w2)
+                for ln in d_lines:
+                    w2 = max(w2, width(ln))
+                w_items.append((inv, d_lines))
+            wrapped_sec.append((title, w_items))
+
+        box: list[str] = [f"{indent}{tl}{hbar * (w1 + 2)}{tm}{hbar * (w2 + 2)}{tr}"]
+        for s_idx, (title, w_items) in enumerate(wrapped_sec):
+            if s_idx > 0:
+                box.append(f"{indent}{ml}{hbar * (w1 + 2)}{mm}{hbar * (w2 + 2)}{mr}")
+            box.append(f"{indent}{vbar} {title.ljust(w1)} {vbar} {'Description'.ljust(w2)} {vbar}")
+            box.append(f"{indent}{ml}{hbar * (w1 + 2)}{mm}{hbar * (w2 + 2)}{mr}")
+            for inv, d_lines in w_items:
+                for l_idx, d_ln in enumerate(d_lines):
+                    c1 = inv.ljust(w1) if l_idx == 0 else " " * w1
+                    box.append(f"{indent}{vbar} {c1} {vbar} {d_ln.ljust(w2)} {vbar}")
+        box.append(f"{indent}{bl}{hbar * (w1 + 2)}{bm}{hbar * (w2 + 2)}{br}")
+        out_blocks.append("\n".join(box))
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.startswith("usage:"):
+            flush_sections()
+            u_lines = [line]
+            i += 1
+            while i < n and lines[i].strip():
+                u_lines.append(lines[i])
+                i += 1
+            out_blocks.append("\n".join(u_lines))
+            continue
+        if not line.strip():
+            i += 1
+            continue
+        if line.strip().lower() == "examples:":
+            flush_sections()
+            i += 1
+            ex_lines: list[str] = []
+            while i < n and lines[i].strip():
+                ex_lines.append(lines[i].strip())
+                i += 1
+            if ex_lines:
+                w_ex = max(max(width(x) for x in ex_lines), 24)
+                top_bar = f"{indent}{tl}{hbar} Examples {hbar * max(1, w_ex - 9)}{tr}"
+                bot_bar = f"{indent}{bl}{hbar * (w_ex + 2)}{br}"
+                ex_box = [top_bar] + [f"{indent}{vbar} {x.ljust(w_ex)} {vbar}" for x in ex_lines] + [bot_bar]
+                out_blocks.append("\n".join(ex_box))
+            continue
+        if m_sec := re.match(r"^(\S.*):$", line):
+            sec_title = m_sec.group(1)
+            items: list[tuple[str, str]] = []
+            i += 1
+            while i < n and lines[i].strip():
+                ln = lines[i]
+                if re.match(r"^  \{[^}]+\}\s*$", ln):
+                    i += 1
+                    continue
+                if m_row := re.match(r"^  {1,2}(\S.*?\S|\S)\s{2,}(\S.*)$", ln):
+                    items.append((m_row.group(1), m_row.group(2).strip()))
+                elif m_cont := re.match(r"^      +(\S.*)$", ln):
+                    if items:
+                        prev_inv, prev_desc = items[-1]
+                        items[-1] = (prev_inv, (prev_desc + " " + m_cont.group(1).strip()).strip())
+                elif m_solo := re.match(r"^  {1,2}(\S.*)$", ln):
+                    items.append((m_solo.group(1).strip(), ""))
+                i += 1
+            sections.append((sec_title, items))
+            continue
+        flush_sections()
+        p_lines = [line]
+        i += 1
+        while i < n and lines[i].strip() and not re.match(r"^\S.*:$", lines[i]):
+            p_lines.append(lines[i])
+            i += 1
+        out_blocks.append("\n".join(p_lines))
+
+    flush_sections()
+    return "\n\n".join(out_blocks) + ("\n" if text.endswith("\n") else "")
 
 
 def colorize_help(text: str, stream) -> str:
@@ -448,12 +719,42 @@ def colorize_help(text: str, stream) -> str:
             line = _color_usage(line, stream)
         elif not line.strip():
             in_usage = False
+        elif m_ex_top := re.match(r"^(\s*)([╭+][─-]+ )(Examples)( [─-]+[╮+])$", line):
+            lead, left_b, title, right_b = m_ex_top.groups()
+            line = (lead + paint(left_b, "gray", stream=stream)
+                    + paint(title, "bold", "bright_yellow", stream=stream)
+                    + paint(right_b, "gray", stream=stream))
+        elif m_border := re.match(r"^(\s*)([╭├╰+][─┬┼┴╮┤╯+-]+)$", line):
+            line = m_border.group(1) + paint(m_border.group(2), "gray", stream=stream)
+        elif m_row2 := re.match(r"^(\s*)([│|]) (.*?) ([│|]) (.*?) ([│|])$", line):
+            lead, b1, c1, b2, c2, b3 = m_row2.groups()
+            bg = paint(b1, "gray", stream=stream)
+            if c2.strip() == "Description":
+                c1_p = paint(c1, "bold", "bright_yellow", stream=stream)
+                c2_p = paint(c2, "bold", "bright_yellow", stream=stream)
+                line = f"{lead}{bg} {c1_p} {bg} {c2_p} {bg}"
+            else:
+                c1_s = c1.rstrip(" ")
+                c1_pad = c1[len(c1_s):]
+                c1_p = (_color_invocation(c1_s, stream) if c1_s else "") + c1_pad
+                line = f"{lead}{bg} {c1_p} {bg} {c2} {bg}"
+        elif m_row1 := re.match(r"^(\s*)([│|]) (.*?) ([│|])$", line):
+            lead, b1, c1, b2 = m_row1.groups()
+            bg = paint(b1, "gray", stream=stream)
+            c1_s = c1.rstrip(" ")
+            c1_pad = c1[len(c1_s):]
+            c1_p = (_color_invocation(c1_s, stream) if c1_s else "") + c1_pad
+            line = f"{lead}{bg} {c1_p} {bg}"
         elif re.match(r"^\S.*:$", line):
             line = paint(line, "bold", "bright_yellow", stream=stream)
-        elif m := re.match(r"^(  +)(\S.*?)(\s{2,}.*|)$", line):
-            lead, inv, rest = m.groups()
+        elif m := re.match(r"^(  +)(\S.*?)(\s{2,})(.*)$", line):
+            lead, inv, gap, rest = m.groups()
             if len(lead) <= 4 and not line.startswith(" " * 6):
-                line = lead + _color_invocation(inv, stream) + rest
+                line = lead + _color_invocation(inv, stream) + gap + paint(rest, "reset", stream=stream)
+        elif m := re.match(r"^(  +)(\S.*)$", line):
+            lead, inv = m.groups()
+            if len(lead) <= 4 and not line.startswith(" " * 6):
+                line = lead + _color_invocation(inv, stream)
         out_lines.append(line)
     return "\n".join(out_lines)
 
