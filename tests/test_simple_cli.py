@@ -108,6 +108,47 @@ def test_settings_names_and_values_are_checked():
         settings.parse_value("1", "sessions.per_task")
 
 
+def test_role_settings_take_the_role_fields_types(tmp_path):
+    from hive.roles import load_roles
+    assert settings.parse_value("src/**", "roles.programmer.write_globs") == ["src/**"]
+    assert settings.parse_value('["a/**", "b/**"]', "roles.x.write_globs") == ["a/**", "b/**"]
+    assert settings.parse_value("*", "roles.x.tools") == "*"
+    assert settings.parse_value("true", "roles.x.can_code") is True
+    assert settings.parse_value("2", "roles.x.max") == 2
+    with pytest.raises(settings.SettingError, match="true or false"):
+        settings.parse_value("yes", "roles.x.can_code")
+    with pytest.raises(settings.SettingError, match="no role setting"):
+        settings.parse_value("1", "roles.x.colour")
+    path = tmp_path / "hive.toml"
+    settings.write(path, "roles.programmer.write_globs",
+                   settings.parse_value("src/**", "roles.programmer.write_globs"))
+    assert load_roles(load_repo_config(tmp_path)["roles"])["programmer"].write_globs == \
+        ("src/**",)
+    # A single string written by hand is one glob too, not its characters.
+    assert load_roles({"docs": {"write_globs": "docs/**", "task_kinds": "docs"}})["docs"] \
+        .write_globs == ("docs/**",)
+
+
+def test_unset_role_setting_shows_as_not_set(tmp_path):
+    path = tmp_path / "hive.toml"
+    path.write_text("[roles.docs-writer]\ncan_code = true\n")
+    assert settings.unset(path, "roles.docs-writer.can_code")
+    e = settings.explain(tmp_path, "roles.docs-writer.can_code")
+    assert e["value"] is None and settings.show(e["value"]) == "(not set)"
+
+
+def test_headers_and_keys_inside_multiline_strings_are_text(tmp_path):
+    path = tmp_path / "hive.toml"
+    prompt = 'prompt = """\nLine 1\n[example]\ncan_code = false\n"""\n'
+    path.write_text("[roles.custom]\n" + prompt + "\n# x = '''\n[integration]\nreview = \"off\"\n")
+    settings.write(path, "roles.custom.can_code", True)
+    settings.write(path, "integration.review", "reviewer")
+    data = load_repo_config(tmp_path)
+    assert data["roles"]["custom"]["can_code"] is True
+    assert data["roles"]["custom"]["prompt"] == "Line 1\n[example]\ncan_code = false\n"
+    assert data["integration"]["review"] == "reviewer"
+
+
 def test_local_layer_applies_in_worktrees_and_explains_itself(tmp_path):
     clone = make_clone(tmp_path)
     (clone / "hive.toml").write_text(TOML)

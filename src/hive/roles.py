@@ -112,6 +112,9 @@ def _coerce(name: str, data: dict, base: Role | None) -> Role:
     if unknown:
         raise ValueError(f"role {name!r}: unknown fields {sorted(unknown)}")
     conv = dict(data)
+    for k in ("tools", "write_globs", "task_kinds", "wake_on", "active_in"):
+        if isinstance(conv.get(k), str) and not (k == "tools" and conv[k] == "*"):
+            conv[k] = [conv[k]]  # one item, not its characters
     if "tools" in conv:
         conv["tools"] = ALL_TOOLS if conv["tools"] == "*" else BASE_TOOLS | frozenset(conv["tools"])
     for k in ("write_globs", "task_kinds", "wake_on", "active_in"):

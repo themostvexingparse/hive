@@ -88,6 +88,10 @@ def parse_value(text: str, key: str):
         value = text
     section, name = split_key(key)
     default = _lookup(DEFAULT_REPO_CONFIG, section, name)
+    if section.startswith("roles."):
+        if name == "tools" and value == "*":
+            return value  # every tool
+        default = _role_default(key, name)
     if default is not _MISSING and default is not None:
         want = type(default)
         if want is float and isinstance(value, int) and not isinstance(value, bool):
@@ -102,6 +106,20 @@ def parse_value(text: str, key: str):
     return value
 
 
+def _role_default(key: str, name: str):
+    """A value of the type a role setting takes, from the Role fields: tuples and frozensets
+    are lists in TOML, `max` and `fallback_to` may be left out (None)."""
+    from dataclasses import fields
+    from .roles import Role
+    types = {f.name: f.type for f in fields(Role) if f.name != "name"}
+    if name not in types:
+        raise SettingError(f"no role setting {key!r}; roles have: " + ", ".join(sorted(types)))
+    t = str(types[name])
+    if t.startswith(("tuple", "frozenset")):
+        return []
+    return {"bool": False, "int": 0, "int | None": 0, "str": "", "str | None": ""}[t]
+
+
 def _type_name(v) -> str:
     return {bool: "true or false", int: "a whole number", float: "a number",
             str: "text", list: 'a list, e.g. ["a", "b"]'}.get(type(v), type(v).__name__)
@@ -109,6 +127,8 @@ def _type_name(v) -> str:
 
 def show(value) -> str:
     """A value as it is written in TOML, on one line (lists too: `["a", "b"]`)."""
+    if value is None:
+        return "(not set)"
     if isinstance(value, list):
         return "[" + ", ".join(show(v) for v in value) + "]"
     return tomli_w.dumps({"v": value})[4:].strip()
@@ -187,10 +207,30 @@ def unset(path: Path, key: str) -> bool:
     return True
 
 
+_ML_QUOTES = re.compile(r'"""|\'\'\'')
+
+
+def _in_strings(lines: list[str]) -> list[bool]:
+    """For each line, whether it starts inside a multi-line string (\"\"\"…\"\"\" or '''…'''),
+    so a `[header]` or `key =` line in a prompt's text isn't taken for TOML structure."""
+    out, delim = [], None
+    for line in lines:
+        out.append(delim is not None)
+        if delim is None and line.lstrip().startswith("#"):
+            continue  # a commented-out line
+        for m in _ML_QUOTES.finditer(line):
+            if delim is None:
+                delim = m.group()
+            elif m.group() == delim:
+                delim = None
+    return out
+
+
 def _find_section(lines: list[str], section: str) -> tuple[int | None, int]:
     start = None
+    inside = _in_strings(lines)
     for i, line in enumerate(lines):
-        m = _HEADER.match(line)
+        m = None if inside[i] else _HEADER.match(line)
         if not m:
             continue
         if start is not None:
@@ -202,7 +242,9 @@ def _find_section(lines: list[str], section: str) -> tuple[int | None, int]:
 
 def _find_key(lines: list[str], start: int, end: int, name: str) -> int | None:
     pat = re.compile(rf"^\s*[\"']?{re.escape(name)}[\"']?\s*=")
-    return next((i for i in range(start + 1, end) if pat.match(lines[i])), None)
+    inside = _in_strings(lines)
+    return next((i for i in range(start + 1, end) if not inside[i] and pat.match(lines[i])),
+                None)
 
 
 def _save(path: Path, lines: list[str]) -> None:
