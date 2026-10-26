@@ -225,10 +225,14 @@ _SEPARATOR_CHARS = set(";|&\n\r(){}")
 _QUOTES = "'\""
 
 
-def _tokenize(command: str) -> list[list[str]]:
+def _tokenize(command: str, escapes: bool = True) -> list[list[str]]:
     """Quote-aware split into simple commands (lists of words, quotes removed). Separators
     and spaces inside '…' or "…" are literal, so `git commit -m "a; rm -rf b"` is one command
-    and `bash -c "x && y"` keeps its inner command as one word."""
+    and `bash -c "x && y"` keeps its inner command as one word.
+
+    `escapes`: a backslash escapes a following quote, separator, space or backslash (and `\\"`
+    or `\\\\` inside "…"), as in POSIX shells. cmd.exe and PowerShell treat it as an ordinary
+    character (Windows paths), which `escapes=False` follows; see `_parts`."""
     parts: list[list[str]] = []
     words: list[str] = []
     word, quote, has_word = [], None, False
@@ -247,14 +251,32 @@ def _tokenize(command: str) -> list[list[str]]:
         words = []
 
     command = command or ""
+    skip = False
     for i, ch in enumerate(command):
+        if skip:
+            skip = False
+            continue
+        nxt = command[i + 1:i + 2]
         if quote:
-            if ch == quote:
+            if escapes and ch == "\\" and quote == '"' and nxt in ('"', "\\"):
+                word.append(nxt)
+                skip = True
+            elif ch == quote:
                 quote = None
             else:
                 word.append(ch)
             continue
-        if ch in _QUOTES:
+        if escapes and ch == "\\" and nxt and (nxt in _QUOTES or nxt in _SEPARATOR_CHARS
+                                               or nxt.isspace() or nxt == "\\"):
+            if nxt not in "\n\r":  # backslash-newline continues the line
+                word.append(nxt)
+                has_word = True
+            skip = True
+        elif ch == "{" and nxt == "}":  # `find … -exec rm {} \;`: a word, not a group
+            word.append("{}")
+            has_word = True
+            skip = True
+        elif ch in _QUOTES:
             quote, has_word = ch, True
         elif ch == "&" and ((word and word[-1] in "<>") or command[i + 1:i + 2] == ">"):
             # A redirection (`2>&1`, `>&2`, `&> file`), not a separator.
@@ -271,9 +293,24 @@ def _tokenize(command: str) -> list[list[str]]:
     return parts
 
 
+def _parts(command: str) -> list[list[str]]:
+    """The simple commands of `command` under both readings of a backslash (POSIX escape, or
+    a literal Windows path character), so a command hidden by one reading is still seen:
+    checks flag a command when either reading does, and allow it only when both do."""
+    parts = _tokenize(command)
+    if "\\" in (command or ""):
+        parts += [p for p in _tokenize(command, escapes=False) if p not in parts]
+    return parts
+
+
 _WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "noglob",
-             "exec", "env", "call", "start", "invoke-expression", "iex"}
+             "exec", "env", "call", "start"}
+# PowerShell's eval: the argument is itself a command line, split and checked as one.
+_EVAL_PROGRAMS = {"invoke-expression", "iex"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+# Environment variables that set git configuration (e.g. core.hooksPath) for one command.
+_GIT_CONFIG_ENV = re.compile(r"^GIT_CONFIG_(PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)=", re.I)
+_FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
 _EXTENSIONS = (".exe", ".cmd", ".bat", ".com", ".ps1", ".sh")
 _POSIX_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 _POWERSHELLS = {"powershell", "pwsh"}
@@ -298,7 +335,8 @@ def _nested(words: list[str]) -> str | None:
         # `-c` may be bundled with other short options: `bash -lc …` (how Codex runs commands).
         for i, a in enumerate(lowered):
             if re.fullmatch(r"-[a-z]*c[a-z]*", a):
-                return " ".join(_requote(args[i + 1:]))
+                # Only the next word is the script; any after it are its $0, $1, …
+                return args[i + 1] if i + 1 < len(args) else None
     if prog == "cmd":
         for i, a in enumerate(lowered):
             if a in ("/c", "/k"):
@@ -330,15 +368,23 @@ def _split(command: str, depth: int = 0) -> list[list[str]]:
     """Simple commands as word lists; program normalised, quotes stripped, nested shells
     unwrapped (one entry for the shell call itself, plus its inner commands)."""
     out: list[list[str]] = []
-    for words in _tokenize(command):
-        while words and (_ASSIGN.match(words[0]) or program(words[0]) in _WRAPPERS
-                         or words[0] in ("$", "@")):
+    for words in _parts(command):
+        # GIT_CONFIG_* assignments stay: they change what git does (see dangerous()).
+        while words and ((_ASSIGN.match(words[0]) and not _GIT_CONFIG_ENV.match(words[0]))
+                         or program(words[0]) in _WRAPPERS or words[0] in ("$", "@")):
             words.pop(0)
             if words and words[0].lstrip("-").isdigit():  # e.g. `timeout 30 cmd`
                 words.pop(0)
         if not words:
             continue
         words[0] = program(words[0])
+        if words[0] in _EVAL_PROGRAMS:
+            rest = [w for w in words[1:] if not _ps_param(w, "command")]
+            if depth >= 4:
+                out.append(words)  # too deep to check: left unmatched, so never allowed
+            elif rest:
+                out.extend(_split(" ".join(_requote(rest)), depth + 1))
+            continue
         if words[0] == "git":
             words = ["git", *_strip_git_globals(words[1:])]
         out.append(words)
@@ -351,6 +397,13 @@ def _split(command: str, depth: int = 0) -> list[list[str]]:
             rest = _xargs_command(words[1:])
             if rest:
                 out.extend(_split(" ".join(_requote(rest)), depth + 1))
+        if words[0] == "find":
+            for i, w in enumerate(words):
+                if w.lower() in _FIND_EXEC:
+                    run = words[i + 1:]
+                    end = next((k for k, x in enumerate(run) if x in (";", "+")), len(run))
+                    if run[:end]:
+                        out.extend(_split(" ".join(_requote(run[:end])), depth + 1))
     return out
 
 
@@ -360,11 +413,41 @@ _GIT_VALUE_OPTS = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--con
 
 
 def _strip_git_globals(args: list[str]) -> list[str]:
-    """`git -C dir -c k=v --no-pager push …` -> `push …`, so rules see the subcommand."""
-    i = 0
+    """`git -C dir -c k=v --no-pager push …` -> `push …`, so rules see the subcommand.
+    Options overriding hooks (`-c core.hooksPath=…`) are kept, so no rule allows the command
+    and dangerous() flags it. With no subcommand (`git --version`), the options are it."""
+    i, kept = 0, []
     while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in _GIT_VALUE_OPTS else 1
-    return args[i:]
+        step = 2 if args[i] in _GIT_VALUE_OPTS else 1
+        if any("hookspath" in a.lower() for a in args[i:i + step]):
+            kept += args[i:i + step]
+        i += step
+    if i >= len(args) and not kept:
+        return args
+    return kept + args[i:]
+
+
+def _skips_hooks(commit_args: list[str]) -> bool:
+    """Whether `git commit` options include --no-verify (or an abbreviation, or -n)."""
+    skip = False
+    for a in commit_args:
+        if skip:
+            skip = False
+            continue
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if len(name) >= 6 and "--no-verify".startswith(name):
+                return True
+        elif re.fullmatch(r"-[A-Za-z]+", a):
+            for k, ch in enumerate(a[1:]):
+                if ch == "n":
+                    return True
+                if ch in "mFCct":  # takes a value: the rest of this word, or the next word
+                    skip = k == len(a) - 2
+                    break
+    return False
 
 
 # xargs options that take a separate value.
@@ -449,6 +532,14 @@ def dangerous(command: str) -> str | None:
                     if program(inner[0]) in _DELETE_PROGRAMS or dangerous(
                             " ".join(_requote(inner))):
                         return "recursive delete (find -exec)"
+        if prog == "git":
+            # Hive's pre-commit hook refuses commits of files the agent hasn't leased.
+            if any("hookspath" in l for l in low):
+                return "overrides git hooks (core.hooksPath)"
+            if args[:1] == ["commit"] and _skips_hooks(args[1:]):
+                return "skips git hooks (commit --no-verify)"
+        if _GIT_CONFIG_ENV.match(prog):
+            return "overrides git configuration (GIT_CONFIG_*)"
         if prog in ("chmod", "chown", "chgrp") and ({"-r", "--recursive"} & set(low)):
             return "recursive permission change"
         if prog in ("icacls", "cacls") and set(low) & {"/t", "/grant", "/deny", "/remove",

@@ -270,3 +270,46 @@ def test_wider_default_lists_by_role_and_preset():
     for cmd in ("curl -sSLo out https://x", "curl -X GET https://x",
                 "curl -Uri https://x -OutFile a.zip", "wget --method GET https://x"):
         assert P.dangerous(cmd) is None, cmd
+
+
+def test_hidden_commands_are_unwrapped_and_checked():
+    w = P.build_rules({})["worker"]
+    forbidden, allow = w["forbidden"], w["allow"]
+    hidden = [
+        r"find . -maxdepth 0 -exec hive decide 1 approve \;",       # find -exec
+        "find . -execdir hive admin enroll x {} +",
+        'iex "git status ; hive decide 1 approve"',                  # PowerShell eval
+        'Invoke-Expression -Command "git log; hive say hi"',
+        'bash -c "hive decide 1 approve ; git status" dummy',        # bash -c script $0
+        r'echo "\"" && hive decide 1 approve',                       # escaped quote
+    ]
+    for cmd in hidden:
+        assert P.matches(cmd, forbidden), cmd
+        assert not P.allowed(cmd, allow), cmd
+    assert P.pushes_to(r"find . -exec git push --force origin main \;", "main")
+    assert P.pushes_to('bash -c "git push origin main" x', "main")
+    assert P.dangerous('bash -c "rm -rf / ; true" arg0')
+    assert P.dangerous(r'echo "\"" && rm -rf /')
+    # A backslash is literal in cmd.exe: what follows a closing quote still counts there.
+    assert P.matches(r'dir "C:\tmp\" & hive decide 1 approve', forbidden)
+
+
+def test_windows_paths_and_find_exec_still_parse():
+    w = P.build_rules({})["worker"]
+    for cmd in (r'"C:\Program Files\Git\cmd\git.exe" status', r"dir C:\Users\me\Desktop",
+                r"type C:\x\y.txt | findstr foo", r'find . -name "*.py" -exec grep -l TODO {} +',
+                'iex "git status"', "git --version"):
+        assert P.allowed(cmd, w["allow"]), cmd
+        assert P.dangerous(cmd) is None, cmd
+    assert P.dangerous(r'find . -name "*.pyc" -exec rm {} \;') == "recursive delete (find -exec)"
+
+
+def test_skipping_or_redirecting_git_hooks_needs_approval():
+    for cmd in ("git commit --no-verify -m wip", "git commit -n -m wip", "git commit -nm wip",
+                "git commit --no-ver -m wip", "git -c core.hooksPath=/dev/null commit -m x",
+                "git config core.hooksPath /tmp/none",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=x git commit"):
+        assert P.needs_approval(cmd, []), cmd
+    for cmd in ("git commit -m wip", "git commit -am wip", 'git commit -m "mention -n"',
+                "git commit -m -n", "grep -r hooksPath docs"):
+        assert P.dangerous(cmd) is None, cmd
