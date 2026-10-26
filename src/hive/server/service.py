@@ -565,8 +565,31 @@ class Hive:
         return {"status": "applied"}
 
     def _apply_roles(self, c, by: str, name: str, roles: list[str], old: list[str]) -> None:
+        """Set an agent's roles within each role's `max`. There is one orchestrator: giving
+        the role to another agent hands it over (the previous holder keeps its other roles),
+        and fleet.orchestrator follows whoever holds it."""
+        f = self._fleet(c)
+        cat = self._catalog(f)
+        others = {a.name: list(a.roles) for a in c.execute(select(agents)) if a.name != name}
+        for r in sorted(set(roles) - set(old)):
+            role = cat.get(r)
+            holders = [n for n, rs in others.items() if r in rs]
+            if role is None or role.max is None or len(holders) < role.max:
+                continue
+            if r != "orchestrator":
+                raise ApiError(409, "role_full", f"role {r!r} allows at most {role.max} "
+                                                 f"holder(s), held by {', '.join(holders)}")
+            for h in holders:
+                keep = [x for x in others[h] if x != r]
+                c.execute(update(agents).where(agents.c.name == h).values(roles=keep))
+                self._emit(c, "agent.roles_changed", by, name=h, roles=keep, old=others[h])
+                others[h] = keep
         c.execute(update(agents).where(agents.c.name == name).values(roles=roles))
         self._emit(c, "agent.roles_changed", by, name=name, roles=roles, old=old)
+        holders = sorted([name] if "orchestrator" in roles else []) + sorted(
+            n for n, rs in others.items() if "orchestrator" in rs)
+        if f["orchestrator"] not in holders and (holders or f["orchestrator"]):
+            self._set_fleet(c, orchestrator=holders[0] if holders else None)
 
     def heartbeat(self, actor: Actor, busy: bool = False, attached: bool = False) -> dict:
         with self._write() as c:
@@ -774,6 +797,10 @@ class Hive:
                 if state not in allowed:
                     raise ApiError(400, "bad_state", f"cannot set state {state!r}")
                 vals["state"] = state
+                if state == "open" and t["state"] != "open":
+                    # Reopened: free for any agent again, starting a fresh review.
+                    vals.update(assignee=None, branch=None, reviewer=None, pending_sha=None,
+                                approved=False)
             if note:
                 vals["notes"] = (t["notes"] + f"\n[{actor.name}] {note}").strip()[-20000:]
             c.execute(update(tasks).where(tasks.c.id == task_id).values(**vals))
@@ -783,7 +810,7 @@ class Hive:
                        state=state or t["state"], note=note[:2000])
             if state in ("failed", "cancelled"):
                 self._block_dependents(c, task_id, state)
-            if state in ("failed", "cancelled", "done"):
+            if state in ("failed", "cancelled", "done", "open"):
                 self._schedule(c, f)
             return self._task(c, task_id)
 

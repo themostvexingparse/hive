@@ -683,3 +683,40 @@ def test_failed_tasks_block_their_dependents_transitively(env):
     o.patch(f"/tasks/{t1['id']}", {"state": "failed", "note": "broken"}, expect=200)
     for t in (t2, t3, t4):
         assert admin.get(f"/tasks/{t['id']}")["state"] == "blocked", t["title"]
+
+
+def test_giving_the_orchestrator_role_hands_it_over(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    admin.patch("/agents/prog1", {"roles": ["orchestrator"]}, expect=200)
+    roles = {a["name"]: a["roles"] for a in admin.get("/agents")}
+    assert roles["prog1"] == ["orchestrator"] and "orchestrator" not in roles["orch"]
+    assert admin.get("/fleet")["orchestrator"] == "prog1"
+    admin.patch("/agents/orch", {"roles": ["programmer"]}, expect=200)
+    admin.delete("/agents/orch", expect=200)            # no longer the fleet's orchestrator
+    admin.delete("/agents/prog1", expect=409)           # it is now
+
+
+def test_role_max_is_enforced_for_other_roles(env):
+    hive, admin, ag = env
+    admin.put("/config", {"roles": {"docs": {"can_code": True, "task_kinds": ["docs"],
+                                             "max": 1}}}, expect=200)
+    admin.patch("/agents/prog1", {"roles": ["programmer", "docs"]}, expect=200)
+    r = admin.patch("/agents/prog2", {"roles": ["programmer", "docs"]}, expect=409)
+    assert r["error"] == "role_full"
+
+
+def test_reopened_task_is_free_for_any_agent(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    o = ag["orch"]
+    t = o.post("/tasks", {"title": "flaky", "assignee": "prog1"}, expect=201)
+    o.patch(f"/tasks/{t['id']}", {"state": "failed", "note": "prog1 broke"}, expect=200)
+    for a in ("prog1", "prog2"):   # finish their start-up tasks so both are idle
+        for x in admin.get(f"/tasks?assignee={a}"):
+            if x["state"] in ("claimed", "in_progress"):
+                ag[a].post(f"/tasks/{x['id']}/complete", {"result": "ok"}, expect=200)
+    admin.patch("/agents/prog1", {"roles": ["reviewer"]}, expect=200)   # prog1 can't code now
+    r = o.patch(f"/tasks/{t['id']}", {"state": "open", "note": "retry"}, expect=200)
+    assert r["state"] == "claimed" and r["assignee"] == "prog2"
+    assert r["branch"] == "hive/prog2" and r["approved"] is False
