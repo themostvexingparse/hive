@@ -251,6 +251,32 @@ def test_pre_commit_path_check_refuses_prompt_files(tmp_path):
     assert r.get_json()["uncovered"] == [".hive/prompts/worker.md"]
 
 
+def test_protected_paths_ignore_case_and_dot_segments():
+    for p in (".hive/Prompts/worker.md", ".hive/./prompts/worker.md", ".//.hive/AGENT/x.json",
+              ".hive\\prompts\\worker.md", "../outside.md"):
+        assert prompts.is_protected(p), p
+    assert not prompts.is_protected(".hive/plans/a.md")
+    assert not prompts.is_protected("src/prompts/worker.md")
+
+
+@pytest.mark.parametrize("state", ["frozen", "paused"])
+def test_pre_commit_path_check_refuses_commits_while_the_fleet_is_stopped(tmp_path, state):
+    from hive.daemon.localapi import create_local_app
+    root = new_repo(tmp_path)
+    d = make_daemon(tmp_path, worktree=root)
+    d.slots["s1"].me = {"roles": ["programmer"], "can_code": True, "write_globs": []}
+    d.slots["s1"].leases = [{"id": 1, "fencing": 1, "globs": ["src/**"]}]
+    d.slots["s1"].fleet = {"state": state}
+    c = create_local_app(d).test_client()
+    r = c.post("/slot/s1/check-paths", json={"paths": ["src/a.py"]},
+               headers={"X-Hive-Local": d.mcfg.local_secret}).get_json()
+    assert r["uncovered"] == ["src/a.py"] and state in r["reason"]
+    d.slots["s1"].fleet = {"state": "running"}
+    r = c.post("/slot/s1/check-paths", json={"paths": ["src/a.py"]},
+               headers={"X-Hive-Local": d.mcfg.local_secret}).get_json()
+    assert r == {"uncovered": []}
+
+
 def test_check_reports_unknown_roles_and_placeholders(tmp_path):
     root = new_repo(tmp_path)
     write(root, "orchestrator.md", "Hello {{slot}}.")                 # session-only variable

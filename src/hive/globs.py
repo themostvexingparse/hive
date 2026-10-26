@@ -14,15 +14,14 @@ _WILDCARD = re.compile(r"[*?]")
 
 
 def normalize(path: str) -> str:
-    p = path.replace("\\", "/").strip()
-    while p.startswith("./"):
-        p = p[2:]
-    p = re.sub(r"/+", "/", p).strip("/")
-    if not p or p == ".":
+    """Canonical repo-relative form: `/` separators, no empty or `.` segments, so
+    `.//./src/./app.py` and `src/app.py` are the same path; `..` is refused."""
+    segs = [s for s in path.replace("\\", "/").strip().split("/") if s not in ("", ".")]
+    if not segs:
         return "**"
-    if ".." in p.split("/"):
+    if ".." in segs:
         raise ValueError(f"path escapes the repository: {path!r}")
-    return p
+    return "/".join(segs)
 
 
 def is_literal(glob: str) -> bool:

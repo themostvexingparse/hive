@@ -69,6 +69,9 @@ def create_local_app(daemon: Daemon) -> Flask:
     def check_paths(slot):
         rt = slot_or_404(slot)
         paths = (request.get_json(silent=True) or {}).get("paths", [])
+        state = (rt.fleet or {}).get("state")
+        if state in ("frozen", "paused"):  # as the server refuses integrating then
+            return jsonify({"uncovered": list(paths), "reason": f"the fleet is {state}"})
         allowed = list(rt.me.get("write_globs", []))
         if rt.me.get("can_code"):
             allowed += [g for l in rt.leases for g in l["globs"]]

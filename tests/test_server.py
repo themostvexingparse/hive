@@ -600,3 +600,10 @@ def test_integrate_rejects_protected_paths_under_a_wildcard_lease(env):
                                             "paths": [p]}, expect=403)
         assert r["error"] == "protected_path"
 
+
+def test_dot_segment_paths_cannot_be_leased_twice(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    ag["prog1"].post("/leases", {"globs": ["src/./app.py"]}, expect=201)
+    r = ag["prog2"].post("/leases", {"globs": ["src/app.py"]}, expect=409)
+    assert r["error"] == "lease_conflict"

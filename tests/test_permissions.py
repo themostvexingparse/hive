@@ -123,6 +123,16 @@ def test_globs_case_and_brackets():
     assert not G.matches("src/a.py", "src/[ab].py")
 
 
+def test_glob_dot_segments_and_slashes_are_canonical():
+    from hive import globs as G
+    for p in ("src/./app.py", ".//./src/app.py", "./src//app.py", "src\\.\\app.py", "/src/app.py/"):
+        assert G.normalize(p) == "src/app.py", p
+        assert G.overlaps(p, "src/app.py"), p
+    assert G.normalize("./") == G.normalize(".") == "**"
+    with pytest.raises(ValueError):
+        G.normalize("src/../../etc")
+
+
 def test_encoded_powershell_is_unwrapped():
     import base64
     enc = base64.b64encode("Remove-Item build -Recurse".encode("utf-16-le")).decode()

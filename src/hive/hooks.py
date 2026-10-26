@@ -144,6 +144,10 @@ def git_pre_commit() -> int:
     except Exception:
         print("hive: daemon unreachable; refusing agent commit", file=sys.stderr)
         return 1
+    if r.get("reason"):
+        print(f"hive: no commits while {r['reason']}; wait until it continues.",
+              file=sys.stderr)
+        return 1
     if r["uncovered"]:
         print("hive: these staged files are not covered by your leases: "
               + ", ".join(r["uncovered"]) + "\nUse lease_acquire, and commit via lease_release.",

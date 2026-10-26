@@ -82,8 +82,13 @@ def prompts_dir(root: Path) -> Path:
 
 
 def is_protected(path: str) -> bool:
-    """A repository-relative path agents may not change."""
-    return G.covered(path, PROTECTED_GLOBS)
+    """A repository-relative path agents may not change. Case-insensitive, since Windows and
+    macOS treat `.hive/Prompts/x.md` as the same file; a path escaping the repo counts too."""
+    try:
+        norm = G.normalize(path).casefold()
+    except ValueError:
+        return True
+    return G.covered(norm, [g.casefold() for g in PROTECTED_GLOBS])
 
 
 def variables(repo_cfg: dict, root: Path | None, **session) -> dict[str, str]:
