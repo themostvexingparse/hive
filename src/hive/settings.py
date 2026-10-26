@@ -207,22 +207,42 @@ def unset(path: Path, key: str) -> bool:
     return True
 
 
-_ML_QUOTES = re.compile(r'"""|\'\'\'')
-
-
 def _in_strings(lines: list[str]) -> list[bool]:
     """For each line, whether it starts inside a multi-line string (\"\"\"…\"\"\" or '''…'''),
-    so a `[header]` or `key =` line in a prompt's text isn't taken for TOML structure."""
-    out, delim = [], None
+    so a `[header]` or `key =` line in a prompt's text isn't taken for TOML structure. Quotes
+    inside one-line strings ("…", '…') and comments don't open or close one."""
+    out, delim = [], None  # delim: the multi-line string's quotes while inside one
     for line in lines:
         out.append(delim is not None)
-        if delim is None and line.lstrip().startswith("#"):
-            continue  # a commented-out line
-        for m in _ML_QUOTES.finditer(line):
-            if delim is None:
-                delim = m.group()
-            elif m.group() == delim:
-                delim = None
+        i, n = 0, len(line)
+        while i < n:
+            if delim:
+                if delim == '"""' and line[i] == "\\":
+                    i += 2  # an escape, e.g. \" or \\
+                elif line.startswith(delim, i):
+                    i += 3
+                    for _ in range(2):  # up to two more quotes belong to the string
+                        if i < n and line[i] == delim[0]:
+                            i += 1
+                    delim = None
+                else:
+                    i += 1
+                continue
+            ch = line[i]
+            if ch == "#":
+                break  # a comment: the rest of the line
+            if line.startswith('"""', i) or line.startswith("'''", i):
+                delim, i = line[i:i + 3], i + 3
+            elif ch == '"':  # one-line basic string, with escapes
+                i += 1
+                while i < n and line[i] != '"':
+                    i += 2 if line[i] == "\\" else 1
+                i += 1
+            elif ch == "'":  # one-line literal string, no escapes
+                end = line.find("'", i + 1)
+                i = n if end < 0 else end + 1
+            else:
+                i += 1
     return out
 
 

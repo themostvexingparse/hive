@@ -4,6 +4,7 @@ shortcuts, automatic config upload, help tiers and `hive` on its own."""
 import json
 import subprocess
 import time
+import tomllib
 
 import pytest
 
@@ -514,3 +515,25 @@ def test_moving_an_agent_keeps_its_model_and_permission_mode(fleet, capsys):
     assert placement() == {"model": "sonnet", "permission_mode": "acceptEdits"}
     cli.main(["agents", "edit", "dev", "--on", "desk", "--permission-mode", "default"])
     assert placement() == {"model": "sonnet", "permission_mode": ""}
+
+
+@pytest.mark.parametrize("before", [
+    "prompt = \"Quote raw text with ''' fences.\"",          # in a one-line basic string
+    "prompt = 'Use \"\"\" for docstrings.'",                # in a one-line literal string
+    'x = 1  # see """',                                     # in a trailing comment
+    'prompt = "say \\"\\"\\" here"',                        # escaped quotes in a basic string
+    'prompt = """\nline with \\""" inside\n"""',            # escaped quotes in a multi-line one
+    "prompt = '''\nends with quotes'''''",                  # closing ''' plus two more quotes
+    'prompt = """a "quoted" [word]\n[not.a.header]\n"""',
+])
+def test_quotes_in_other_strings_and_comments_dont_hide_sections(tmp_path, before):
+    path = tmp_path / "hive.toml"
+    path.write_text(f"[roles.docs]\n{before}\n\n[integration]\nreview = \"off\"\n")
+    original = load_repo_config(tmp_path)["roles"]["docs"]
+    settings.write(path, "integration.review", "reviewer")
+    assert settings.unset(path, "integration.review")
+    settings.write(path, "integration.shell", "bash")
+    data = load_repo_config(tmp_path)
+    assert data["integration"]["shell"] == "bash" and "review" not in tomllib.loads(
+        path.read_text())["integration"]
+    assert data["roles"]["docs"] == original                 # the string itself is untouched
