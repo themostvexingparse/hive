@@ -1237,11 +1237,35 @@ class Hive:
             return self._public_fleet(nf)
 
     def reset_fleet(self, actor: Actor) -> dict:
-        """Admin escape hatch: return to setup (keeps agents, tasks and history)."""
+        """Admin escape hatch: return to setup (keeps agents, tasks and history). Nothing of
+        the old run may hold files or freeze the next one: leases are revoked, open and queued
+        decisions cancelled, pending command approvals denied and unused grants cancelled."""
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
         with self._write() as c:
-            self._fleet(c)
+            f = self._fleet(c)
+            held = c.execute(select(leases).where(leases.c.state == "active")).fetchall()
+            if held:
+                c.execute(update(leases).where(leases.c.id.in_([l.id for l in held]))
+                          .values(state="revoked"))
+                self._set_fleet(c, fencing_counter=f["fencing_counter"] + 1)
+                for l in held:
+                    self._emit(c, "lease.revoked", actor.name, "*", id=l.id, holder=l.holder,
+                               globs=l.globs, reason="the fleet was reset")
+            c.execute(update(decisions).where(decisions.c.state.in_(("open", "queued")))
+                      .values(state="cancelled", note="the fleet was reset", answered_at=now()))
+            pending = c.execute(select(approvals).where(
+                approvals.c.state.in_(("requested", "approved")))).fetchall()
+            if pending:
+                c.execute(update(approvals).where(approvals.c.id.in_([a.id for a in pending]))
+                          .values(state="denied", decided_by=actor.name, decided_at=now(),
+                                  note="the fleet was reset"))
+                for a in pending:
+                    self._emit(c, "approval.decided", actor.name, f"agent:{a.agent}", id=a.id,
+                               approve=False, note="the fleet was reset", command=a.command,
+                               by=actor.name)
+            c.execute(update(integrations).where(integrations.c.state == "granted")
+                      .values(state="cancelled"))
             self._set_fleet(c, state="setup", prev_state=None, frozen_at=None,
                             blocking_decision=None)
             self._emit(c, "fleet.state", actor.name, "*", state="setup")
@@ -1325,7 +1349,12 @@ class Hive:
                 state="answered", answer=answer, note=note, answered_at=now()))
             approved = answer.strip().lower() in ("approve", "approved", "yes", "y", "ok")
             paused = f["state"] == "paused"
-            if d["kind"] == "start_approval":
+            # Only the decision the fleet is waiting on changes its state; answering any other
+            # (e.g. one left from an earlier run) just records the answer.
+            current = f["blocking_decision"] == did
+            if d["blocking"] and not current:
+                pass
+            elif d["kind"] == "start_approval":
                 if approved:
                     self._open_drafts(c, actor.name)
                 target = "running" if approved else "planning"

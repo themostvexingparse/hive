@@ -118,7 +118,7 @@ decisions = Table(
     Column("context", Text, nullable=False, default=""),
     Column("task_id", Integer, nullable=True),
     Column("blocking", Boolean, nullable=False),
-    Column("state", String(16), nullable=False),  # queued|open|answered
+    Column("state", String(16), nullable=False),  # queued|open|answered|cancelled
     Column("answer", Text, nullable=True),
     Column("note", Text, nullable=True),
     Column("created", Float, nullable=False),

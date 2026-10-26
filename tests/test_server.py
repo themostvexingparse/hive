@@ -3,6 +3,7 @@ import time
 import pytest
 
 from hive.server.app import create_app
+from hive.server import service as sservice
 from hive.server.service import create_hive
 
 ADMIN = "admin-secret"
@@ -607,3 +608,41 @@ def test_dot_segment_paths_cannot_be_leased_twice(env):
     ag["prog1"].post("/leases", {"globs": ["src/./app.py"]}, expect=201)
     r = ag["prog2"].post("/leases", {"globs": ["src/app.py"]}, expect=409)
     assert r["error"] == "lease_conflict"
+
+
+def test_reset_clears_the_old_runs_leases_decisions_and_approvals(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    ag["prog1"].post("/leases", {"globs": ["src/locked.py"]}, expect=201)
+    approval = ag["prog1"].post("/approvals", {"command": "rm -r out", "reason": "z"}, expect=201)
+    stale = ag["orch"].post("/decisions", {"kind": "question", "question": "Old blocker?",
+                                           "freeze": True}, expect=201)
+    queued = ag["orch"].post("/decisions", {"kind": "stuck", "question": "Old queued?"},
+                             expect=201)
+    admin.post("/fleet/reset", {}, expect=200)
+    assert admin.get("/leases") == []
+    assert admin.get("/decisions?state=open") == [] and admin.get("/decisions?state=queued") == []
+    states = {d["id"]: d["state"] for d in admin.get("/decisions")}
+    assert states[stale["id"]] == states[queued["id"]] == "cancelled"
+    assert admin.get(f"/approvals/{approval['id']}")["state"] == "denied"
+    # The next run can lease the same file and is not unfrozen by the old decision.
+    to_running(admin, ag)
+    ag["prog2"].post("/leases", {"globs": ["src/locked.py"]}, expect=201)
+    admin.post(f"/decisions/{stale['id']}/answer", {"answer": "yes"}, expect=409)
+
+
+def test_answering_a_decision_the_fleet_is_not_waiting_on_leaves_it_frozen(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    current = ag["orch"].post("/decisions", {"kind": "stuck", "question": "Now?"}, expect=201)
+    other = ag["orch"].post("/decisions", {"kind": "stuck", "question": "Later?"}, expect=201)
+    assert other["state"] == "queued"
+    # A blocking decision left open while another one blocks (e.g. from before a restart).
+    with hive._write() as c:
+        c.execute(sservice.update(sservice.decisions)
+                  .where(sservice.decisions.c.id == other["id"]).values(state="open"))
+    admin.post(f"/decisions/{other['id']}/answer", {"answer": "ok"}, expect=200)
+    f = admin.get("/fleet")
+    assert f["state"] == "frozen" and f["blocking_decision"] == current["id"]
+    admin.post(f"/decisions/{current['id']}/answer", {"answer": "ok"}, expect=200)
+    assert admin.get("/fleet")["state"] == "running"
