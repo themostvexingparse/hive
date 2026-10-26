@@ -878,3 +878,31 @@ def test_a_superseded_grant_can_still_be_confirmed(env):
                      expect=200)
     ag["prog1"].post("/integrate/confirm", {"grant": g1, "sha": "a" * 40, "paths": []},
                      expect=409)   # but only once
+
+
+def test_failover_with_a_role_at_its_max_and_the_standbys_tasks(tmp_path):
+    from hive.server.service import ADMIN as A, Actor, now
+    hive = create_hive(f"sqlite:///{tmp_path / 'h.db'}", tick_interval=0, offline_after=60)
+    hive.set_config(A, {"orchestrator": {"standby": ["stand"]},
+                        "roles": {"reviewer": {"max": 1}}})
+    hive.enroll(A, "orch", "claude", ["orchestrator", "planner"])
+    hive.enroll(A, "stand", "claude", ["programmer", "reviewer"])
+    hive.enroll(A, "dev", "claude", ["programmer"])
+    orch = Actor("agent", "orch", ["orchestrator", "planner"])
+    stand = Actor("agent", "stand", ["programmer", "reviewer"])
+    for a in (orch, stand, Actor("agent", "dev", ["programmer"])):
+        hive.heartbeat(a)
+    hive.start_fleet(A, "g")
+    hive.create_task(orch, "plan", "", "code")
+    d = hive.request_decision(orch, "start_approval", "OK?")
+    hive.answer_decision(A, d["id"], "approve")
+    first = hive.create_task(orch, "first", "", "code")
+    reserved = hive.create_task(orch, "later", "", "code", deps=[first["id"]], assignee="stand")
+    assert hive.get_task(reserved["id"])["state"] == "open"
+    hive.report_quota(orch, until=now() + 3600)
+    hive.tick(force=True)
+    roles = {a["name"]: a["roles"] for a in hive.roster()}
+    assert hive.get_fleet()["orchestrator"] == "stand"
+    assert roles["stand"] == ["orchestrator", "reviewer"]        # keeps its non-coding role
+    assert set(roles["orch"]) == {"programmer", "planner"}       # no second reviewer
+    assert hive.get_task(reserved["id"])["assignee"] is None     # not kept for the orchestrator

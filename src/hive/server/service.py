@@ -575,10 +575,12 @@ class Hive:
             self._apply_roles(c, actor.name, name, roles, a["roles"])
         return {"status": "applied"}
 
-    def _apply_roles(self, c, by: str, name: str, roles: list[str], old: list[str]) -> None:
+    def _apply_roles(self, c, by: str, name: str, roles: list[str], old: list[str],
+                     enforce_max: bool = True) -> None:
         """Set an agent's roles within each role's `max`. There is one orchestrator: giving
         the role to another agent hands it over (the previous holder keeps its other roles),
-        and fleet.orchestrator follows whoever holds it."""
+        and fleet.orchestrator follows whoever holds it. `enforce_max=False`: a system swap
+        (failover) that only moves roles between agents, which must never fail."""
         f = self._fleet(c)
         cat = self._catalog(f)
         others = {a.name: list(a.roles) for a in c.execute(select(agents)) if a.name != name}
@@ -586,6 +588,8 @@ class Hive:
             role = cat.get(r)
             holders = [n for n, rs in others.items() if r in rs]
             if role is None or role.max is None or len(holders) < role.max:
+                continue
+            if not enforce_max and r != "orchestrator":
                 continue
             if r != "orchestrator":
                 raise ApiError(409, "role_full", f"role {r!r} allows at most {role.max} "
@@ -2031,15 +2035,20 @@ class Hive:
             # Swap roles: the standby becomes orchestrator, the old orchestrator takes its roles.
             new_roles = ["orchestrator"] + [r for r in s["roles"] if r in cat
                                             and not cat[r].can_code and r != "orchestrator"]
-            self._apply_roles(c, "system", name, new_roles, s["roles"])
-            # The old orchestrator takes over the standby's roles and keeps its own other ones.
+            self._apply_roles(c, "system", name, new_roles, s["roles"], enforce_max=False)
+            # The old orchestrator takes the roles the standby gave up (its coding ones) and
+            # keeps its own other ones, so every role keeps its number of holders.
             old_roles = list(dict.fromkeys(
-                [r for r in s["roles"] if r != "orchestrator"]
+                [r for r in s["roles"] if r not in new_roles]
                 + [r for r in a["roles"] if r != "orchestrator"]))
-            self._apply_roles(c, "system", orch, old_roles, a["roles"])
-            c.execute(update(tasks).where(and_(tasks.c.assignee == name,
-                                               tasks.c.state.in_(ACTIVE_TASK_STATES)))
-                      .values(assignee=None, state="open", updated=t))
+            self._apply_roles(c, "system", orch, old_roles, a["roles"], enforce_max=False)
+            # Its work goes back to the pool: started, reserved for it, or waiting for review
+            # (its leases go below, so that review could never be integrated).
+            c.execute(update(tasks).where(and_(
+                tasks.c.assignee == name,
+                tasks.c.state.in_(ACTIVE_TASK_STATES + ("open", "review"))))
+                .values(assignee=None, state="open", branch=None, reviewer=None,
+                        pending_sha=None, pending_patch="", approved=False, updated=t))
             # The orchestrator can't code or release leases: free the files it held.
             held = c.execute(select(leases).where(and_(leases.c.holder == name,
                                                        leases.c.state == "active"))).fetchall()
