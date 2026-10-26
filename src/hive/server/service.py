@@ -1810,10 +1810,8 @@ class Hive:
                 return True
             if f["orchestrator"] and f["state"] != "setup" and \
                     self._cfg(f, "orchestrator").get("standby"):
-                a = c.execute(select(agents.c.last_seen, agents.c.quota_until)
-                              .where(agents.c.name == f["orchestrator"])).first()
-                if a and ((a.last_seen and t - a.last_seen > self.failover_after)
-                          or a.quota_until > t):
+                a = c.execute(select(agents).where(agents.c.name == f["orchestrator"])).first()
+                if a and self._orchestrator_down(c, row(a), t):
                     return True
             # Scheduling normally happens on every state change; this is only a safety net.
             if t - self._last_sched >= SCHEDULE_FALLBACK_SECONDS and \
@@ -1979,6 +1977,18 @@ class Hive:
             raise ApiError(404, "no_such_archive", f"no archive {aid!r}")
         return {"ok": True}
 
+    def _orchestrator_down(self, c, a: dict, t: float) -> bool:
+        """Out of quota, or not seen for failover_after. One that never connected counts from
+        when the run started (or from its enrollment, if later)."""
+        if a["quota_until"] > t:
+            return True
+        last = a["last_seen"]
+        if not last:
+            started = c.execute(select(func.max(events.c.ts))
+                                .where(events.c.type == "fleet.started")).scalar() or 0
+            last = max(started, a["created"] or 0)
+        return bool(last) and t - last > self.failover_after
+
     def _failover(self, c, f: dict) -> None:
         orch = f["orchestrator"]
         if not orch or f["state"] == "setup":
@@ -1987,9 +1997,7 @@ class Hive:
         t = now()
         if a is None:
             return
-        down = (a["last_seen"] and t - a["last_seen"] > self.failover_after) or \
-            a["quota_until"] > t
-        if not down:
+        if not self._orchestrator_down(c, a, t):
             return
         cat = self._catalog(f)
         for name in self._cfg(f, "orchestrator").get("standby", []):
@@ -2008,6 +2016,16 @@ class Hive:
             c.execute(update(tasks).where(and_(tasks.c.assignee == name,
                                                tasks.c.state.in_(ACTIVE_TASK_STATES)))
                       .values(assignee=None, state="open", updated=t))
+            # The orchestrator can't code or release leases: free the files it held.
+            held = c.execute(select(leases).where(and_(leases.c.holder == name,
+                                                       leases.c.state == "active"))).fetchall()
+            if held:
+                c.execute(update(leases).where(leases.c.id.in_([l.id for l in held]))
+                          .values(state="revoked"))
+                self._set_fleet(c, fencing_counter=self._fleet(c)["fencing_counter"] + 1)
+                for l in held:
+                    self._emit(c, "lease.revoked", "system", "*", id=l.id, holder=name,
+                               globs=l.globs, reason="its holder became the orchestrator")
             self._set_fleet(c, orchestrator=name)
             self._emit(c, "orchestrator.failover", "system", "*", old=orch, new=name)
             c.execute(insert(status_feed).values(

@@ -395,6 +395,54 @@ def test_failover_keeps_old_orchestrators_other_roles(tmp_path):
     assert set(roles["orch"]) == {"programmer", "planner"}
 
 
+def _standby_fleet(tmp_path, running=False, **kw):
+    from hive.server.service import ADMIN as A, Actor
+    hive = create_hive(f"sqlite:///{tmp_path / 'h.db'}", tick_interval=0, offline_after=60,
+                       **kw)
+    hive.set_config(A, {"orchestrator": {"standby": ["stand"]}})
+    hive.enroll(A, "orch", "claude", ["orchestrator"])
+    hive.enroll(A, "stand", "claude", ["programmer"])
+    stand = Actor("agent", "stand", ["programmer"])
+    hive.heartbeat(stand)
+    hive.start_fleet(A, "g")
+    if running:
+        orch = Actor("agent", "orch", ["orchestrator"])
+        hive.create_task(orch, "plan", "", "code")
+        d = hive.request_decision(orch, "start_approval", "OK?")
+        hive.answer_decision(A, d["id"], "approve")
+    return hive, stand
+
+
+def test_failover_from_an_orchestrator_that_never_connected(tmp_path):
+    hive, stand = _standby_fleet(tmp_path, failover_after=0.05)
+    hive.tick(force=True)
+    assert hive.get_fleet()["orchestrator"] == "orch"   # still within the grace period
+    time.sleep(0.1)
+    hive.heartbeat(stand)
+    hive.tick(force=True)
+    assert hive.get_fleet()["orchestrator"] == "stand"
+
+
+def test_failover_revokes_the_promoted_standbys_leases(tmp_path):
+    from hive.server.service import Actor, now
+    hive, stand = _standby_fleet(tmp_path, running=True, failover_after=300)
+    orch = Actor("agent", "orch", ["orchestrator"])
+    hive.heartbeat(orch)
+    lease = hive.acquire_lease(stand, ["src/**"], 600, "coding")
+    def fencing():
+        with hive._read() as c:
+            return hive._fleet(c, lock=False)["fencing_counter"]
+    before = fencing()
+    hive.report_quota(orch, until=now() + 3600)
+    hive.tick(force=True)
+    assert hive.get_fleet()["orchestrator"] == "stand"
+    assert hive.list_leases(holder="stand") == []
+    assert fencing() > before
+    revoked = [e for e in hive.list_events(Actor("admin", "admin", []))["events"]
+               if e["type"] == "lease.revoked"]
+    assert revoked and revoked[-1]["payload"]["id"] == lease["id"]
+
+
 def test_deadlock_errors_are_retryable(env):
     """Audit M13: database deadlocks map to 503 + Retry-After like 'database is locked'."""
     import sqlite3
