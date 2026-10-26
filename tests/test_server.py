@@ -768,3 +768,58 @@ def test_reopened_task_is_free_for_any_agent(env):
     r = o.patch(f"/tasks/{t['id']}", {"state": "open", "note": "retry"}, expect=200)
     assert r["state"] == "claimed" and r["assignee"] == "prog2"
     assert r["branch"] == "hive/prog2" and r["approved"] is False
+
+
+WRITE_ROUTES = [
+    ("admin", "post", "/agents", {"name": "x1", "vendor": "claude", "roles": ["programmer"]}),
+    ("admin", "patch", "/agents/prog2", {"roles": ["programmer"]}),
+    ("admin", "put", "/config", {"integration": {"review": "off"}, "roles": {}}),
+    ("orch", "post", "/tasks", {"title": "t", "spec": "s", "kind": "code", "deps": [],
+                                "path_hints": ["src/**"], "priority": 0, "assignee": "prog1"}),
+    ("orch", "patch", "/tasks/1", {"state": "in_progress", "note": "n"}),
+    ("orch", "post", "/tasks/1/assign", {"to": "prog1"}),
+    ("prog1", "post", "/tasks/1/complete", {"result": "r"}),
+    ("orch", "post", "/tasks/1/review", {"approve": True, "notes": "n"}),
+    ("prog1", "post", "/leases", {"globs": ["src/x/**"], "ttl": 60, "reason": "r"}),
+    ("prog1", "post", "/integrate", {"sha": "a" * 40, "base_sha": "", "leases": {},
+                                     "paths": ["src/x/a.py"]}),
+    ("prog1", "post", "/integrate/confirm", {"grant": "g", "sha": "a" * 40, "paths": []}),
+    ("orch", "post", "/messages", {"body": "hi", "channel": "#general", "recipient": "prog1",
+                                   "priority": "normal"}),
+    ("orch", "post", "/decisions", {"kind": "question", "question": "q?", "options": ["a"],
+                                    "context": "c", "freeze": False}),
+    ("orch", "post", "/status", {"summary": "s", "body": "b", "level": "fyi"}),
+    ("prog1", "post", "/approvals", {"command": "rm -r out", "reason": "r", "shell": "bash"}),
+    ("orch", "post", "/reports/requests", {"target": "prog1", "about": "a"}),
+    ("prog1", "post", "/reports", {"summary": "s", "body": "b"}),
+    ("prog1", "post", "/agents/me/stream", {"run": "r", "lines": ["x"]}),
+    ("admin", "post", "/admin/archives", {"label": "l", "flush": False}),
+]
+
+
+@pytest.mark.parametrize("who,method,path,good", WRITE_ROUTES,
+                         ids=[f"{m} {p}" for _, m, p, _ in WRITE_ROUTES])
+def test_malformed_fields_are_client_errors_not_crashes(env, who, method, path, good):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    client = admin if who == "admin" else ag[who]
+    for field in good:
+        for bad in (None, 123, ["x"], {"x": 1}):
+            r = getattr(client.c, method)("/api/v1" + path, json={**good, field: bad},
+                                          headers=client.h)
+            assert r.status_code < 500, (field, bad, r.status_code, r.get_data(as_text=True))
+
+
+def test_the_reported_malformed_requests_get_400(env):
+    hive, admin, ag = env
+    assert admin.post("/agents", {"name": None, "vendor": "claude"}, expect=400)["error"] == \
+        "bad_name"
+    assert admin.post("/agents", {"name": "a1", "vendor": "claude", "roles": "programmer"},
+                      expect=400)["error"] == "bad_arg"
+    assert admin.put("/config", {"roles": ["a"]}, expect=400)["error"] == "bad_config"
+    assert admin.put("/config", {"integration": "off"}, expect=400)["error"] == "bad_config"
+    assert admin.put("/config", {"roles": {"docs": "x"}}, expect=400)["error"] == "bad_config"
+    admin.put("/config", {"integration": None}, expect=200)   # null: the section is unset
+    # null for an optional list is the same as leaving it out
+    assert admin.post("/agents", {"name": "a2", "vendor": "claude", "roles": None},
+                      expect=201)["name"] == "a2"

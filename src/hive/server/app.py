@@ -89,6 +89,33 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
             raise ApiError(400, "bad_json", "JSON object body required")
         return data
 
+    def text(b: dict, name: str, default: str = "") -> str:
+        """A string field; null means the default. Anything else answers 400."""
+        v = b.get(name)
+        if v is None:
+            return default
+        if not isinstance(v, str):
+            raise ApiError(400, "bad_arg", f"{name} must be a string")
+        return v
+
+    def opt_text(b: dict, name: str) -> str | None:
+        return text(b, name) if b.get(name) is not None else None
+
+    def strs(b: dict, name: str) -> list[str]:
+        """A list of strings; null means empty. Anything else answers 400."""
+        v = b.get(name)
+        if v is None:
+            return []
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise ApiError(400, "bad_arg", f"{name} must be a list of strings")
+        return v
+
+    def opt_flag(b: dict, name: str) -> bool | None:
+        v = b.get(name)
+        if v is not None and not isinstance(v, bool):
+            raise ApiError(400, "bad_arg", f"{name} must be true or false")
+        return v
+
     def arg_int(name: str, default: int = 0) -> int:
         try:
             return int(request.args.get(name, default))
@@ -124,8 +151,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth(admin=True)
     def enroll():
         b = body()
-        return jsonify(hive.enroll(me(), b.get("name", ""), b.get("vendor", ""),
-                                   list(b.get("roles", [])))), 201
+        return jsonify(hive.enroll(me(), text(b, "name"), text(b, "vendor"),
+                                   strs(b, "roles"))), 201
 
     @app.post(f"{api}/agents/<name>/token")
     @auth(admin=True)
@@ -140,7 +167,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.patch(f"{api}/agents/<name>")
     @auth()
     def patch_agent(name):
-        return jsonify(hive.set_roles(me(), name, list(body().get("roles", []))))
+        return jsonify(hive.set_roles(me(), name, strs(body(), "roles")))
 
     @app.delete(f"{api}/agents/<name>")
     @auth(admin=True)
@@ -151,7 +178,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth(admin=True)
     def place_agent(name):
         b = body()
-        return jsonify(hive.place_agent(me(), name, b.get("machine") or None,
+        return jsonify(hive.place_agent(me(), name, opt_text(b, "machine") or None,
                                         str(b.get("model") or ""),
                                         str(b.get("permission_mode") or "")))
 
@@ -177,8 +204,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.post(f"{api}/machines/pair")
     def pair_machine():  # the one-time code is the credential
         b = body()
-        return jsonify(hive.pair_machine(str(b.get("code", "")), str(b.get("name", "")),
-                                         str(b.get("os", "")), list(b.get("clis") or []))), 201
+        return jsonify(hive.pair_machine(text(b, "code"), text(b, "name"),
+                                         text(b, "os"), strs(b, "clis"))), 201
 
     @app.get(f"{api}/machines")
     @auth(admin=True)
@@ -194,7 +221,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth(machine=True)
     def my_placements():
         b = body()
-        return jsonify(hive.machine_placements(me(), b.get("os"), b.get("clis")))
+        return jsonify(hive.machine_placements(me(), opt_text(b, "os"),
+                                               strs(b, "clis") if "clis" in b else None))
 
     @app.post(f"{api}/machines/me/claim/<agent>")
     @auth(machine=True)
@@ -217,7 +245,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def quota():
         b = body()
         return jsonify(hive.report_quota(me(), num(b.get("until", 0), "until", float),
-                                         b.get("detail", "")))
+                                         text(b, "detail")))
 
     # ---------------------------------------------------------------- events & messages
     @app.get(f"{api}/events")
@@ -230,8 +258,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def post_message():
         b = body()
         return jsonify(hive.post_message(
-            me(), b.get("body", ""), b.get("channel", "#general"), b.get("recipient"),
-            b.get("priority", "normal"),
+            me(), text(b, "body"), text(b, "channel", "#general"), opt_text(b, "recipient"),
+            text(b, "priority", "normal"),
             num(b.get("thread_id"), "thread_id", optional=True))), 201
 
     @app.get(f"{api}/messages")
@@ -252,9 +280,9 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def create_task():
         b = body()
         return jsonify(hive.create_task(
-            me(), b.get("title", ""), b.get("spec", ""), b.get("kind", "code"),
-            nums(b.get("deps", []), "deps"), list(b.get("path_hints", [])),
-            num(b.get("priority", 0), "priority"), b.get("assignee"))), 201
+            me(), text(b, "title"), text(b, "spec"), text(b, "kind", "code"),
+            nums(b.get("deps", []), "deps"), strs(b, "path_hints"),
+            num(b.get("priority", 0), "priority"), opt_text(b, "assignee"))), 201
 
     @app.get(f"{api}/tasks")
     @auth()
@@ -270,7 +298,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth()
     def patch_task(tid):
         b = body()
-        return jsonify(hive.update_task(me(), tid, b.get("state"), b.get("note", "")))
+        return jsonify(hive.update_task(me(), tid, opt_text(b, "state"), text(b, "note")))
 
     @app.post(f"{api}/tasks/<int:tid>/claim")
     @auth()
@@ -280,44 +308,44 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.post(f"{api}/tasks/<int:tid>/assign")
     @auth()
     def assign(tid):
-        return jsonify(hive.assign_task(me(), tid, body().get("to", "")))
+        return jsonify(hive.assign_task(me(), tid, text(body(), "to")))
 
     @app.post(f"{api}/tasks/<int:tid>/handoff")
     @auth()
     def handoff(tid):
         b = body()
-        return jsonify(hive.handoff_task(me(), tid, b.get("to", ""), b.get("notes", "")))
+        return jsonify(hive.handoff_task(me(), tid, text(b, "to"), text(b, "notes")))
 
     @app.post(f"{api}/tasks/<int:tid>/complete")
     @auth()
     def complete(tid):
-        return jsonify(hive.complete_task(me(), tid, body().get("result", "")))
+        return jsonify(hive.complete_task(me(), tid, text(body(), "result")))
 
     @app.post(f"{api}/tasks/<int:tid>/cancel")
     @auth()
     def cancel(tid):
-        return jsonify(hive.cancel_task(me(), tid, body().get("reason", "")))
+        return jsonify(hive.cancel_task(me(), tid, text(body(), "reason")))
 
     @app.post(f"{api}/tasks/<int:tid>/review")
     @auth()
     def review(tid):
         b = body()
-        return jsonify(hive.review_verdict(me(), tid, bool(b.get("approve")), b.get("notes", "")))
+        return jsonify(hive.review_verdict(me(), tid, bool(b.get("approve")), text(b, "notes")))
 
     @app.post(f"{api}/stuck")
     @auth()
     def stuck():
         b = body()
         return jsonify(hive.report_stuck(me(), num(b.get("task_id"), "task_id", optional=True),
-                                         b.get("details", "")))
+                                         text(b, "details")))
 
     # ---------------------------------------------------------------- leases & integration
     @app.post(f"{api}/leases")
     @auth()
     def acquire():
         b = body()
-        return jsonify(hive.acquire_lease(me(), list(b.get("globs", [])),
-                                          num(b.get("ttl", 600), "ttl"), b.get("reason", ""),
+        return jsonify(hive.acquire_lease(me(), strs(b, "globs"),
+                                          num(b.get("ttl", 600), "ttl"), text(b, "reason"),
                                           num(b.get("task_id"), "task_id", optional=True))), 201
 
     @app.get(f"{api}/leases")
@@ -339,7 +367,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.post(f"{api}/leases/<int:lid>/force-release")
     @auth()
     def force_release(lid):
-        return jsonify(hive.force_release_lease(me(), lid, body().get("reason", "")))
+        return jsonify(hive.force_release_lease(me(), lid, text(body(), "reason")))
 
     @app.post(f"{api}/integrate")
     @auth()
@@ -347,10 +375,10 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
         b = body()
         if not isinstance(b.get("leases", {}), dict):
             raise ApiError(400, "bad_leases", "leases must be an object")
-        return jsonify(hive.integrate(me(), b.get("sha", ""), b.get("base_sha", ""),
+        return jsonify(hive.integrate(me(), text(b, "sha"), text(b, "base_sha"),
                                       dict(b.get("leases", {})),
                                       num(b.get("task_id"), "task_id", optional=True),
-                                      list(b.get("paths", []))))
+                                      strs(b, "paths")))
 
     @app.post(f"{api}/integrate/confirm")
     @auth()
@@ -358,14 +386,14 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
         b = body()
         return jsonify(hive.confirm_integration(me(), str(b.get("grant") or ""),
                                                 str(b.get("sha") or ""),
-                                                list(b.get("paths", []))))
+                                                strs(b, "paths")))
 
     @app.post(f"{api}/integrate/conflict")
     @auth()
     def integrate_conflict():
         b = body()
         return jsonify(hive.report_conflict(me(), num(b.get("task_id"), "task_id", optional=True),
-                                            b.get("detail", "")))
+                                            text(b, "detail")))
 
     # ---------------------------------------------------------------- fleet & decisions
     @app.get(f"{api}/fleet")
@@ -376,7 +404,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @app.post(f"{api}/fleet/start")
     @auth(admin=True)
     def start():
-        return jsonify(hive.start_fleet(me(), body().get("goal", "")))
+        return jsonify(hive.start_fleet(me(), text(body(), "goal")))
 
     @app.post(f"{api}/fleet/<action>")
     @auth()
@@ -390,9 +418,9 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def request_decision():
         b = body()
         return jsonify(hive.request_decision(
-            me(), b.get("kind", "question"), b.get("question", ""), list(b.get("options", [])),
-            b.get("context", ""), num(b.get("task_id"), "task_id", optional=True),
-            b.get("freeze"))), 201
+            me(), text(b, "kind", "question"), text(b, "question"), strs(b, "options"),
+            text(b, "context"), num(b.get("task_id"), "task_id", optional=True),
+            opt_flag(b, "freeze"))), 201
 
     @app.get(f"{api}/decisions")
     @auth()
@@ -403,15 +431,15 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth(admin=True)
     def answer(did):
         b = body()
-        return jsonify(hive.answer_decision(me(), did, b.get("answer", ""), b.get("note", "")))
+        return jsonify(hive.answer_decision(me(), did, text(b, "answer"), text(b, "note")))
 
     # ---------------------------------------------------------------- status feed
     @app.post(f"{api}/status")
     @auth()
     def publish_status():
         b = body()
-        return jsonify(hive.publish_status(me(), b.get("summary", ""), b.get("body", ""),
-                                           b.get("level", "fyi"))), 201
+        return jsonify(hive.publish_status(me(), text(b, "summary"), text(b, "body"),
+                                           text(b, "level", "fyi"))), 201
 
     @app.get(f"{api}/status")
     @auth()
@@ -423,7 +451,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth()
     def append_stream():
         b = body()
-        return jsonify(hive.append_stream(me(), str(b.get("run", "")), list(b.get("lines", []))))
+        return jsonify(hive.append_stream(me(), text(b, "run"), strs(b, "lines")))
 
     @app.get(f"{api}/streams")
     @auth(admin=True)
@@ -436,8 +464,8 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth()
     def request_approval():
         b = body()
-        return jsonify(hive.request_approval(me(), b.get("command", ""), b.get("reason", ""),
-                                             b.get("shell", "bash"),
+        return jsonify(hive.request_approval(me(), text(b, "command"), text(b, "reason"),
+                                             text(b, "shell", "bash"),
                                              num(b.get("task_id"), "task_id", optional=True))), 201
 
     @app.get(f"{api}/approvals")
@@ -456,7 +484,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def decide_approval(aid):
         b = body()
         return jsonify(hive.decide_approval(me(), aid, bool(b.get("approve")),
-                                            b.get("note", "")))
+                                            text(b, "note")))
 
     @app.post(f"{api}/approvals/<int:aid>/claim")
     @auth()
@@ -473,21 +501,21 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     def approval_result(aid):
         b = body()
         return jsonify(hive.approval_result(me(), aid, num(b.get("exit_code", -1), "exit_code"),
-                                            b.get("output", "")))
+                                            text(b, "output")))
 
     # ---------------------------------------------------------------- reports
     @app.post(f"{api}/reports/requests")
     @auth()
     def request_report():
         b = body()
-        return jsonify(hive.request_report(me(), b.get("target", ""), b.get("about", ""),
+        return jsonify(hive.request_report(me(), text(b, "target"), text(b, "about"),
                                            num(b.get("task_id"), "task_id", optional=True))), 201
 
     @app.post(f"{api}/reports")
     @auth()
     def submit_report():
         b = body()
-        return jsonify(hive.submit_report(me(), b.get("summary", ""), b.get("body", ""),
+        return jsonify(hive.submit_report(me(), text(b, "summary"), text(b, "body"),
                                           num(b.get("task_id"), "task_id", optional=True),
                                           num(b.get("request_id"), "request_id",
                                               optional=True))), 201
@@ -544,7 +572,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
     @auth(admin=True)
     def create_archive():
         b = body()
-        return jsonify(hive.create_archive(me(), b.get("label", ""), bool(b.get("flush")))), 201
+        return jsonify(hive.create_archive(me(), text(b, "label"), bool(b.get("flush")))), 201
 
     @app.get(f"{api}/admin/archives/<aid>")
     @auth(admin=True)
@@ -591,7 +619,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
         def create_project():
             owner()
             b = body()
-            p, token = server.create_project(str(b.get("slug", "")), str(b.get("name") or ""),
+            p, token = server.create_project(text(b, "slug"), str(b.get("name") or ""),
                                              str(b.get("db_url") or ""),
                                              str(b.get("github_token_env") or ""))
             return jsonify({"project": p, "admin_token": token}), 201

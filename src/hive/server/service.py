@@ -23,7 +23,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 from .. import globs as G
 from .. import permissions as P
 from .. import prompts
-from ..config import VENDORS
+from ..config import DEFAULT_REPO_CONFIG, VENDORS
 from ..roles import RoleSet, load_roles, resolve_kind, role_set, validate_assignment, validate_fleet
 from . import db
 from .archives import FORMAT as ARCHIVE_FORMAT, VERSION as ARCHIVE_VERSION, ArchiveStore, default_dir
@@ -201,10 +201,21 @@ class Hive:
     def set_config(self, actor: Actor, config: dict) -> dict:
         if not actor.is_admin:
             raise ApiError(403, "forbidden", "admin only")
+        if not isinstance(config, dict):
+            raise ApiError(400, "bad_config", "the config must be a table")
+        for k, v in config.items():
+            if k in DEFAULT_REPO_CONFIG and v is not None and not isinstance(v, dict):
+                raise ApiError(400, "bad_config", f"[{k}] must be a table, not "
+                                                  f"{type(v).__name__}")
+        config = {k: v for k, v in config.items() if v is not None}  # null: section unset
+        roles_cfg = config.get("roles") or {}
+        bad = [n for n, r in roles_cfg.items() if not isinstance(r, dict)]
+        if bad:
+            raise ApiError(400, "bad_config", f"[roles.{bad[0]}] must be a table")
         try:
             catalog = load_roles(config.get("roles"))
             P.build_rules(config)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, AttributeError) as e:
             raise ApiError(400, "bad_config", str(e))
         with self._write() as c:
             self._fleet(c)
