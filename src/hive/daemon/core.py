@@ -1204,8 +1204,13 @@ class Daemon:
         """The release transaction. `finish` (result, report_summary, report_body) completes
         the task and files the report as soon as the work is integrated: now, or after an
         approved review (kept until then), so the agent needs no further calls or wake."""
-        if finish is None and task_id is not None:
-            finish = self.get_finish(rt, task_id)
+        if task_id is not None:
+            # A retry (after a conflict, a failed check or a review) may leave the fields out:
+            # what was given before still counts; fields given now replace it.
+            saved = self.get_finish(rt, task_id) or {}
+            finish = {**saved, **(finish or {})}
+            if finish != saved and any(k in finish for k in FINISH_FIELDS):
+                self.put_finish(rt, task_id, finish)  # before releasing, so a failure keeps it
         res = self._release(rt, commit_message, task_id)
         if not finish or task_id is None:
             return res

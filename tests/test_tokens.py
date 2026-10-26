@@ -477,6 +477,36 @@ def test_failed_finish_after_review_does_not_pass_as_done(tmp_path):
     assert "still completing the task" in notices
 
 
+@pytest.mark.parametrize("first", ["review_pending", "rebase_conflict", "checks_failed"])
+def test_a_retried_release_without_the_fields_keeps_the_earlier_finish(tmp_path, first):
+    d, rt = make_daemon(tmp_path)
+    outcome = iter([{"status": first, "message": "not yet."},
+                    {"status": "integrated", "message": "ok"}])
+    d._release = lambda rt_, msg, tid: next(outcome)
+    d.call_tool("s1", "lease_release", {"commit_message": "feat: x", "task_id": 7,
+                                        "result": "done", "report_summary": "S",
+                                        "report_body": "B"})
+    assert d.get_finish(rt, 7)["result"] == "done"        # kept, even after a failure
+    res = d.call_tool("s1", "lease_release", {"commit_message": "feat: x (rebased)",
+                                              "task_id": 7})
+    assert res["finished"]["done"] and d.get_finish(rt, 7) is None
+    posted = [(c[1], c[2]) for c in rt.client.calls if c[0] == "POST"]
+    assert ("/tasks/7/complete", {"result": "done"}) in posted
+    assert ("/reports", {"summary": "S", "body": "B", "task_id": 7}) in posted
+
+
+def test_fields_given_on_a_retry_replace_the_earlier_ones(tmp_path):
+    d, rt = make_daemon(tmp_path)
+    outcome = iter([{"status": "checks_failed", "message": "fix it."},
+                    {"status": "integrated", "message": "ok"}])
+    d._release = lambda rt_, msg, tid: next(outcome)
+    d.release(rt, "msg", 7, {"result": "first try", "report_summary": "S"})
+    d.release(rt, "msg", 7, {"result": "second try"})
+    posted = [(c[1], c[2]) for c in rt.client.calls if c[0] == "POST"]
+    assert ("/tasks/7/complete", {"result": "second try"}) in posted
+    assert any(c[0] == "/reports" and c[1]["summary"] == "S" for c in posted)
+
+
 def test_requested_changes_discard_the_kept_finish(tmp_path):
     d, rt = make_daemon(tmp_path)
     d._release = lambda rt_, msg, tid: {"status": "review_pending", "message": "in review."}
