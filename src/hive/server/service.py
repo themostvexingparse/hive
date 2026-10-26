@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from .. import globs as G
 from .. import permissions as P
+from .. import prompts
 from ..config import VENDORS
 from ..roles import RoleSet, load_roles, resolve_kind, role_set, validate_assignment, validate_fleet
 from . import db
@@ -843,7 +844,7 @@ class Hive:
             f = self._fleet(c)
             self._require_tool(f, actor, "review_verdict")
             t = self._task(c, task_id)
-            if t["state"] != "review":
+            if t["state"] != "review" or not t["pending_sha"]:
                 raise ApiError(409, "bad_state", f"task #{task_id} is not in review")
             if t["assignee"] == actor.name:
                 raise ApiError(403, "self_review", "you cannot review your own task")
@@ -852,6 +853,10 @@ class Hive:
                               f"{'approved' if approve else 'changes requested'}] {notes}").strip()}
             if not approve:
                 vals.update(state="in_progress", pending_sha=None)
+                c.execute(update(integrations).where(and_(
+                    integrations.c.task_id == task_id,
+                    integrations.c.state == "granted"
+                )).values(state="revoked"))
             c.execute(update(tasks).where(tasks.c.id == task_id).values(**vals))
             self._emit(c, "review.verdict", actor.name, "*", id=task_id, approve=approve,
                        notes=notes[:4000], assignee=t["assignee"])
@@ -999,6 +1004,8 @@ class Hive:
                   task_id: int | None = None, paths: list[str] | None = None) -> dict:
         if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise ApiError(400, "bad_sha", "sha must be a full 40-hex commit id")
+        if base_sha and not re.fullmatch(r"[0-9a-f]{40}", str(base_sha)):
+            raise ApiError(400, "bad_sha", "base_sha must be a full 40-hex commit id")
         try:
             fences = {int(k): int(v) for k, v in (lease_fences or {}).items()}
         except (TypeError, ValueError):
@@ -1011,7 +1018,8 @@ class Hive:
             if f["state"] in ("frozen", "paused"):
                 raise ApiError(423, "fleet_" + f["state"], f"fleet is {f['state']}")
             self._expire_leases(c, f)
-            self._check_fences(c, actor, fences)
+            leased_globs = self._check_fences(c, actor, fences)
+            self._validate_paths(f, actor, leased_globs, paths)
             if self._review_mode(f) != "off":
                 if not task_id:
                     raise ApiError(400, "task_required",
@@ -1022,16 +1030,24 @@ class Hive:
                                    f"task #{task_id} is not assigned to you")
                 if t["state"] not in ("claimed", "in_progress", "review", "blocked"):
                     raise ApiError(409, "bad_state", f"task #{task_id} is {t['state']}")
-                # An approval only counts for the review it was given in.
-                if not (t["state"] == "review" and t["approved"]):
+                # An approval only counts for the exact commit sha it was given for.
+                if not (t["state"] == "review" and t["approved"] and t["pending_sha"] == sha):
                     reviewer = self._pick_reviewer(c, f, t)
                     c.execute(update(tasks).where(tasks.c.id == task_id).values(
                         state="review", pending_sha=sha, reviewer=reviewer, approved=False,
                         updated=now()))
+                    c.execute(update(integrations).where(and_(
+                        integrations.c.task_id == task_id,
+                        integrations.c.state == "granted"
+                    )).values(state="superseded"))
                     self._emit(c, "review.requested", actor.name, "*", id=task_id,
                                title=t["title"], reviewer=reviewer, sha=sha,
                                branch=t["branch"], assignee=actor.name)
                     return {"status": "review_pending", "reviewer": reviewer}
+            c.execute(update(integrations).where(and_(
+                integrations.c.agent == actor.name,
+                integrations.c.state == "granted"
+            )).values(state="superseded"))
             token = secrets.token_urlsafe(24)
             c.execute(insert(integrations).values(
                 token=token, agent=actor.name, sha=sha,
@@ -1053,11 +1069,34 @@ class Hive:
             return self.confirm_integration(actor, token, sha, paths)
         return {"status": "push_main", "main": main, "grant": token}
 
-    def _check_fences(self, c, actor: Actor, fences: dict[int, int]) -> None:
+    def _check_fences(self, c, actor: Actor, fences: dict[int, int]) -> list[str]:
+        globs: list[str] = []
         for lid, fence in fences.items():
             l = self._own_lease(c, actor, lid)
             if l["fencing"] != fence:
                 raise ApiError(409, "stale_fence", f"lease #{lid} fencing token is stale")
+            globs.extend(l["globs"])
+        return globs
+
+    def _validate_paths(self, f: dict, actor: Actor, leased_globs: list[str],
+                        paths: list[str] | None) -> None:
+        if paths is None:
+            return
+        if not isinstance(paths, (list, tuple)):
+            raise ApiError(400, "bad_path", "paths must be a list of strings")
+        allowed = leased_globs + list(self._roleset(f, actor).write_globs)
+        for p in paths:
+            if not isinstance(p, str):
+                raise ApiError(400, "bad_path", "paths must be strings")
+            try:
+                norm = G.normalize(p)
+            except ValueError as e:
+                raise ApiError(400, "bad_path", str(e))
+            if prompts.is_protected(norm) or prompts.is_protected(p):
+                raise ApiError(403, "protected_path", f"path {p!r} is a protected Hive file")
+            if not G.covered(norm, allowed):
+                raise ApiError(403, "path_not_leased",
+                               f"path {p!r} is not covered by your leases or role write_globs")
 
     def confirm_integration(self, actor: Actor, grant: str, sha: str,
                             paths: list[str] | None = None) -> dict:
@@ -1067,6 +1106,8 @@ class Hive:
             raise ApiError(400, "grant_required", "confirm requires the grant from integrate")
         with self._write() as c:
             f = self._fleet(c)
+            if f["state"] in ("frozen", "paused"):
+                raise ApiError(423, "fleet_" + f["state"], f"fleet is {f['state']}")
             g = row(c.execute(select(integrations).where(integrations.c.token == grant))
                     .first())
             if g is None or g["agent"] != actor.name:
@@ -1076,14 +1117,21 @@ class Hive:
             if g["sha"] != sha:
                 raise ApiError(409, "grant_mismatch", "grant was issued for a different commit")
             fences = {int(k): int(v) for k, v in g["leases"].items()}
-            self._check_fences(c, actor, fences)
+            leased_globs = self._check_fences(c, actor, fences)
+            self._validate_paths(f, actor, leased_globs, paths)
+            task_id = g["task_id"]
+            if task_id:
+                t = self._task(c, task_id)
+                if self._review_mode(f) != "off":
+                    if not (t["state"] == "review" and t["approved"] and t["pending_sha"] == sha):
+                        raise ApiError(409, "review_required",
+                                       "commit is no longer approved for integration")
             c.execute(update(integrations).where(integrations.c.id == g["id"])
                       .values(state="confirmed"))
             c.execute(update(leases).where(and_(leases.c.id.in_(list(fences)),
                                                 leases.c.state == "active"))
                       .values(state="released"))
             self._set_fleet(c, main_sha=sha)
-            task_id = g["task_id"]
             self._emit(c, "main.advanced", actor.name, "*", sha=sha, by=actor.name,
                        paths=(paths or [])[:500], task_id=task_id)
             if task_id:

@@ -522,3 +522,81 @@ def test_reviewers_decide_command_approvals_first_and_the_orchestrator_gets_the_
     # A reviewer's own request goes to the orchestrator: no other reviewer is there.
     c = ag["rev1"].post("/approvals", {"command": "rm -r out", "reason": "z"}, expect=201)
     assert c["sent_to"] == ["orchestrator"]
+
+
+def test_review_sha_binding_and_integrate_path_validation(env):
+    hive, admin, ag = env
+    admin.put("/config", {"integration": {"review": "orchestrator"}}, expect=200)
+    to_running(admin, ag)
+    t = ag["orch"].post("/tasks", {"title": "feat", "assignee": "prog1"}, expect=201)
+    lease = ag["prog1"].post("/leases", {"globs": ["src/**"], "task_id": t["id"]}, expect=201)
+    fences = {str(lease["id"]): lease["fencing"]}
+
+    # Manual transition to 'review' is rejected, and review_verdict before integrate is 409.
+    ag["prog1"].patch(f"/tasks/{t['id']}", {"state": "review"}, expect=400)
+    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True}, expect=409)
+
+    # Protected paths and unleased paths are rejected in integrate().
+    sha_a = "a" * 40
+    sha_b = "b" * 40
+    r = ag["prog1"].post("/integrate", {"sha": sha_a, "base_sha": "", "leases": fences,
+                                        "task_id": t["id"], "paths": [".hive/prompts/worker.md"]},
+                         expect=403)
+    assert r["error"] == "protected_path"
+    r = ag["prog1"].post("/integrate", {"sha": sha_a, "base_sha": "", "leases": fences,
+                                        "task_id": t["id"], "paths": ["docs/readme.md"]},
+                         expect=403)
+    assert r["error"] == "path_not_leased"
+    r = ag["prog1"].post("/integrate", {"sha": sha_a, "base_sha": "not-a-sha", "leases": fences,
+                                        "task_id": t["id"], "paths": ["src/a.py"]},
+                         expect=400)
+    assert r["error"] == "bad_sha"
+
+    # Submit sha_a for review and approve it.
+    res = ag["prog1"].post("/integrate", {"sha": sha_a, "base_sha": "", "leases": fences,
+                                          "task_id": t["id"], "paths": ["src/a.py"]}, expect=200)
+    assert res["status"] == "review_pending"
+    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True, "notes": "lgtm"}, expect=200)
+
+    # Submitting a different sha_b must NOT inherit sha_a's approval.
+    res_b = ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
+                                            "task_id": t["id"], "paths": ["src/a.py"]}, expect=200)
+    assert res_b["status"] == "review_pending"
+    task_now = admin.get(f"/tasks/{t['id']}")
+    assert task_now["pending_sha"] == sha_b and task_now["approved"] is False
+
+    # Re-approve sha_b, obtain grant, then verify reviewer rejection revokes the unconfirmed grant.
+    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True}, expect=200)
+    grant1 = ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
+                                             "task_id": t["id"], "paths": ["src/a.py"]},
+                              expect=200)["grant"]
+    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": False, "notes": "wait"}, expect=200)
+    ag["prog1"].post("/integrate/confirm", {"grant": grant1, "sha": sha_b, "paths": ["src/a.py"]},
+                     expect=409)
+
+    # Re-submit sha_b, approve, get grant, verify confirm_integration also checks paths & base_sha.
+    ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
+                                    "task_id": t["id"], "paths": ["src/a.py"]}, expect=200)
+    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True}, expect=200)
+    grant2 = ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
+                                             "task_id": t["id"], "paths": ["src/a.py"]},
+                              expect=200)["grant"]
+    ag["prog1"].post("/integrate/confirm", {"grant": grant2, "sha": sha_b,
+                                            "paths": [".claude/settings.json"]}, expect=403)
+    ag["prog1"].post("/integrate/confirm", {"grant": grant2, "sha": sha_b,
+                                            "paths": ["unleased/x.py"]}, expect=403)
+    ag["prog1"].post("/integrate/confirm", {"grant": grant2, "sha": sha_b,
+                                            "paths": ["src/a.py"]}, expect=200)
+    assert admin.get("/fleet")["main_sha"] == sha_b
+
+
+def test_integrate_rejects_protected_paths_under_a_wildcard_lease(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    lease = ag["prog1"].post("/leases", {"globs": ["**"]}, expect=201)
+    fences = {str(lease["id"]): lease["fencing"]}
+    for p in (".hive/prompts/worker.md", ".hive/agent/claude/hooks/hooks.json"):
+        r = ag["prog1"].post("/integrate", {"sha": "d" * 40, "base_sha": "", "leases": fences,
+                                            "paths": [p]}, expect=403)
+        assert r["error"] == "protected_path"
+
