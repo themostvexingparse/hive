@@ -646,3 +646,40 @@ def test_answering_a_decision_the_fleet_is_not_waiting_on_leaves_it_frozen(env):
     assert f["state"] == "frozen" and f["blocking_decision"] == current["id"]
     admin.post(f"/decisions/{current['id']}/answer", {"answer": "ok"}, expect=200)
     assert admin.get("/fleet")["state"] == "running"
+
+
+def test_preassigned_tasks_wait_for_their_dependencies(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    o = ag["orch"]
+    t1 = o.post("/tasks", {"title": "step 1"}, expect=201)
+    t2 = o.post("/tasks", {"title": "step 2", "deps": [t1["id"]], "assignee": "prog2"},
+                expect=201)
+    assert t2["state"] == "open" and t2["assignee"] == "prog2"   # reserved, not started
+    ag["prog1"].post(f"/tasks/{t2['id']}/claim", {}, expect=409)  # reserved for prog2
+    ag["prog2"].post(f"/tasks/{t2['id']}/claim", {}, expect=409)  # deps not done yet
+    t3 = o.post("/tasks", {"title": "step 3", "deps": [t1["id"]]}, expect=201)
+    o.post(f"/tasks/{t3['id']}/assign", {"to": "prog1"}, expect=200)
+    assert admin.get(f"/tasks/{t3['id']}")["state"] == "open"
+    # step 1 done: both are handed over.
+    who = admin.get(f"/tasks/{t1['id']}")["assignee"]
+    if not who:
+        who = "prog1"
+        ag[who].post(f"/tasks/{t1['id']}/claim", {}, expect=200)
+    ag[who].post(f"/tasks/{t1['id']}/complete", {"result": "ok"}, expect=200)
+    assert admin.get(f"/tasks/{t2['id']}")["state"] == "claimed"
+    assert admin.get(f"/tasks/{t3['id']}")["state"] == "claimed"
+
+
+def test_failed_tasks_block_their_dependents_transitively(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    o = ag["orch"]
+    t1 = o.post("/tasks", {"title": "step 1"}, expect=201)
+    t2 = o.post("/tasks", {"title": "step 2", "deps": [t1["id"]], "assignee": "prog2"},
+                expect=201)
+    t3 = o.post("/tasks", {"title": "step 3", "deps": [t2["id"]]}, expect=201)
+    t4 = o.post("/tasks", {"title": "step 4", "deps": [t3["id"]]}, expect=201)
+    o.patch(f"/tasks/{t1['id']}", {"state": "failed", "note": "broken"}, expect=200)
+    for t in (t2, t3, t4):
+        assert admin.get(f"/tasks/{t['id']}")["state"] == "blocked", t["title"]

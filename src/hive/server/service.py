@@ -723,11 +723,16 @@ class Hive:
         a = self._agent(c, to)
         if t["state"] in ("done", "cancelled"):
             raise ApiError(409, "bad_state", f"task #{task_id} is {t['state']}")
-        state = t["state"] if t["state"] == "draft" else "claimed"
+        if t["state"] == "draft":
+            state = "draft"
+        elif t["state"] == "open" and not self._deps_done(c, t["deps"]):
+            state = "open"  # reserved for `to`; _schedule() hands it over once deps are done
+        else:
+            state = "claimed"
         c.execute(update(tasks).where(tasks.c.id == task_id).values(
             assignee=to, state=state, updated=now(),
             branch=t["branch"] or f"hive/{to}"))
-        if state != "draft":
+        if state == "claimed":
             self._emit(c, "task.assigned", by, "*", id=task_id, title=t["title"],
                        assignee=to, kind=t["kind"], previous=t["assignee"])
 
@@ -739,6 +744,13 @@ class Hive:
             if t["state"] != "open" and not (t["state"] == "claimed"
                                              and t["assignee"] == actor.name):
                 raise ApiError(409, "bad_state", f"task #{task_id} is {t['state']}")
+            if t["state"] == "open" and t["assignee"] not in (None, actor.name) \
+                    and not actor.is_admin:
+                raise ApiError(409, "reserved", f"task #{task_id} is reserved for "
+                                                f"{t['assignee']}")
+            if not self._deps_done(c, t["deps"]):
+                raise ApiError(409, "deps_pending",
+                               f"task #{task_id} waits for unfinished dependencies")
             cat = self._catalog(f)
             held = self._held_roles(c)
             if resolve_kind(t["kind"], held, cat) not in actor.roles and not actor.is_admin:
@@ -775,19 +787,37 @@ class Hive:
                 self._schedule(c, f)
             return self._task(c, task_id)
 
+    def _deps_done(self, c, deps: list[int] | None) -> bool:
+        if not deps:
+            return True
+        n = c.execute(select(func.count()).select_from(tasks).where(and_(
+            tasks.c.id.in_(list(deps)), tasks.c.state == "done"))).scalar()
+        return n == len(set(deps))
+
     def _block_dependents(self, c, task_id: int, why: str) -> None:
-        """Tasks waiting on a task that will never be done can't start: block them and tell
-        the orchestrator instead of leaving them open forever."""
-        for t in c.execute(select(tasks).where(tasks.c.state.in_(("open", "draft")))).fetchall():
-            if task_id not in (t.deps or []):
-                continue
-            note = f"[system] dependency #{task_id} was {why}"
-            c.execute(update(tasks).where(tasks.c.id == t.id).values(
-                state="blocked", updated=now(), notes=(t.notes + "\n" + note).strip()))
-            self._emit(c, "task.blocked", "system", "role:orchestrator", id=t.id,
-                       title=t.title, state="blocked",
-                       note=f"dependency #{task_id} was {why}; re-plan, or remove the "
-                            "dependency and reopen it")
+        """Tasks waiting on a task that will never be done can't start: block them, and the
+        tasks waiting on those, and tell the orchestrator instead of leaving them open forever.
+        Pre-assigned tasks not started yet (claimed) are blocked too."""
+        work = [(task_id, why)]
+        while work:
+            dep, reason = work.pop(0)
+            waiting = c.execute(select(tasks).where(
+                tasks.c.state.in_(("open", "draft", "claimed")))).fetchall()
+            for t in waiting:
+                if dep not in (t.deps or []):
+                    continue
+                note = f"[system] dependency #{dep} was {reason}"
+                c.execute(update(tasks).where(tasks.c.id == t.id).values(
+                    state="blocked", updated=now(), notes=(t.notes + "\n" + note).strip()))
+                self._emit(c, "task.blocked", "system", "role:orchestrator", id=t.id,
+                           title=t.title, state="blocked",
+                           note=f"dependency #{dep} was {reason}; re-plan, or remove the "
+                                "dependency and reopen it")
+                if t.state == "claimed" and t.assignee:
+                    self._emit(c, "task.blocked", "system", f"agent:{t.assignee}", id=t.id,
+                               title=t.title, state="blocked",
+                               note=f"dependency #{dep} was {reason}; don't start it")
+                work.append((t.id, "blocked"))
 
     def handoff_task(self, actor: Actor, task_id: int, to: str, notes: str) -> dict:
         with self._write() as c:
@@ -872,6 +902,14 @@ class Hive:
         cat = self._catalog(f)
         all_tasks = [row(r) for r in c.execute(select(tasks))]
         done = {t["id"] for t in all_tasks if t["state"] == "done"}
+        # Pre-assigned tasks reserved while their dependencies ran: hand them over now.
+        for t in all_tasks:
+            if t["state"] == "open" and t["assignee"] and set(t["deps"]) <= done:
+                c.execute(update(tasks).where(tasks.c.id == t["id"])
+                          .values(state="claimed", updated=now()))
+                self._emit(c, "task.assigned", "system", "*", id=t["id"], title=t["title"],
+                           assignee=t["assignee"], kind=t["kind"], previous=None)
+                t["state"] = "claimed"
         busy = {t["assignee"] for t in all_tasks if t["state"] in ACTIVE_TASK_STATES}
         t_now = now()
         pool = [row(a) for a in c.execute(select(agents))]
@@ -1411,7 +1449,11 @@ class Hive:
     def _open_drafts(self, c, by: str) -> None:
         """Plan approved: drafts become open; pre-assigned drafts are handed to their agent."""
         for t in c.execute(select(tasks).where(tasks.c.state == "draft")).fetchall():
-            if t.assignee:
+            if t.assignee and not self._deps_done(c, t.deps):
+                # Reserved: _schedule() hands it over once its dependencies are done.
+                c.execute(update(tasks).where(tasks.c.id == t.id)
+                          .values(state="open", updated=now()))
+            elif t.assignee:
                 c.execute(update(tasks).where(tasks.c.id == t.id)
                           .values(state="claimed", updated=now()))
                 self._emit(c, "task.assigned", by, "*", id=t.id, title=t.title,
