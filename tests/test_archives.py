@@ -155,3 +155,36 @@ def test_two_archives_in_the_same_second_get_distinct_ids(env):
     a = admin.post("/admin/archives", {}, expect=201)
     b = admin.post("/admin/archives", {}, expect=201)
     assert a["id"] != b["id"] and len(admin.get("/admin/archives")) == 2
+
+
+def test_failed_github_merges_do_not_block_a_flush(env, monkeypatch):
+    import requests
+    from unittest.mock import MagicMock
+    from hive.server import service
+    hive, admin, ag = env
+    hive.github_token = "ghp_test"
+    admin.put("/config", {"repo": {"github": "org/repo", "main": "main"},
+                          "integration": {"review": "off"}}, expect=200)
+    to_running(admin, ag)
+    lease = ag["prog1"].post("/leases", {"globs": ["src/**"]}, expect=201)
+    body = {"sha": "1" * 40, "base_sha": "", "leases": {str(lease["id"]): lease["fencing"]},
+            "paths": ["src/a.py"]}
+
+    def answer(status, text=""):
+        return lambda *a, **kw: MagicMock(status_code=status, text=text)
+
+    def unreachable(*a, **kw):
+        raise requests.ConnectionError("no route to host")
+
+    for fake, status, code in ((answer(422, "not a fast forward"), 409, "not_fast_forward"),
+                               (answer(500, "oops"), 502, "github_error"),
+                               (unreachable, 502, "github_unreachable")):
+        monkeypatch.setattr(service.requests, "patch", fake)
+        assert ag["prog1"].post("/integrate", body, expect=status)["error"] == code
+        with hive._write() as c:
+            states = [r.state for r in c.execute(service.select(db.integrations.c.state))]
+        assert "granted" not in states and states[-1] == "failed"
+
+    ag["prog1"].post(f"/leases/{lease['id']}/release", {}, expect=200)
+    admin.post("/fleet/pause", {}, expect=200)
+    assert admin.post("/admin/archives", {"flush": True, "label": "run1"}, expect=201)["label"]

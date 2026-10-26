@@ -1056,18 +1056,30 @@ class Hive:
             repo = self._cfg(f, "repo")
         github, main = repo.get("github"), repo.get("main", "main")
         if github and self.github_token:
-            r = requests.patch(
-                f"https://api.github.com/repos/{github}/git/refs/heads/{main}",
-                json={"sha": sha, "force": False}, timeout=20,
-                headers={"Authorization": f"Bearer {self.github_token}",
-                         "Accept": "application/vnd.github+json"})
-            if r.status_code == 422:
-                raise ApiError(409, "not_fast_forward", "main moved; rebase and retry")
+            try:
+                r = requests.patch(
+                    f"https://api.github.com/repos/{github}/git/refs/heads/{main}",
+                    json={"sha": sha, "force": False}, timeout=20,
+                    headers={"Authorization": f"Bearer {self.github_token}",
+                             "Accept": "application/vnd.github+json"})
+            except requests.RequestException as e:
+                self._fail_grant(token)
+                raise ApiError(502, "github_unreachable", f"could not reach GitHub: {e}")
             if r.status_code >= 300:
+                # main was not updated: the grant must not count as a merge in progress.
+                self._fail_grant(token)
+                if r.status_code == 422:
+                    raise ApiError(409, "not_fast_forward", "main moved; rebase and retry")
                 raise ApiError(502, "github_error", f"GitHub returned {r.status_code}: "
                                                     f"{r.text[:300]}")
             return self.confirm_integration(actor, token, sha, paths)
         return {"status": "push_main", "main": main, "grant": token}
+
+    def _fail_grant(self, token: str) -> None:
+        with self._write() as c:
+            c.execute(update(integrations).where(and_(integrations.c.token == token,
+                                                      integrations.c.state == "granted"))
+                      .values(state="failed"))
 
     def _check_fences(self, c, actor: Actor, fences: dict[int, int]) -> list[str]:
         globs: list[str] = []
