@@ -906,3 +906,59 @@ def test_failover_with_a_role_at_its_max_and_the_standbys_tasks(tmp_path):
     assert roles["stand"] == ["orchestrator", "reviewer"]        # keeps its non-coding role
     assert set(roles["orch"]) == {"programmer", "planner"}       # no second reviewer
     assert hive.get_task(reserved["id"])["assignee"] is None     # not kept for the orchestrator
+
+
+def _idle(admin, ag, *names):
+    """Finish the start-up tasks to_running() handed out, so these agents are idle."""
+    for a in names:
+        for x in admin.get(f"/tasks?assignee={a}"):
+            if x["state"] in ("claimed", "in_progress"):
+                ag[a].post(f"/tasks/{x['id']}/complete", {"result": "ok"}, expect=200)
+
+
+def test_removing_an_agent_frees_the_tasks_reserved_for_it(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    o = ag["orch"]
+    first = o.post("/tasks", {"title": "first"}, expect=201)
+    later = o.post("/tasks", {"title": "later", "deps": [first["id"]], "assignee": "prog2"},
+                   expect=201)
+    admin.delete("/agents/prog2", expect=200)
+    t = admin.get(f"/tasks/{later['id']}")
+    assert t["state"] == "open" and t["assignee"] is None and t["branch"] is None
+
+
+def test_a_reservation_for_an_agent_that_can_no_longer_take_it_is_released(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    _idle(admin, ag, "prog1", "prog2")
+    o = ag["orch"]
+    first = o.post("/tasks", {"title": "first"}, expect=201)
+    later = o.post("/tasks", {"title": "later", "deps": [first["id"]], "assignee": "prog2"},
+                   expect=201)
+    admin.patch("/agents/prog2", {"roles": ["reviewer"]}, expect=200)   # can't code now
+    who = admin.get(f"/tasks/{first['id']}")["assignee"]
+    ag[who].post(f"/tasks/{first['id']}/complete", {"result": "ok"}, expect=200)
+    t = admin.get(f"/tasks/{later['id']}")
+    assert t["assignee"] == "prog1" and t["state"] == "claimed"
+
+
+def test_a_task_can_go_ahead_without_a_dependency_that_failed(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    _idle(admin, ag, "prog1", "prog2")
+    o = ag["orch"]
+    dep = o.post("/tasks", {"title": "dep"}, expect=201)
+    nxt = o.post("/tasks", {"title": "next", "deps": [dep["id"]]}, expect=201)
+    o.patch(f"/tasks/{dep['id']}", {"state": "cancelled", "note": "not needed"}, expect=200)
+    assert admin.get(f"/tasks/{nxt['id']}")["state"] == "blocked"
+    # Following the note's advice: assigning it goes ahead without the dependency.
+    o.post(f"/tasks/{nxt['id']}/assign", {"to": "prog1"}, expect=200)
+    assert admin.get(f"/tasks/{nxt['id']}")["state"] == "claimed"
+    # A task created on a dependency that already failed starts blocked, and reopening it
+    # lets the scheduler hand it out.
+    late = o.post("/tasks", {"title": "late", "deps": [dep["id"]], "assignee": "prog2"},
+                  expect=201)
+    assert late["state"] == "blocked" and late["assignee"] is None
+    r = o.patch(f"/tasks/{late['id']}", {"state": "open", "note": "go ahead"}, expect=200)
+    assert r["state"] == "claimed" and r["assignee"] == "prog2"

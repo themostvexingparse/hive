@@ -48,6 +48,8 @@ PRIORITIES = ("info", "normal", "high", "interrupt")
 TASK_STATES = ("draft", "open", "claimed", "in_progress", "review", "done", "blocked", "failed",
                "cancelled")
 ACTIVE_TASK_STATES = ("claimed", "in_progress", "blocked")
+# A dependency in one of these is no longer waited for (failed/cancelled: see _deps_waiting).
+SETTLED_TASK_STATES = ("done", "failed", "cancelled")
 MAX_BODY = 8192
 RATE_PER_MIN = 20
 LEASE_TTL_DEFAULT, LEASE_TTL_MAX = 600, 3600
@@ -282,7 +284,7 @@ class Hive:
                                "orchestrator role first, or end the run (dashboard → Archives)")
             requeued = [r.id for r in c.execute(select(tasks.c.id).where(and_(
                 tasks.c.assignee == name,
-                tasks.c.state.in_(ACTIVE_TASK_STATES + ("review",)))))]
+                tasks.c.state.in_(ACTIVE_TASK_STATES + ("review", "open")))))]  # open: reserved
             if requeued:
                 # Work waiting for review is lost with its leases: it starts again.
                 c.execute(update(tasks).where(tasks.c.id.in_(requeued))
@@ -724,13 +726,25 @@ class Hive:
                 raise ApiError(400, "bad_path_hints", str(e))
             state = "open" if f["state"] in ("running", "frozen", "paused") or kind == "plan" \
                 else "draft"
+            # Waiting on a task that already failed or was cancelled: blocked from the start,
+            # like the tasks waiting on it when it ended (_block_dependents).
+            failed = self._deps_failed(c, deps)
+            notes = ""
+            if failed:
+                state = "blocked"
+                notes = f"[system] dependency #{failed[0]} already failed or was cancelled"
             tid = c.execute(insert(tasks).values(
                 title=title, spec=spec, kind=kind, state=state, priority=priority,
                 deps=deps or [], assignee=None, created_by=actor.name, path_hints=hints,
-                notes="", result="", approved=False, created=now(), updated=now()
+                notes=notes, result="", approved=False, created=now(), updated=now()
             )).inserted_primary_key[0]
             self._emit(c, "task.created", actor.name, id=tid, title=title, kind=kind, state=state)
-            if assignee:
+            if failed:
+                self._emit(c, "task.blocked", "system", "role:orchestrator", id=tid, title=title,
+                           state="blocked",
+                           note=f"dependency #{failed[0]} already failed or was cancelled; "
+                                "re-plan, or assign it to go ahead without that dependency")
+            elif assignee:
                 self._assign(c, f, actor.name, tid, assignee)
             else:
                 self._schedule(c, f)
@@ -763,7 +777,7 @@ class Hive:
             raise ApiError(409, "bad_state", f"task #{task_id} is {t['state']}")
         if t["state"] == "draft":
             state = "draft"
-        elif t["state"] == "open" and not self._deps_done(c, t["deps"]):
+        elif t["state"] == "open" and self._deps_waiting(c, t["deps"]):
             state = "open"  # reserved for `to`; _schedule() hands it over once deps are done
         else:
             state = "claimed"
@@ -786,7 +800,7 @@ class Hive:
                     and not actor.is_admin:
                 raise ApiError(409, "reserved", f"task #{task_id} is reserved for "
                                                 f"{t['assignee']}")
-            if not self._deps_done(c, t["deps"]):
+            if self._deps_waiting(c, t["deps"]):
                 raise ApiError(409, "deps_pending",
                                f"task #{task_id} waits for unfinished dependencies")
             cat = self._catalog(f)
@@ -829,12 +843,20 @@ class Hive:
                 self._schedule(c, f)
             return self._task(c, task_id)
 
-    def _deps_done(self, c, deps: list[int] | None) -> bool:
+    def _deps_waiting(self, c, deps: list[int] | None) -> list[int]:
+        """The dependencies a task still waits for: those not done that can still finish. A
+        failed or cancelled one blocks its dependents when it ends (_block_dependents); a task
+        reopened or assigned after that goes ahead without it."""
         if not deps:
-            return True
-        n = c.execute(select(func.count()).select_from(tasks).where(and_(
-            tasks.c.id.in_(list(deps)), tasks.c.state == "done"))).scalar()
-        return n == len(set(deps))
+            return []
+        return [r.id for r in c.execute(select(tasks.c.id).where(and_(
+            tasks.c.id.in_(list(deps)), tasks.c.state.not_in(SETTLED_TASK_STATES))))]
+
+    def _deps_failed(self, c, deps: list[int] | None) -> list[int]:
+        if not deps:
+            return []
+        return [r.id for r in c.execute(select(tasks.c.id).where(and_(
+            tasks.c.id.in_(list(deps)), tasks.c.state.in_(("failed", "cancelled")))))]
 
     def _block_dependents(self, c, task_id: int, why: str) -> None:
         """Tasks waiting on a task that will never be done can't start: block them, and the
@@ -853,8 +875,8 @@ class Hive:
                     state="blocked", updated=now(), notes=(t.notes + "\n" + note).strip()))
                 self._emit(c, "task.blocked", "system", "role:orchestrator", id=t.id,
                            title=t.title, state="blocked",
-                           note=f"dependency #{dep} was {reason}; re-plan, or remove the "
-                                "dependency and reopen it")
+                           note=f"dependency #{dep} was {reason}; re-plan, or reopen or "
+                                "assign it to go ahead without that dependency")
                 if t.state == "claimed" and t.assignee:
                     self._emit(c, "task.blocked", "system", f"agent:{t.assignee}", id=t.id,
                                title=t.title, state="blocked",
@@ -947,21 +969,29 @@ class Hive:
             return
         cat = self._catalog(f)
         all_tasks = [row(r) for r in c.execute(select(tasks))]
-        done = {t["id"] for t in all_tasks if t["state"] == "done"}
-        # Pre-assigned tasks reserved while their dependencies ran: hand them over now.
-        for t in all_tasks:
-            if t["state"] == "open" and t["assignee"] and set(t["deps"]) <= done:
-                c.execute(update(tasks).where(tasks.c.id == t["id"])
-                          .values(state="claimed", updated=now()))
-                self._emit(c, "task.assigned", "system", "*", id=t["id"], title=t["title"],
-                           assignee=t["assignee"], kind=t["kind"], previous=None)
-                t["state"] = "claimed"
-        busy = {t["assignee"] for t in all_tasks if t["state"] in ACTIVE_TASK_STATES}
-        t_now = now()
+        settled = {t["id"] for t in all_tasks if t["state"] in SETTLED_TASK_STATES}
         pool = [row(a) for a in c.execute(select(agents))]
         held = {r for a in pool for r in a["roles"]}
+        roles_of = {a["name"]: a["roles"] for a in pool}
+        # Pre-assigned tasks reserved while their dependencies ran: hand them over now, if
+        # the agent still exists and can take the task; otherwise it is free for anyone.
+        for t in all_tasks:
+            if t["state"] != "open" or not t["assignee"] or not set(t["deps"]) <= settled:
+                continue
+            if resolve_kind(t["kind"], held, cat) not in roles_of.get(t["assignee"], []):
+                c.execute(update(tasks).where(tasks.c.id == t["id"])
+                          .values(assignee=None, branch=None, updated=now()))
+                t["assignee"] = None
+                continue
+            c.execute(update(tasks).where(tasks.c.id == t["id"])
+                      .values(state="claimed", updated=now()))
+            self._emit(c, "task.assigned", "system", "*", id=t["id"], title=t["title"],
+                       assignee=t["assignee"], kind=t["kind"], previous=None)
+            t["state"] = "claimed"
+        busy = {t["assignee"] for t in all_tasks if t["state"] in ACTIVE_TASK_STATES}
+        t_now = now()
         ready = sorted((t for t in all_tasks if t["state"] == "open" and not t["assignee"]
-                        and set(t["deps"]) <= done), key=lambda t: (-t["priority"], t["id"]))
+                        and set(t["deps"]) <= settled), key=lambda t: (-t["priority"], t["id"]))
         for t in ready:
             role = resolve_kind(t["kind"], held, cat)
             if role is None:
@@ -1504,7 +1534,7 @@ class Hive:
     def _open_drafts(self, c, by: str) -> None:
         """Plan approved: drafts become open; pre-assigned drafts are handed to their agent."""
         for t in c.execute(select(tasks).where(tasks.c.state == "draft")).fetchall():
-            if t.assignee and not self._deps_done(c, t.deps):
+            if t.assignee and self._deps_waiting(c, t.deps):
                 # Reserved: _schedule() hands it over once its dependencies are done.
                 c.execute(update(tasks).where(tasks.c.id == t.id)
                           .values(state="open", updated=now()))
