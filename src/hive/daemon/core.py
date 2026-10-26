@@ -490,9 +490,21 @@ class Daemon:
         if t == "fleet.unfrozen":
             note = f" User answer: {p.get('answer')!r}. {p.get('note') or ''}" \
                 if p.get("answer") else ""
-            if self.my_open_tasks(rt):
+            if rt.is_orchestrator:  # it has no tasks of its own, but the fleet needs it again
+                self.trigger(rt, "fleet.unfrozen", "The fleet was unfrozen"
+                             + (" (resumed)" if p.get("reason") == "resumed" else "")
+                             + "; check the fleet and continue." + note)
+            elif self.my_open_tasks(rt):
                 self.trigger(rt, "fleet.unfrozen", "The fleet was unfrozen; resume your task."
                              + note)
+            return
+        if t == "approval.requested":
+            if p.get("agent") != me:  # sent to the roles that decide it (reviewers first)
+                self.trigger(rt, "approval.requested",
+                             f"{p.get('agent')} asks to run `{p.get('command')}` "
+                             f"({p.get('shell')}) for request #{p.get('id')}"
+                             f"{': ' + p['reason'] if p.get('reason') else ''}. Decide with "
+                             f"approval_decide({p.get('id')}, approve, note).")
             return
         if t == "main.advanced":
             if p.get("by") != me:

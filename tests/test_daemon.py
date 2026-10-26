@@ -430,3 +430,42 @@ def test_in_a_session_someone_types_in_they_decide_like_any_user(tmp_path):
     assert "ask" in bash(d, rt, "git reset --hard")
     assert bash(d, rt, "ftp example.com") == {}  # unlisted: Claude Code asks
     assert not fake.rows  # no approver was asked
+
+
+def _with_roles(d, roles):
+    from hive.roles import role_set, BUILTIN_ROLES
+    rt = d.slots["s1"]
+    rt.me = {"name": "s1", "roles": roles,
+             "wake_on": list(role_set(roles, BUILTIN_ROLES).wake_on)}
+    d.my_open_tasks = lambda rt_: []
+    return rt
+
+
+@pytest.mark.parametrize("roles", [["reviewer"], ["orchestrator"]])
+def test_approvers_wake_on_approval_requests_but_not_the_requester(tmp_path, roles):
+    d = make_daemon(tmp_path)
+    rt = _with_roles(d, roles)
+    ev = {"type": "approval.requested", "actor": "dev", "seq": 1, "audience": "role:reviewer",
+          "payload": {"id": 7, "agent": "dev", "command": "git reset --hard", "shell": "bash",
+                      "reason": "clean up", "task_id": 1}}
+    d.handle_event(rt, ev)
+    [trig] = d.store.pending_triggers("s1")
+    assert trig["kind"] == "approval.requested" and "approval_decide(7" in trig["summary"]
+    d2 = make_daemon(tmp_path / "x")
+    rt2 = _with_roles(d2, roles)
+    d2.handle_event(rt2, {**ev, "payload": {**ev["payload"], "agent": "s1"}})
+    assert d2.store.pending_triggers("s1") == []
+
+
+def test_orchestrator_wakes_when_the_fleet_is_unfrozen(tmp_path):
+    d = make_daemon(tmp_path)
+    rt = _with_roles(d, ["orchestrator"])
+    d.handle_event(rt, {"type": "fleet.unfrozen", "actor": "user", "seq": 1,
+                        "payload": {"reason": "resumed"}})
+    [trig] = d.store.pending_triggers("s1")
+    assert trig["kind"] == "fleet.unfrozen" and "resumed" in trig["summary"]
+    # A worker with nothing to resume stays asleep.
+    d2 = make_daemon(tmp_path / "x")
+    rt2 = _with_roles(d2, ["programmer"])
+    d2.handle_event(rt2, {"type": "fleet.unfrozen", "actor": "user", "seq": 1, "payload": {}})
+    assert d2.store.pending_triggers("s1") == []
