@@ -308,8 +308,17 @@ _WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin",
 # PowerShell's eval: the argument is itself a command line, split and checked as one.
 _EVAL_PROGRAMS = {"invoke-expression", "iex"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
-# Environment variables that set git configuration (e.g. core.hooksPath) for one command.
-_GIT_CONFIG_ENV = re.compile(r"^GIT_CONFIG_(PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)=", re.I)
+# Environment variables that set git configuration (e.g. core.hooksPath) for one command:
+# as an assignment prefix, an export/set argument, or PowerShell's $env:NAME.
+_GIT_CONFIG_NAME = r"GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)"
+_GIT_CONFIG_ASSIGN = re.compile(rf"^{_GIT_CONFIG_NAME}=", re.I)
+_GIT_CONFIG_EXPORT = re.compile(rf"^{_GIT_CONFIG_NAME}(?:=|$)", re.I)
+_GIT_CONFIG_PS = re.compile(rf"^\$env:{_GIT_CONFIG_NAME}(?:=|$)", re.I)
+_SETTERS = {"export", "set", "setx", "declare", "typeset", "local", "readonly"}
+# A marker command for a git configuration override found in a command: no allow rule
+# matches it (so the command is never just allowed) and dangerous() flags it, while the
+# command itself is checked as usual (subcommand, push target, forbidden prefixes).
+GIT_OVERRIDE = "<git-config-override>"
 _FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
 _EXTENSIONS = (".exe", ".cmd", ".bat", ".com", ".ps1", ".sh")
 _POSIX_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
@@ -369,24 +378,38 @@ def _split(command: str, depth: int = 0) -> list[list[str]]:
     unwrapped (one entry for the shell call itself, plus its inner commands)."""
     out: list[list[str]] = []
     for words in _parts(command):
-        # GIT_CONFIG_* assignments stay: they change what git does (see dangerous()).
-        while words and ((_ASSIGN.match(words[0]) and not _GIT_CONFIG_ENV.match(words[0]))
-                         or program(words[0]) in _WRAPPERS or words[0] in ("$", "@")):
+        overrides = []  # git configuration set for this command (checked on the raw words)
+        while words and (_ASSIGN.match(words[0]) or program(words[0]) in _WRAPPERS
+                         or words[0] in ("$", "@")):
+            if _GIT_CONFIG_ASSIGN.match(words[0]):
+                overrides.append(words[0])
             words.pop(0)
             if words and words[0].lstrip("-").isdigit():  # e.g. `timeout 30 cmd`
                 words.pop(0)
         if not words:
+            if overrides:
+                out.append([GIT_OVERRIDE, *overrides])
             continue
+        if _GIT_CONFIG_PS.match(words[0]):
+            overrides.append(words[0])
+        elif program(words[0]) in _SETTERS:
+            overrides += [w for w in words[1:] if _GIT_CONFIG_EXPORT.match(w)]
         words[0] = program(words[0])
+        if words[0] == "git":
+            rest, hooks = _strip_git_globals(words[1:])
+            words = ["git", *rest]
+            overrides += hooks
+        if overrides:
+            out.append([GIT_OVERRIDE, *overrides])
         if words[0] in _EVAL_PROGRAMS:
             rest = [w for w in words[1:] if not _ps_param(w, "command")]
-            if depth >= 4:
-                out.append(words)  # too deep to check: left unmatched, so never allowed
-            elif rest:
+            if rest and depth < 4:
                 out.extend(_split(" ".join(_requote(rest)), depth + 1))
+            else:
+                # Runs text it reads from a pipe, or nesting too deep to check: kept as is,
+                # so no rule allows it and dangerous() flags it.
+                out.append(words)
             continue
-        if words[0] == "git":
-            words = ["git", *_strip_git_globals(words[1:])]
         out.append(words)
         if depth >= 4:
             continue
@@ -412,19 +435,17 @@ _GIT_VALUE_OPTS = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--con
                    "--super-prefix"}
 
 
-def _strip_git_globals(args: list[str]) -> list[str]:
-    """`git -C dir -c k=v --no-pager push …` -> `push …`, so rules see the subcommand.
-    Options overriding hooks (`-c core.hooksPath=…`) are kept, so no rule allows the command
-    and dangerous() flags it. With no subcommand (`git --version`), the options are it."""
-    i, kept = 0, []
+def _strip_git_globals(args: list[str]) -> tuple[list[str], list[str]]:
+    """`git -C dir -c k=v --no-pager push …` -> (`push …`, []), so rules see the subcommand;
+    the second list holds options overriding hooks (`-c core.hooksPath=…`). With no
+    subcommand (`git --version`), the options are the command."""
+    i, hooks = 0, []
     while i < len(args) and args[i].startswith("-"):
         step = 2 if args[i] in _GIT_VALUE_OPTS else 1
         if any("hookspath" in a.lower() for a in args[i:i + step]):
-            kept += args[i:i + step]
+            hooks += args[i:i + step]
         i += step
-    if i >= len(args) and not kept:
-        return args
-    return kept + args[i:]
+    return (args if i >= len(args) else args[i:]), hooks
 
 
 def _skips_hooks(commit_args: list[str]) -> bool:
@@ -538,8 +559,10 @@ def dangerous(command: str) -> str | None:
                 return "overrides git hooks (core.hooksPath)"
             if args[:1] == ["commit"] and _skips_hooks(args[1:]):
                 return "skips git hooks (commit --no-verify)"
-        if _GIT_CONFIG_ENV.match(prog):
-            return "overrides git configuration (GIT_CONFIG_*)"
+        if prog == GIT_OVERRIDE:
+            return "overrides git configuration or hooks (" + " ".join(args)[:200] + ")"
+        if prog in _EVAL_PROGRAMS:
+            return "runs text it reads as PowerShell code (Invoke-Expression)"
         if prog in ("chmod", "chown", "chgrp") and ({"-r", "--recursive"} & set(low)):
             return "recursive permission change"
         if prog in ("icacls", "cacls") and set(low) & {"/t", "/grant", "/deny", "/remove",

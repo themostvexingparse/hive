@@ -323,3 +323,48 @@ def test_skipping_or_redirecting_git_hooks_needs_approval():
     for cmd in ("git commit -m wip", "git commit -am wip", 'git commit -m "mention -n"',
                 "git commit -m -n", "grep -r hooksPath docs"):
         assert P.dangerous(cmd) is None, cmd
+
+
+@pytest.mark.parametrize("command", [
+    "git -c core.hooksPath=/dev/null push origin HEAD:main",
+    "git --config-env=core.hooksPath=X push origin main",
+    "git -c core.hookspath=x -C sub push --force origin main",
+])
+def test_a_hooks_override_does_not_hide_a_push_to_main(command):
+    assert P.pushes_to(command, "main")
+    assert P.dangerous(command)
+
+
+def test_a_hooks_override_does_not_hide_forbidden_or_denied_commands():
+    w = P.build_rules({"permissions": {"deny": ["git push --force"]}})["worker"]
+    assert P.matches("git -c core.hooksPath=x push --force origin feature", w["forbidden"])
+
+
+@pytest.mark.parametrize("command", [
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" git commit -m x",
+    "GIT_CONFIG_VALUE_0=/tmp/empty GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_COUNT=1 git commit",
+    r"GIT_CONFIG_VALUE_0=C:\empty GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_COUNT=1 git commit",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath; git commit -m x",
+    "$env:GIT_CONFIG_COUNT=1; git commit -m x",
+    'bash -c "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath git commit -m x"',
+])
+def test_git_config_environment_overrides_need_approval(command):
+    w = P.build_rules({})["worker"]
+    assert P.needs_approval(command, w["approval"])
+    assert not P.allowed(command, w["allow"])
+
+
+@pytest.mark.parametrize("command", ["Get-Content payload.ps1 | iex",
+                                     "echo 'Remove-Item -Recurse x' | Invoke-Expression"])
+def test_piped_invoke_expression_needs_approval(command):
+    w = P.build_rules({})["worker"]
+    assert not P.allowed(command, w["allow"])
+    assert P.dangerous(command)
+
+
+def test_ordinary_git_options_and_variables_are_unaffected():
+    w = P.build_rules({})["worker"]
+    for cmd in ("git -c user.name=x commit -m y", "git -C sub status", "FOO=1 pytest",
+                "grep -r GIT_CONFIG_COUNT docs", 'iex "git status"', "git --version"):
+        assert P.allowed(cmd, w["allow"]), cmd
+        assert P.dangerous(cmd) is None, cmd
