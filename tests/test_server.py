@@ -614,29 +614,19 @@ def test_review_sha_binding_and_integrate_path_validation(env):
     task_now = admin.get(f"/tasks/{t['id']}")
     assert task_now["pending_sha"] == sha_b and task_now["approved"] is False
 
-    # Re-approve sha_b, obtain grant, then verify reviewer rejection revokes the unconfirmed grant.
+    # Re-approve sha_b and get the grant. A late "changes requested" can't withdraw a merge
+    # that is under way (main may already hold it), and the confirm records it.
     ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True}, expect=200)
-    grant1 = ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
-                                             "task_id": t["id"], "paths": ["src/a.py"]},
-                              expect=200)["grant"]
-    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": False, "notes": "wait"}, expect=200)
-    ag["prog1"].post("/integrate/confirm", {"grant": grant1, "sha": sha_b, "paths": ["src/a.py"]},
-                     expect=409)
-
-    # Re-submit sha_b, approve, get grant, verify confirm_integration also checks paths & base_sha.
-    ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
-                                    "task_id": t["id"], "paths": ["src/a.py"]}, expect=200)
-    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True}, expect=200)
-    grant2 = ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
-                                             "task_id": t["id"], "paths": ["src/a.py"]},
-                              expect=200)["grant"]
-    ag["prog1"].post("/integrate/confirm", {"grant": grant2, "sha": sha_b,
-                                            "paths": [".claude/settings.json"]}, expect=403)
-    ag["prog1"].post("/integrate/confirm", {"grant": grant2, "sha": sha_b,
-                                            "paths": ["unleased/x.py"]}, expect=403)
-    ag["prog1"].post("/integrate/confirm", {"grant": grant2, "sha": sha_b,
-                                            "paths": ["src/a.py"]}, expect=200)
+    grant = ag["prog1"].post("/integrate", {"sha": sha_b, "base_sha": "", "leases": fences,
+                                            "task_id": t["id"], "paths": ["src/a.py"]},
+                             expect=200)["grant"]
+    r = ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": False, "notes": "wait"},
+                        expect=409)
+    assert r["error"] == "integrating"
+    ag["prog1"].post("/integrate/confirm", {"grant": grant, "sha": sha_b, "paths": ["src/a.py"]},
+                     expect=200)
     assert admin.get("/fleet")["main_sha"] == sha_b
+    assert admin.get(f"/tasks/{t['id']}")["state"] == "done"
 
 
 def test_integrate_rejects_protected_paths_under_a_wildcard_lease(env):
@@ -823,3 +813,68 @@ def test_the_reported_malformed_requests_get_400(env):
     # null for an optional list is the same as leaving it out
     assert admin.post("/agents", {"name": "a2", "vendor": "claude", "roles": None},
                       expect=201)["name"] == "a2"
+
+
+def _approved_task(admin, ag, patch="1" * 40):
+    admin.put("/config", {"integration": {"review": "orchestrator"}}, expect=200)
+    to_running(admin, ag)
+    t = ag["orch"].post("/tasks", {"title": "feat", "assignee": "prog1"}, expect=201)
+    lease = ag["prog1"].post("/leases", {"globs": ["src/**"], "task_id": t["id"]}, expect=201)
+    fences = {str(lease["id"]): lease["fencing"]}
+    body = {"sha": "a" * 40, "base_sha": "", "leases": fences, "task_id": t["id"],
+            "paths": ["src/a.py"], "patch_id": patch}
+    assert ag["prog1"].post("/integrate", body, expect=200)["status"] == "review_pending"
+    ag["orch"].post(f"/tasks/{t['id']}/review", {"approve": True}, expect=200)
+    return t, body
+
+
+def test_an_approval_survives_a_clean_rebase_onto_a_newer_main(env):
+    hive, admin, ag = env
+    t, body = _approved_task(admin, ag)
+    # main moved; the daemon rebased: a new commit id, the same change.
+    r = ag["prog1"].post("/integrate", {**body, "sha": "b" * 40}, expect=200)
+    assert r["status"] == "push_main"
+    ag["prog1"].post("/integrate/confirm", {"grant": r["grant"], "sha": "b" * 40,
+                                            "paths": ["src/a.py"]}, expect=200)
+    assert admin.get(f"/tasks/{t['id']}")["state"] == "done"
+
+
+def test_a_changed_patch_needs_a_new_review(env):
+    hive, admin, ag = env
+    t, body = _approved_task(admin, ag)
+    for change in ({"sha": "b" * 40, "patch_id": "2" * 40}, {"sha": "c" * 40, "patch_id": ""}):
+        r = ag["prog1"].post("/integrate", {**body, **change}, expect=200)
+        assert r["status"] == "review_pending", change
+    task = admin.get(f"/tasks/{t['id']}")
+    assert task["approved"] is False and task["pending_sha"] == "c" * 40
+    r = ag["prog1"].post("/integrate", {**body, "patch_id": "not-hex"}, expect=400)
+    assert r["error"] == "bad_patch_id"
+
+
+def test_a_pushed_merge_is_recorded_even_if_the_fleet_froze_meanwhile(env):
+    hive, admin, ag = env
+    t, body = _approved_task(admin, ag)
+    grant = ag["prog1"].post("/integrate", body, expect=200)["grant"]
+    # main was pushed; before the confirm arrives, the fleet freezes and the agent starts on
+    # something newer (superseding the grant).
+    ag["orch"].post("/decisions", {"kind": "stuck", "question": "?"}, expect=201)
+    ag["prog1"].post("/integrate/confirm", {"grant": grant, "sha": "a" * 40,
+                                            "paths": ["src/a.py"]}, expect=200)
+    assert admin.get("/fleet")["main_sha"] == "a" * 40
+    assert admin.get(f"/tasks/{t['id']}")["state"] == "done"
+    assert admin.get("/leases") == []
+
+
+def test_a_superseded_grant_can_still_be_confirmed(env):
+    hive, admin, ag = env
+    to_running(admin, ag)
+    l1 = ag["prog1"].post("/leases", {"globs": ["src/x/**"]}, expect=201)
+    l2 = ag["prog1"].post("/leases", {"globs": ["src/y/**"]}, expect=201)
+    g1 = ag["prog1"].post("/integrate", {"sha": "a" * 40, "leases": {str(l1["id"]): l1["fencing"]},
+                                         "paths": ["src/x/a.py"]}, expect=200)["grant"]
+    ag["prog1"].post("/integrate", {"sha": "b" * 40, "leases": {str(l2["id"]): l2["fencing"]},
+                                    "paths": ["src/y/b.py"]}, expect=200)
+    ag["prog1"].post("/integrate/confirm", {"grant": g1, "sha": "a" * 40, "paths": []},
+                     expect=200)
+    ag["prog1"].post("/integrate/confirm", {"grant": g1, "sha": "a" * 40, "paths": []},
+                     expect=409)   # but only once

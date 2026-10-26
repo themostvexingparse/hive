@@ -126,3 +126,29 @@ def test_older_databases_get_the_new_columns(tmp_path):
     hv.enroll(ADMIN_ACTOR, "dev", "claude", ["programmer"])
     assert next(a for a in hv.roster() if a["name"] == "dev")["placement"] == {
         "model": "", "permission_mode": ""}
+
+
+def test_tasks_reopened_by_an_older_version_are_freed_once(tmp_path):
+    from hive.server.db import tasks as tasks_table
+    db = tmp_path / "old.db"
+    hv = create_hive(f"sqlite:///{db}")
+    hv.engine.dispose()
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE tasks DROP COLUMN pending_patch")   # as an older version made it
+    for i, (state, assignee) in enumerate([("open", "dev"), ("claimed", "dev"), ("open", None)]):
+        con.execute("INSERT INTO tasks (id, title, spec, kind, state, priority, deps, assignee, "
+                    "created_by, path_hints, branch, approved, notes, result, created, updated)"
+                    " VALUES (?, 't', '', 'code', ?, 0, '[]', ?, 'orch', '[]', ?, 0, '', '', 0, 0)",
+                    (i + 1, state, assignee, f"hive/{assignee}" if assignee else None))
+    con.commit()
+    con.close()
+    hv = create_hive(f"sqlite:///{db}")
+    tasks = {t["id"]: t for t in hv.list_tasks()}
+    assert tasks[1]["assignee"] is None and tasks[1]["branch"] is None   # reopened: free again
+    assert tasks[2]["assignee"] == "dev"                                 # claimed: untouched
+    assert tasks[1]["pending_patch"] == ""
+    # Only once: an open task reserved by this version keeps its agent on the next start.
+    with hv._write() as c:
+        c.execute(tasks_table.update().where(tasks_table.c.id == 1).values(assignee="dev"))
+    hv.engine.dispose()
+    assert {t["id"]: t for t in create_hive(f"sqlite:///{db}").list_tasks()}[1]["assignee"] == "dev"

@@ -73,6 +73,8 @@ tasks = Table(
     Column("path_hints", JSON, nullable=False),
     Column("branch", String(128), nullable=True),
     Column("pending_sha", String(64), nullable=True),
+    # git patch id of the change in review: an approval also holds for it rebased (integrate)
+    Column("pending_patch", String(64), nullable=False, default=""),
     Column("approved", Boolean, nullable=False, default=False),
     Column("notes", Text, nullable=False, default=""),
     Column("result", Text, nullable=False, default=""),
@@ -292,9 +294,26 @@ def make_engine(url: str, sqlite_journal: str | None = None, small_pool: bool = 
             dbapi_conn.isolation_level = None
     else:
         engine = create_engine(url, pool_pre_ping=True, pool_recycle=280, **pool)
+    from sqlalchemy import inspect
+    insp = inspect(engine)
+    old_tasks = insp.has_table("tasks") and "pending_patch" not in {
+        c["name"] for c in insp.get_columns("tasks")}
     metadata.create_all(engine)
-    _add_missing_columns(engine, (machines, pairing_codes, placements))
+    _add_missing_columns(engine, (machines, pairing_codes, placements, tasks))
+    if old_tasks:
+        _free_reopened_tasks(engine)
     return engine
+
+
+def _free_reopened_tasks(engine) -> None:
+    """Once, for a database written before tasks could be reserved: such a version left the
+    assignee on tasks it reopened, and an open task with an assignee now means a reservation
+    for that agent. Those tasks are free for anyone again."""
+    from sqlalchemy import and_, update
+    with engine.begin() as c:
+        c.execute(update(tasks).where(and_(tasks.c.state == "open",
+                                           tasks.c.assignee.is_not(None)))
+                  .values(assignee=None, branch=None))
 
 
 def _add_missing_columns(engine, tables) -> None:

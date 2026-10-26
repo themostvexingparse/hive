@@ -378,7 +378,7 @@ def create_app(hive: Hive | None = None, admin_token: str | None = None, *,
         return jsonify(hive.integrate(me(), text(b, "sha"), text(b, "base_sha"),
                                       dict(b.get("leases", {})),
                                       num(b.get("task_id"), "task_id", optional=True),
-                                      strs(b, "paths")))
+                                      strs(b, "paths"), text(b, "patch_id")))
 
     @app.post(f"{api}/integrate/confirm")
     @auth()

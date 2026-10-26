@@ -41,6 +41,19 @@ def git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True) -> 
     return p.stdout.strip() if strip else p.stdout
 
 
+def patch_id(cwd: str | Path, base: str) -> str:
+    """git's id of the change on HEAD since `base`: the same after a clean rebase onto a newer
+    `base`, different as soon as any line (or binary content) of the change differs. "" if
+    there is no change or git can't tell."""
+    diff = git(cwd, "diff", "--binary", f"{base}...HEAD", check=False, strip=False)
+    if not diff.strip():
+        return ""
+    p = subprocess.run(["git", "patch-id", "--stable"], cwd=str(cwd), input=diff,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = p.stdout.split()
+    return out[0] if p.returncode == 0 and out else ""
+
+
 def ensure_worktree(repo: str | Path, worktree: str | Path, branch: str, main: str = "main") -> None:
     worktree = Path(worktree)
     if (worktree / ".git").exists():
@@ -242,7 +255,8 @@ def _integrate(wt, client, slot, leases, task_id, allowed, checks, main, retries
         git(wt, "push", "--force-with-lease", "origin", f"HEAD:refs/heads/hive/{slot}",
             check=False)
         body = {"sha": sha, "base_sha": git(wt, "rev-parse", f"origin/{main}"),
-                "leases": fences, "task_id": task_id, "paths": paths}
+                "leases": fences, "task_id": task_id, "paths": paths,
+                "patch_id": patch_id(wt, f"origin/{main}")}
         try:
             r = client.post("/integrate", body)
         except HiveError as e:

@@ -287,7 +287,7 @@ class Hive:
                 # Work waiting for review is lost with its leases: it starts again.
                 c.execute(update(tasks).where(tasks.c.id.in_(requeued))
                           .values(assignee=None, state="open", reviewer=None, pending_sha=None,
-                                  approved=False, updated=now()))
+                                  pending_patch="", approved=False, branch=None, updated=now()))
             revoked = [r.id for r in c.execute(select(leases.c.id).where(and_(
                 leases.c.holder == name, leases.c.state == "active")))]
             if revoked:
@@ -811,7 +811,7 @@ class Hive:
                 if state == "open" and t["state"] != "open":
                     # Reopened: free for any agent again, starting a fresh review.
                     vals.update(assignee=None, branch=None, reviewer=None, pending_sha=None,
-                                approved=False)
+                                pending_patch="", approved=False)
             if note:
                 vals["notes"] = (t["notes"] + f"\n[{actor.name}] {note}").strip()[-20000:]
             c.execute(update(tasks).where(tasks.c.id == task_id).values(**vals))
@@ -920,11 +920,15 @@ class Hive:
                     "notes": (t["notes"] + f"\n[review {actor.name}: "
                               f"{'approved' if approve else 'changes requested'}] {notes}").strip()}
             if not approve:
-                vals.update(state="in_progress", pending_sha=None)
-                c.execute(update(integrations).where(and_(
-                    integrations.c.task_id == task_id,
-                    integrations.c.state == "granted"
-                )).values(state="revoked"))
+                # Once a merge of the approved commit is under way, main may already hold it:
+                # changes are then reviewed and made on main, not withdrawn here.
+                if t["approved"] and c.execute(select(integrations.c.id).where(and_(
+                        integrations.c.task_id == task_id,
+                        integrations.c.sha == t["pending_sha"],
+                        integrations.c.state.in_(("granted", "superseded"))))).first():
+                    raise ApiError(409, "integrating", f"task #{task_id} is already being "
+                                   "merged into main; request the changes as a new task")
+                vals.update(state="in_progress", pending_sha=None, pending_patch="")
             c.execute(update(tasks).where(tasks.c.id == task_id).values(**vals))
             self._emit(c, "review.verdict", actor.name, "*", id=task_id, approve=approve,
                        notes=notes[:4000], assignee=t["assignee"])
@@ -1077,11 +1081,17 @@ class Hive:
     # ------------------------------------------------------------------ integration (SPEC §13)
 
     def integrate(self, actor: Actor, sha: str, base_sha: str, lease_fences: dict[str, int],
-                  task_id: int | None = None, paths: list[str] | None = None) -> dict:
+                  task_id: int | None = None, paths: list[str] | None = None,
+                  patch_id: str = "") -> dict:
+        """`patch_id`: git's id of the change (`git patch-id --stable` of its diff against
+        main). It stays the same when the daemon rebases the approved change onto a newer
+        main, so the approval still counts; any change to the content needs a new review."""
         if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise ApiError(400, "bad_sha", "sha must be a full 40-hex commit id")
         if base_sha and not re.fullmatch(r"[0-9a-f]{40}", str(base_sha)):
             raise ApiError(400, "bad_sha", "base_sha must be a full 40-hex commit id")
+        if patch_id and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", patch_id):
+            raise ApiError(400, "bad_patch_id", "patch_id must be a git patch id")
         try:
             fences = {int(k): int(v) for k, v in (lease_fences or {}).items()}
         except (TypeError, ValueError):
@@ -1106,12 +1116,18 @@ class Hive:
                                    f"task #{task_id} is not assigned to you")
                 if t["state"] not in ("claimed", "in_progress", "review", "blocked"):
                     raise ApiError(409, "bad_state", f"task #{task_id} is {t['state']}")
-                # An approval only counts for the exact commit sha it was given for.
-                if not (t["state"] == "review" and t["approved"] and t["pending_sha"] == sha):
+                # An approval counts for the commit it was given for, or for the same change
+                # rebased onto a newer main (same patch id).
+                approved = t["state"] == "review" and t["approved"] and (
+                    t["pending_sha"] == sha or (patch_id and t["pending_patch"] == patch_id))
+                if approved and t["pending_sha"] != sha:
+                    c.execute(update(tasks).where(tasks.c.id == task_id).values(
+                        pending_sha=sha, updated=now()))
+                if not approved:
                     reviewer = self._pick_reviewer(c, f, t)
                     c.execute(update(tasks).where(tasks.c.id == task_id).values(
-                        state="review", pending_sha=sha, reviewer=reviewer, approved=False,
-                        updated=now()))
+                        state="review", pending_sha=sha, pending_patch=patch_id,
+                        reviewer=reviewer, approved=False, updated=now()))
                     c.execute(update(integrations).where(and_(
                         integrations.c.task_id == task_id,
                         integrations.c.state == "granted"
@@ -1192,28 +1208,24 @@ class Hive:
         issued to this agent for this sha, while its leases are still held."""
         if not grant:
             raise ApiError(400, "grant_required", "confirm requires the grant from integrate")
+        # Only what can't change once main has moved is checked here: everything else (fleet
+        # state, paths, review) was checked by integrate() before it handed out the grant, and
+        # main may already hold the commit, which must then be recorded.
         with self._write() as c:
-            f = self._fleet(c)
-            if f["state"] in ("frozen", "paused"):
-                raise ApiError(423, "fleet_" + f["state"], f"fleet is {f['state']}")
+            self._fleet(c)
             g = row(c.execute(select(integrations).where(integrations.c.token == grant))
                     .first())
             if g is None or g["agent"] != actor.name:
                 raise ApiError(403, "bad_grant", "unknown integration grant")
-            if g["state"] != "granted":
-                raise ApiError(409, "grant_used", "this integration was already confirmed")
+            # superseded: the agent asked to integrate something newer before this push was
+            # confirmed; the push may still have happened.
+            if g["state"] not in ("granted", "superseded"):
+                raise ApiError(409, "grant_used", f"this integration grant is {g['state']}")
             if g["sha"] != sha:
                 raise ApiError(409, "grant_mismatch", "grant was issued for a different commit")
             fences = {int(k): int(v) for k, v in g["leases"].items()}
-            leased_globs = self._check_fences(c, actor, fences)
-            self._validate_paths(f, actor, leased_globs, paths)
+            self._check_fences(c, actor, fences)
             task_id = g["task_id"]
-            if task_id:
-                t = self._task(c, task_id)
-                if self._review_mode(f) != "off":
-                    if not (t["state"] == "review" and t["approved"] and t["pending_sha"] == sha):
-                        raise ApiError(409, "review_required",
-                                       "commit is no longer approved for integration")
             c.execute(update(integrations).where(integrations.c.id == g["id"])
                       .values(state="confirmed"))
             c.execute(update(leases).where(and_(leases.c.id.in_(list(fences)),
@@ -1226,7 +1238,8 @@ class Hive:
                 t = self._task(c, task_id)
                 if t["state"] == "review" and t["approved"]:
                     c.execute(update(tasks).where(tasks.c.id == task_id).values(
-                        state="done", pending_sha=None, approved=False, updated=now()))
+                        state="done", pending_sha=None, pending_patch="", approved=False,
+                        updated=now()))
                     self._emit(c, "task.completed", actor.name, "*", id=task_id,
                                title=t["title"], assignee=t["assignee"], result="integrated")
                     self._schedule(c, self._fleet(c))

@@ -276,3 +276,35 @@ def test_daemon_resends_queued_confirmations(tmp_path):
     daemon.resend_confirms(rt)                       # delivered: removed
     assert daemon.store.get("s", "pending_confirms") == []
     assert client.bodies["/integrate/confirm"] == body
+
+
+def test_patch_id_survives_a_clean_rebase_but_not_a_changed_patch(repo, tmp_path):
+    wt, origin = repo
+    git(wt, "checkout", "-b", "hive/dev")
+    (wt / "app.js").write_text("v2\n")
+    (wt / "logo.bin").write_bytes(bytes(range(256)))
+    git(wt, "add", "-A")
+    git(wt, "commit", "-m", "feature")
+    git(wt, "fetch", "origin")
+    reviewed = gitops.patch_id(wt, "origin/main")
+    assert len(reviewed) == 40
+    # Someone else moves main (another file); the daemon rebases onto it.
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    git(other, "config", "user.email", "o@example.com")
+    git(other, "config", "user.name", "o")
+    (other / "index.html").write_text("v9\n")
+    git(other, "commit", "-am", "other work")
+    git(other, "push", "origin", "main")
+    git(wt, "fetch", "origin")
+    sha_before = git(wt, "rev-parse", "HEAD")
+    git(wt, "rebase", "origin/main")
+    assert git(wt, "rev-parse", "HEAD") != sha_before
+    assert gitops.patch_id(wt, "origin/main") == reviewed
+    # Any change to the content, binary files included, is a different patch.
+    (wt / "logo.bin").write_bytes(bytes(range(255, -1, -1)))
+    git(wt, "commit", "-am", "swap the logo")
+    assert gitops.patch_id(wt, "origin/main") not in ("", reviewed)
+    # No change at all: no patch id.
+    git(wt, "checkout", "-q", "origin/main")
+    assert gitops.patch_id(wt, "origin/main") == ""
